@@ -499,15 +499,24 @@ not exist, which hid it.
 - Proof: build-logic's `ShadingHooksTest` (true-sim/build-logic#32) failed so until variants were renamed.
 - Rule: a generated file including a library's file never has that file's name: variants are `<path>.hooks.slang`.
 
-**A pipeline made without `SHADING_HOOKS` runs no hooks, silently.** The hooks run under specialization constant 3,
-0 unless a pipeline sets it; a shading path whose pipelines are made without the view's
-`IndirectInputs.Set.hooks()` (a new technique, a library's shading) compiles and draws, but without fog or the probe
-volume's light: what was a dynamic flag of the table before is now decided when the pipeline is made.
-- Proof: the code (`hooks.slang`, `indirect.slang`'s `aroundLight` and `alongViewRay`); `ShadingHooksTest` checks each
-  of the engine's shading paths.
-- Rule: every pipeline that shades (calls `indirectLightWeights`, `diffuseLightAt`, `specularLightAt` or
-  `shadeMaterial`) passes the view's hooks as constant 3, and a library's shader that shades is listed in its
-  `slang.shadingShaders` so a game's listing rebuilds it.
+**A pipeline made without the hooks' constants runs no hooks, silently.** In the first design the hooks ran under
+specialization constant 3, 0 unless a pipeline set it: a shading path whose pipelines were made without the view's
+hooks (a new technique, a library's shading) compiled and drew, but without fog or the probe volume's light.
+- Proof: the code of the first design (`hooks.slang`, `indirect.slang`'s `aroundLight` and `alongViewRay`).
+- Rule: the hooks' switches are specialization constants from 1024 (vulkan's `Specialization.REQUIRED_FROM`), and
+  `Pipeline` refuses a pipeline whose shader declares one it does not set
+  (`ShadingHooksTest.aPipelineOfAHookedShaderMadeWithoutTheHooksSwitchesIsRefused`): make shading pipelines with
+  `ShadingHookInputs.Set.specialization`, or the listing's for none.
+
+**A view's hook block written by a pass declared before its hooks could not take their buffers' addresses.** The pass
+writing each view's hook block was first the block's provider's (`ViewShadingHooks`), declared before the techniques
+adding hooks built: a hook's source taking the address of a buffer of its own (the probe volume's data) failed every
+probe volume test with "shading hooks uses probe volume without declaring it", the provider's pass not reading it.
+- Proof: `ProbeVolumeTest`, 7 of 7 failing so; passing with the pass declared when shading first takes the view's
+  hooks (`ShadingHookInputs.of`), after every technique adding one, reading their buffers and images.
+- Rule: a pass recording data that other techniques add to a request is declared once the request is complete (when
+  its readers take it), not when the request is made. Its CPU writes still come before the GPU's reads: a frame's
+  passes all record before it is submitted.
 
 ## Tests and measurements
 

@@ -535,9 +535,12 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   `EnvironmentLighting` provides it and fills the distant environment's section; probe volumes, reflection probes and
   screen-space techniques will modify it with sections of their own, shading combining screen space, probes and the
   environment in one place (screen-space reflections near, the environment far), without new variants. (Since the
-  engine split's shading hooks, decided with the user on 2026-11-06: the sections beyond the environment are the slots
-  of **shading hooks**, `[ShadingHook]` structs merged by the build into one dispatch under a specialization constant
-  per view; the core's shading knows no probe format. README, "Writing a shading hook".) `Environment`
+  engine split's shading hooks, decided with the user on 2026-11-06 and 2026-11-07: the table holds the environment
+  alone; what else lights a point, and what changes its surface or the light on its way to the camera, are **shading
+  hooks**, `[ShadingHook]` structs merged by the build into one dispatch, each under a specialization constant of its
+  own and its bit of the view's hook block (`Keys.SHADING_HOOKS`), its parameters a typed record of any size; the
+  scene's values run a hook without Java, a library's technique merges them with the frame's. The core's shading
+  knows no probe format. README, "Writing a shading hook".) `Environment`
   is an app object (a panorama or a color; intensity and rotation applied at lookup, so changing them costs nothing);
   `EnvironmentMaps` filters it into graph-persistent cubes (radiance with a mip chain, GGX levels by roughness, Charlie
   for sheen) and spherical harmonics, again only when its version changes or its images are new (`PassContext.fresh`),

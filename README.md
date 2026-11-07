@@ -1170,63 +1170,108 @@ Next (#46): light binning, shadows per light, buckets, transparency and post eff
 
 ### Writing a shading hook
 
-Indirect light and media along the view ray come from **shading hooks**: a library (global illumination, fog, aerial
-perspective, volumetrics, weather's wetness) adds to every way of shading (forward, the visibility buffer, both blended
-transparencies, ray hits, and the composites of ambient occlusion and reflections) without the core's shading naming
-it. The engine's own probe volume is one (`probes/hook.slang`); it leaves with global illumination.
+What a library adds to every way of shading without the core naming it comes through **shading hooks**: global
+illumination's light from all around, fog, aerial perspective and volumetrics along the view ray, weather's wetness or
+snow on surfaces. They run in forward shading, the visibility buffer, both blended transparencies, the sky, the
+composites of ambient occlusion and reflections, the reference path tracer's hits and the probes' hits. The engine's
+own probe volume is one (`probes/hook.slang`); it leaves with global illumination.
 
-A hook is a Slang struct marked `[ShadingHook("name")]` (`hooks.slang`) with a static function per **hook point** it
-has:
+A hook is a Slang struct marked `[ShadingHook("name")]` (`hooks.slang`) conforming to the interface of each **hook
+point** it has, the compiler checking its functions, with its parameters as a record of its own:
 
 ```slang
 import hooks;
 
-[ShadingHook("acme.fog")]
-public struct AcmeFog
+[ShadingHookParameters]                       // a Java record is generated for it, as for material records
+public struct AcmeFogParameters
 {
-    // Between the camera and the shaded point: radiance * T + L, transmittance * T
-    public static void media(ShadingPoint p, inout ViewRay ray)
-    {
-        float t = exp(-p.data.values.x * length(p.position)); // values: what the technique wrote for the view
-        ray.through(float3(t), (1 - t) * p.data.more.rgb);
-    }
+    public float density = 0.02;
+    public float3 color = float3(0.6, 0.7, 0.8);
+    public uint64_t volume;                   // addresses as Java longs: what only the frame knows
+};
 
-    // Light from all around: diffuse light covering what earlier hooks left, visibility of the environment
-    // around `direction` (specular occlusion)
-    // public static void indirect(ShadingPoint p, float3 direction, inout AroundLight light) { ... }
+[ShadingHook("acme.fog")]
+[ShadingHookAfter("acme.rain")]               // ordered after another hook, where there is one (or ShadingHookBefore)
+public struct AcmeFog : IMediaHook
+{
+    public typealias Parameters = AcmeFogParameters;
+
+    // Between the camera and the shaded point: radiance * T + L, transmittance * T
+    public static void media(ShadingPoint p, AcmeFogParameters* fog, inout ViewRay ray)
+    {
+        float t = exp(-fog[0].density * length(p.position));
+        ray.through(float3(t), (1 - t) * fog[0].color);
+    }
 };
 ```
 
-- **One dispatch, merged at build time.** build-logic's `truesim.slang` merges the hooks of a project and its libraries
-  into `shading-hooks/dispatch.slang` (from this module's `shading-hooks` templates), which `indirect.slang` includes;
-  hooks are numbered, the libraries' first. Each runs under its bit of the specialization constant `SHADING_HOOKS`
-  (constant 3), which every shading pipeline of a view is made with from the hooks its view runs
-  (`IndirectInputs.Set.hooks()`): a hook a view does not use is compiled out of its pipelines and costs nothing.
-- **Shaders rebuilt with every hook.** A library's shaders were compiled with the hooks it knew. The project adding
-  hooks names a listing, `slang { shadingHooks = "com.acme.AcmeHooks" }`: the build generates it, and variants of its
-  libraries' shading (the material types' entry points, the shaders a library lists in `slang.shadingShaders`) with
-  every hook. The app installs it before the first frame, so the device loads the variants
-  (`VulkanDevice.shaderVariants()`) wherever the engine asks for its shaders:
-  `ShadingHooks.use(device, AcmeHooks.HOOKS)`. Without one, the engine's own listing (`EngineShadingHooks`) holds.
-- **Data per view.** A hook's data is its slot of the view's indirect-light table (`IndirectLight.hooks`,
-  `HookData`: an address of data of its own and a few values, 48 bytes). Its technique modifies `Keys.INDIRECT_LIGHT`,
-  writes the slot (`ShadingHooks.slot(index)`) every frame, and turns the hook on for the view; images and buffers its
-  shading samples go into the same set:
+- **The points.** `ISurfaceHook.surface(p, params, inout Surface s)` changes a surface before it is lit, in world
+  terms (`p.world()`, `p.camera` and `p.cameraLow`: the same for every view), at rasterized pixels, the visibility
+  buffer's, ray hits and probe hits alike; never its alpha (the dispatch keeps it). A material opts out with
+  `Material.surfaceHooks(false)`, an instance with `GpuScene.Instance.surfaceHooks(false)`; a hook puts a coat of its own
+  (a water layer, `s.clearcoat`) only where `p.flags & SHADING_COAT_ALLOWED`, which `Material.hookCoat(true)` sets.
+  `IIndirectHook.indirect(p, params, q, inout AroundLight light)` gives the light from all around, asked once per point
+  for what it uses (`q.wants`, `AROUND_*`): diffuse light and how much of it the hooks cover, specular radiance along
+  `q.direction` at `q.roughness` and its coverage, the environment's visibility around the direction and the coat's,
+  the back side's diffuse light. `IMediaHook.media(p, params, inout ViewRay ray)` changes the light on its way to the
+  camera; the sky is a point at infinity (`p.path == SHADING_SKY`). `ShadingPoint` also gives the geometric normal, the
+  pixel (`NO_PIXEL` off screen) and how the point is shaded (`SHADING_RASTER`, `SHADING_COMPOSITE`, `SHADING_RAY_HIT`,
+  `SHADING_PROBE_HIT`, `SHADING_SKY`).
+- **Imports.** A hook imports `hooks`, `bindless`, `shading` and `lights`, and its own library's modules; never a
+  shading path's (`indirect`, `meshlets.*`, `surfaces`, ...): it runs inside all of them (`ShadingHookImportsTest`).
+- **One dispatch, merged at build time.** build-logic's `truesim.slang` merges the hooks of a project and its libraries,
+  in their order, into `shading-hooks/dispatch.slang` (from this module's `shading-hooks` templates), which
+  `indirect.slang` includes. Hook `i` runs under its bool specialization constant, id 1024 + `i`, and its bit of the
+  view's hook block. A pipeline must set every such constant its shader declares (vulkan's `Specialization` refuses
+  one that does not), so a shading path made without the view's hooks fails rather than silently running none.
+- **Listings, found on the classpath.** A project whose shaders declare hooks gets a listing (`<javaPackage>.<Project>
+  ShadingHooks`, or `slang { shadingHooks = ... }`) and variants of its libraries' shaders that shade, rebuilt with
+  every hook it sees. Listings are services: before a device loads its first shader it takes the one holding every
+  other one's hooks and loads its variants wherever the engine asks for the libraries' shaders
+  (`VulkanDevice.shaderVariants()`, which takes no replacement once a shader is loaded). A game seeing two hook
+  libraries that know nothing of each other lists them in its own build (`slang { shadingHooks =
+  "com.example.game.GameShadingHooks" }`); the engine fails naming that line otherwise.
+- **Values in layers, one writer.** Every hook has a record in each view's hook block (`ShadingHookBlock`, a copy per
+  frame slot, host-visible, its defaults where the view runs it not), written once a frame in one piece. What content
+  says goes in a scene component (engine-scene's `ShadingHookComponent`: the hook's values by field name, on or off,
+  saved with the scene; `ShadingHookSync` hands them to `ShadingHookValues`). A hook with values in the scene runs in
+  every view that shades, with those values, needing no Java. A library's technique adding the hook to a view
+  (`ShadingHooks.add`, modifying `Keys.SHADING_HOOKS`) is then its only writer there: its `ShadingHookSource` gets the
+  scene's record and merges what each frame knows (a graph buffer's address, regions culled to the view, time):
 
   ```java
-  int index = ShadingHooks.of(device).require("acme.fog");
-  Buffer table = g.modify(Keys.INDIRECT_LIGHT);
-  g.pass("fog").write(table, BufferAccess.TRANSFER_DST).record(ctx -> /* updateBuffer of its slot */);
-  g.request(new IndirectInputs(g.view())).hook(index).sample(fogVolume);
+  public List<Key<?>> modifies() { return List.of(Keys.SHADING_HOOKS); }   // built before the view's shading
+  public void build(GraphBuilder g) {
+      Buffer volume = ...;
+      ShadingHooks.of(device).add(g, "acme.fog", new ShadingHookSource() {
+          public int bytes() { return AcmeFogParameters.BYTES; }
+          public boolean active() { return enabled; }                       // its bit, frame by frame
+          public void write(PassContext ctx, ShadingHookParameters authored, MemorySegment into, long offset) {
+              ((AcmeFogParameters) authored).withVolume(ctx.address(volume)).write(into, offset);
+          }
+      }).read(volume);                                                      // shading reads it
+  }
   ```
-- A view without an indirect-light table (no `EnvironmentLighting`) is lit by the constant sky and runs no hooks.
-- Media apply to shaded surfaces (not the sky background) and scale the surface outputs' reflectance and diffuse
-  weight by their transmittance, so reflections and global illumination replacing those terms later stay behind the
-  fog. The reference path tracer runs indirect hooks at its hits, not media.
+- **Compiled in, switched by bits.** A view's pipelines are made with the hooks it runs (`render.shadingHooks.specialize`
+  `VIEW`, the default) or with every hook any view of the device has run (`UNION`: one set of pipelines for all views;
+  `ShadingHooksBenchmark` measures what a view pays for hooks it runs not). Either way a hook turns on and off from frame
+  to frame by its bit (`ShadingHookSource.active`, `ShadingHookValues.on`), with no new pipelines or graph; a hook added
+  or removed rebuilds the graph, and pipelines made ahead are made for every set in use.
+- **Glass and the sky.** The scene seen through a transmissive surface came through the media already: shading takes
+  the media once for it, less the light they add in front of the glass (`(own) * T + L + through * (1 - F) * (behind -
+  L)`). The sky background takes the media as a point at infinity.
+- **Known approximations.** The reference path tracer runs surface hooks at its hits but no media: its images are
+  unfogged. Screen-space reflections and ambient occlusion's bounce take the color of already fogged pixels, so what
+  they add is fogged once more, slightly, where the media are thick. A probe volume's hits read its anchor view's hooks
+  (surface hooks are the same in every view) with its own record for the probe hook: its further bounces come from
+  itself.
 
 `ShadingHooksTest` (the test sources' `test/hooks/*.slang`, merged with the engine's into `TestEngineShadingHooks`)
-draws through a media hook and an indirect hook on every way of shading and geometry path, and checks that a hook whose
-slot is written but which the view does not run leaves the image the same, pixel for pixel.
+draws through a media, an indirect and a surface hook on every way of shading and geometry path; checks that a hook
+compiled in but off, or made in only by the union, leaves the image the same, pixel for pixel, and turns on and off
+without a rebuild; runs a hook from the scene's values alone and merged by a technique; fogs glass once and the sky;
+leaves alpha, opted-out materials and instances alone and coats only where allowed. `ProbeVolumeTest` checks a surface
+hook at the probes' hits (the white furnace with its walls tinted).
 
 ### Transparency
 

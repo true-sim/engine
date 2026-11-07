@@ -26,10 +26,11 @@ import java.util.Objects;
  * RadianceCascades} made of its scene, lights, environment and anchor, sampled the same way) diffuse light replaces the
  * environment's spherical harmonics and its sky visibility dims the environment's reflections, where the volume
  * reaches; elsewhere the environment lights as before. Shading samples it through the probe volume's shading hook
- * ({@link ProbeVolume#HOOK}, probes/hook.slang), which this technique turns on for the view and whose slot of the
- * view's table it writes: every shading path running the view's hooks (opaque on both shading techniques, blended and
- * transmissive surfaces, AO, reflections) gets it, and the core's shading knows no probe format. It modifies the view's {@link Keys#SHADING_HOOKS} (an
- * {@link EnvironmentLighting} of the view provides it). Views given equal volumes (a headset's eyes, design D7) share
+ * ({@link ProbeVolume#HOOK}, probes/hook.slang), which this technique adds to the view ({@link ShadingHooks#add}), its
+ * record the view's camera from the volume's origin: every shading path running the view's hooks (opaque on both
+ * shading techniques, blended and transmissive surfaces, AO, reflections) gets it, and the core's shading knows no
+ * probe format. It modifies the view's {@link Keys#SHADING_HOOKS}; an {@link EnvironmentLighting} of the view lights
+ * what the volume does not reach. Views given equal volumes (a headset's eyes, design D7) share
  * one: the volume is updated once a frame. Its tunables are the probes kind's ({@link Probes}, {@code
  * render.gi.probes.*}), which the volume reads.
  *
