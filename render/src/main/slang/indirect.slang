@@ -21,7 +21,9 @@ public struct IndirectLight
     public uint specularMips;
     public uint sheenMips;
     public float intensity;        // the environment's brightness
-    public uint pad;
+    public float missRoughness;    // a probe volume's own table: the GGX lobe (perceptual roughness) its rays that meet
+                                   // nothing take the environment through, as wide as the directions each ray stands
+                                   // for; 0 elsewhere (the ray's direction alone)
     public float4 rotation;        // a unit quaternion from the world to the environment's frame
     public float sh[27];           // diffuse light (irradiance / pi): 9 spherical harmonics, rgb each
     public uint pad1;

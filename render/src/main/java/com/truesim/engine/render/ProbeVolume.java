@@ -57,7 +57,8 @@ import org.lwjgl.system.MemoryStack;
  *   path tracer's wavefront ({@link ReferencePathTracer}, its probe mode): hits sorted by shading bin, each bin shaded
  *   by its material type's hit entry point with the same BRDF, its lights through the world light grid
  *   ({@link WorldLights}: the sun, punctual lights, the lights the GPU writes) with shadow rays, emission, the
- *   environment where rays meet nothing, and the volume's own light of the frame before at the hit: infinite bounces,
+ *   environment where rays meet nothing (through a lobe as wide as the directions each ray stands for,
+ *   {@link #SKY_FOOTPRINT}), and the volume's own light of the frame before at the hit: infinite bounces,
  *   one frame per further bounce.
  *   <li><b>Lag bounded (design D3):</b> no added latency (this frame's rays, this frame's image). A probe's history
  *   holds at most {@link #MAX_FRAMES} updates (a still scene's lag); probes near an instance that moved, changed or was
@@ -157,11 +158,23 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
      */
     public static final Setting<Boolean> ASYNC = ProbeVolumeLighting.PROBES.setting("async");
 
+    /**
+     * How wide a lobe a probe ray that meets nothing takes the environment through, of the solid angle each of
+     * the turned rays stands for (4 pi over their count): the environment's GGX-prefiltered level of that width.
+     * A small bright source in the environment (a sun in the sky) then reaches every update by its share, not by
+     * whether a ray happened to meet it that frame (every probe turns its rays the same way, so every probe met
+     * it in the same frames: the volume's light jumped for those frames). 2 by default: a sun 10 degrees across
+     * changed a floor's light from frame to frame by up to 0.3 %, 9 % at 1 and 450 to 660 % along the rays alone
+     * (0); its mean at 1, 2 and 4 within 3 % ({@code
+     * ProbeVolumeTest.aSmallBrightSunInTheSkyLightsEveryFrameAlikeNotInJumps}, RX 9070 XT).
+     */
+    public static final Setting<Float> SKY_FOOTPRINT = ProbeVolumeLighting.PROBES.setting("skyFootprint");
+
     /** Its settings: the probes kind's tunables ({@link ProbeVolumeLighting.Probes}). */
     public static final List<Setting<?>> ALL = List.of(ASYNC, ITERATIONS, CASCADES, PROBES, PROBES_UP, SPACING, RAYS,
         FIXED_RAYS, BUDGET,
         LAYERS, NORMAL_BIAS, VIEW_BIAS, BLEND, DEPTH_RANGE, RELOCATE, CLASSIFY, MAX_FRAMES, ADAPTIVE, SENSITIVITY,
-        DRIFT, INVALIDATE, LIGHT_MARGIN, INSTANCE_MARGIN, FRESH);
+        DRIFT, INVALIDATE, LIGHT_MARGIN, INSTANCE_MARGIN, FRESH, SKY_FOOTPRINT);
 
     static final Format IRRADIANCE_FORMAT = Format.R16G16B16A16_SFLOAT;
     static final Format DEPTH_FORMAT = Format.R16G16_SFLOAT;
@@ -606,6 +619,8 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 memPutInt(t + IndirectLightLayout.SPECULAR_MIPS, specularMips);
                 memPutInt(t + IndirectLightLayout.SHEEN_MIPS, sheenMips);
                 memPutFloat(t + IndirectLightLayout.INTENSITY, environment.intensity());
+                memPutFloat(t + IndirectLightLayout.MISS_ROUGHNESS, missRoughness(settings.get(SKY_FOOTPRINT),
+                    rays - fixed));
                 for (int i = 0; i < 4; i++) {
                     memPutFloat(t + IndirectLightLayout.ROTATION + 4L * i, environment.toEnvironment(i));
                 }
@@ -693,6 +708,19 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 (float) (b * Maths.sin(2 * Math.PI * u3)), (float) (b * Maths.cos(2 * Math.PI * u3)));
             return push;
         }
+    }
+
+    /**
+     * The perceptual roughness of the GGX lobe as wide as {@code footprint} times the solid angle each of {@code turned}
+     * rays stands for (4 pi / turned): a narrow GGX lobe of alpha (roughness squared) reflects into a cone of about
+     * 2 alpha radians, pi (2 alpha)^2 steradians. 0 for no footprint.
+     */
+    static float missRoughness(float footprint, int turned) {
+        if (footprint <= 0 || turned <= 0) {
+            return 0;
+        }
+        double alpha = Math.sqrt(footprint / (double) turned);
+        return (float) Math.min(1, Math.sqrt(alpha));
     }
 
     /** SplitMix64's mixing of {@code z}. */

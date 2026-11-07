@@ -477,6 +477,29 @@ at 0.0018.
 - Rule: a statistic that decides to drop history is zero-mean under noise alone, and is tested against its measured
   noise, not a fixed fraction; check a still scene's noise after adding one.
 
+**Probe rays sampling a small bright sun along their directions alone made the whole volume flash.** A probe ray that
+met nothing took the environment's cube at level 0, along its direction alone; every probe turns its rays by the same
+rotation in a frame. effects-particles' snowfall film (a sky panorama holding a sun disc 1.2 degrees in radius at 30,
+the sky at most 1) flashed in 9 of 900 frames, both views alike: its whole-frame mean luma up by 4 to 11 of 255 for one
+frame (71, 92, 188, 470, 494, 583, 588, 848, 895), the volume's mean irradiance in all three cascades up 24 % at frame
+71 and back the next, the probes restarting no more than in other frames (no directional light or environment change).
+Those are exactly the 9 frames in which one of the 96 turned rays of the frame's rotation came within 1.3 degrees of the
+sun (0.21 to 1.25 degrees; the nearest of the other 891 frames 1.36): one ray of every probe met it at once, and a probe
+whose history restarted (a flickering light's reach, the adaptive test) took that frame's estimate whole. The sun is
+light every frame, not one in a hundred: taking the environment through its GGX-prefiltered level as wide as the
+directions each ray stands for, twice (`render.gi.probes.skyFootprint`, 2), removed every flash: in both views the
+largest whole-frame second difference of the mean luma fell from 11.15 to 0.64 of 255, and over the film's first 120
+frames cascade 0's mean irradiance stood off its neighbours' by 0.008 at most, from 0.061.
+- Proof: `ProbeVolumeTest.aSmallBrightSunInTheSkyLightsEveryFrameAlikeNotInJumps` (a floor under a sun 10 degrees
+  across: a frame's light off its neighbours' by 450 to 660 % along the rays alone, at most 0.3 % through the
+  footprint); the film's frames and the volume's states and irradiance read back each frame, before and after
+  (true-sim/engine, GI flash).
+- Observed in the same film, not traced further: 560 of cascade 0's 2,048 probes restarted their histories in every one
+  of the first 120 frames; the fire's light, which flickers, changes every frame.
+- Rule: a Monte Carlo estimate whose random numbers every pixel or probe shares turns its noise into whole-image
+  flashes; a distant source is taken through a filtered look-up as wide as each sample's share, and a test puts a small
+  bright source where the samples can miss it.
+
 **A radiance cascade's interval was continued by probes whose own intervals start across a wall.** Merging, a
 direction whose ray met nothing within its interval took the next cascade's light around the probe (eight probes,
 trilinear), as in 2D. Those probes' intervals start where this one's ends only along the same line from the same
