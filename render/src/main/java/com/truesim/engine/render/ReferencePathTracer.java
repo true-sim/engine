@@ -191,6 +191,7 @@ public final class ReferencePathTracer implements Technique {
         WorldLights.Grid world = worldLights != null && g.setting(LIGHTS) == Lighting.GRID
             ? g.request(new WorldLights(worldLights, view.camera())) : null;
         IndirectInputs.Set indirect = IndirectInputs.of(g);
+        ShadingHookInputs.Set hooks = ShadingHookInputs.of(g, view.view()); // surface hooks at its hits
         Materials materials = renderer.scene().materials();
         int bins = materials.binCount();
         Pipeline[] shade = new Pipeline[bins];
@@ -198,7 +199,7 @@ public final class ReferencePathTracer implements Technique {
             MaterialType type = materials.binType(bin);
             if (type.hitShader() != null) {
                 shade[bin] = g.computeProgram(type.hitShader(), type.hitEntry(), PathPush.BYTES,
-                    (indirect == null ? ShadingHooks.Mask.NONE : indirect.hooks()).constants(materials.binFeatures(bin)));
+                    hooks.specialization(materials.binFeatures(bin)));
             }
         }
         Pipeline single = singleShader == null ? null
@@ -303,6 +304,7 @@ public final class ReferencePathTracer implements Technique {
             if (world != null) {
                 world.readBy(shadePass);
             }
+            hooks.readBy(shadePass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
             if (indirect != null) {
                 indirect.readBy(shadePass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
             }

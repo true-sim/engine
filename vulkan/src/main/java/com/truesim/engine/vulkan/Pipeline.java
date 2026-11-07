@@ -118,6 +118,19 @@ public final class Pipeline implements AutoCloseable {
      */
     public static Pipeline compute(VulkanDevice device, ShaderModule module, String entry, int pushBytes,
         int... constants) {
+        return compute(device, module, entry, pushBytes, Specialization.of(constants));
+    }
+
+    /**
+     * A compute pipeline running {@code entry} of {@code module}, with {@code pushBytes} of push constants and its
+     * specialization constants {@code constants}, by id.
+     *
+     * @throws IllegalArgumentException where the module declares a constant from {@link Specialization#REQUIRED_FROM}
+     *     that {@code constants} does not set
+     */
+    public static Pipeline compute(VulkanDevice device, ShaderModule module, String entry, int pushBytes,
+        Specialization constants) {
+        constants.check(module, entry);
         try (MemoryStack stack = stackPush()) {
             long layout = layoutFor(device, pushBytes);
             VkComputePipelineCreateInfo.Buffer info = VkComputePipelineCreateInfo.calloc(1, stack)
@@ -128,14 +141,8 @@ public final class Pipeline implements AutoCloseable {
                 .stage(VK_SHADER_STAGE_COMPUTE_BIT)
                 .module(module.handle())
                 .pName(stack.UTF8(entry));
-            if (constants.length > 0) {
-                VkSpecializationMapEntry.Buffer entries = VkSpecializationMapEntry.calloc(constants.length, stack);
-                ByteBuffer data = stack.malloc(4 * constants.length);
-                for (int i = 0; i < constants.length; i++) {
-                    entries.get(i).constantID(i).offset(4 * i).size(4);
-                    data.putInt(4 * i, constants[i]);
-                }
-                info.stage().pSpecializationInfo(VkSpecializationInfo.calloc(stack).pMapEntries(entries).pData(data));
+            if (constants.size() > 0) {
+                info.stage().pSpecializationInfo(specialization(constants, stack));
             }
             LongBuffer pipeline = stack.mallocLong(1);
             long cache = device.pipelineCache().handle();
@@ -143,6 +150,18 @@ public final class Pipeline implements AutoCloseable {
                 "Could not create the compute pipeline " + entry + " of " + module.name());
             return new Pipeline(device, pipeline.get(0), layout, VK_PIPELINE_BIND_POINT_COMPUTE, pushBytes);
         }
+    }
+
+    /** {@code constants} as Vulkan's specialization info, on {@code stack}. */
+    private static VkSpecializationInfo specialization(Specialization constants, MemoryStack stack) {
+        int n = constants.size();
+        VkSpecializationMapEntry.Buffer entries = VkSpecializationMapEntry.calloc(n, stack);
+        ByteBuffer data = stack.malloc(4 * n);
+        for (int i = 0; i < n; i++) {
+            entries.get(i).constantID(constants.id(i)).offset(4 * i).size(4);
+            data.putInt(4 * i, constants.value(i));
+        }
+        return VkSpecializationInfo.calloc(stack).pMapEntries(entries).pData(data);
     }
 
     /** Starts describing a graphics pipeline. */
@@ -225,7 +244,7 @@ public final class Pipeline implements AutoCloseable {
         private int stencilCompare;
         private int stencilPass = VK_STENCIL_OP_KEEP;
         private int stencilReference;
-        private int[] constants = new int[0];
+        private Specialization constants = Specialization.NONE;
 
         private Graphics(VulkanDevice device) {
             this.device = device;
@@ -333,7 +352,13 @@ public final class Pipeline implements AutoCloseable {
          * {@link Pipeline#compute(VulkanDevice, ShaderModule, String, int, int...)}'s.
          */
         public Graphics constants(int... values) {
-            this.constants = values.clone();
+            this.constants = Specialization.of(values);
+            return this;
+        }
+
+        /** Sets its specialization constants to {@code constants}, by id, in every stage. */
+        public Graphics constants(Specialization constants) {
+            this.constants = java.util.Objects.requireNonNull(constants, "constants");
             return this;
         }
 
@@ -353,15 +378,11 @@ public final class Pipeline implements AutoCloseable {
                         .module(stage.module.handle())
                         .pName(stack.UTF8(stage.entry));
                 }
-                if (constants.length > 0) {
-                    VkSpecializationMapEntry.Buffer entries = VkSpecializationMapEntry.calloc(constants.length, stack);
-                    ByteBuffer data = stack.malloc(4 * constants.length);
-                    for (int i = 0; i < constants.length; i++) {
-                        entries.get(i).constantID(i).offset(4 * i).size(4);
-                        data.putInt(4 * i, constants[i]);
-                    }
-                    VkSpecializationInfo specialization = VkSpecializationInfo.calloc(stack).pMapEntries(entries)
-                        .pData(data);
+                for (Stage stage : stages) {
+                    constants.check(stage.module, stage.entry);
+                }
+                if (constants.size() > 0) {
+                    VkSpecializationInfo specialization = specialization(constants, stack);
                     for (int i = 0; i < stages.size(); i++) {
                         shaderStages.get(i).pSpecializationInfo(specialization);
                     }

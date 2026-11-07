@@ -183,7 +183,7 @@ final class RasterPipelines implements AutoCloseable {
      */
     @AllowAllocation("building the graph, when it changes")
     ShadingPipelines.Key forwardKey(MaterialType type, int features, int bin, boolean meshShading, int target,
-        ShadingHooks.Mask hooks) {
+        ShadingHooks.Set hooks) {
         boolean lean = meshShading && slimMeshes;
         boolean weighted = target == ShadingPipelines.WEIGHTED;
         boolean surfaces = target == ShadingPipelines.COLOR_SURFACES;
@@ -205,7 +205,7 @@ final class RasterPipelines implements AutoCloseable {
     final class Typed {
         private final boolean surfaces; // the opaque bins' pipelines write the surface outputs too
         private final boolean opaque;   // false: the blended bin's pipelines only (a transparency pass's)
-        private final ShadingHooks.Mask hooks; // the shading hooks the view runs (SHADING_HOOKS_<n>)
+        private final ShadingHooks.Set hooks; // the shading hooks the view runs (SHADING_HOOKS_<n>)
         private final MaterialType[] types;
         private final int[] features;
         private final int[] rasters;
@@ -216,7 +216,7 @@ final class RasterPipelines implements AutoCloseable {
 
         @AllowAllocation("building the graph, when it changes")
         private Typed(Materials materials, boolean meshShading, boolean surfaces, boolean opaque,
-            ShadingHooks.Mask hooks) {
+            ShadingHooks.Set hooks) {
             this.surfaces = surfaces;
             this.hooks = hooks;
             this.opaque = opaque;
@@ -332,7 +332,7 @@ final class RasterPipelines implements AutoCloseable {
         return new ShadingPipelines.Key(geometryShader, geometryEntry, meshShading, fragmentShader, fragmentEntry, 0,
             type == null ? 0 : type.geometry(), bin == BIN_OPAQUE && !shadow ? ShadingPipelines.CULL_BACK
             : ShadingPipelines.DOUBLE_SIDED, depth ? ShadingPipelines.DEPTH : ShadingPipelines.IDS, DRAW_PUSH,
-            ShadingHooks.Mask.NONE);
+            ShadingHooks.Set.NONE);
     }
 
     /**
@@ -418,7 +418,7 @@ final class RasterPipelines implements AutoCloseable {
     /** The typed pipelines of {@code materials}' shading bins, as they are now (made where they are not yet). */
     @AllowAllocation("building the graph, when it changes")
     Typed typed(Materials materials, boolean meshShading) {
-        return new Typed(materials, meshShading, false, true, ShadingHooks.Mask.NONE);
+        return new Typed(materials, meshShading, false, true, ShadingHooks.Set.NONE);
     }
 
     /**
@@ -428,7 +428,7 @@ final class RasterPipelines implements AutoCloseable {
      */
     @AllowAllocation("building the graph, when it changes")
     Typed typed(Materials materials, boolean meshShading, boolean surfaces, boolean opaque,
-        ShadingHooks.Mask hooks) {
+        ShadingHooks.Set hooks) {
         return new Typed(materials, meshShading, surfaces, opaque, hooks);
     }
 

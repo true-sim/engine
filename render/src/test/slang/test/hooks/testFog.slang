@@ -12,12 +12,12 @@ public struct TestFogParameters
 };
 
 [ShadingHook("test.fog")]
-public struct TestFog
+public struct TestFog : IMediaHook
 {
     public typealias Parameters = TestFogParameters;
 
-    public static void media(ShadingPoint p, TestFogParameters fog, inout ViewRay ray)
+    public static void media(ShadingPoint p, TestFogParameters* fog, inout ViewRay ray)
     {
-        ray.through(fog.transmittance, fog.light);
+        ray.through(fog[0].transmittance, fog[0].light);
     }
 };

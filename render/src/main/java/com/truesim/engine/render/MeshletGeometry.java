@@ -53,7 +53,7 @@ public final class MeshletGeometry implements GeometryProvider {
             // Shaded by type, from lists split by shading bin as culled: the view's color, or the blended bin a
             // visibility buffer's view draws shaded after its IDs.
             RasterPipelines.Typed pipelines = renderer.forwardPipelines(draw.output().surfaces(), true,
-                hooks(targets.indirect()));
+                targets.compiledHooks());
             view.splitByType(pipelines.categories(), kind == SurfaceOutput.Kind.SHADED ? (1 << MeshletRenderer.BINS) - 1
                 : 1 << MeshletRenderer.BIN_BLENDED, 0); // a visibility buffer's opaque bins draw IDs: below
             typed = kind == SurfaceOutput.Kind.SHADED ? pipelines : null;
@@ -109,7 +109,7 @@ public final class MeshletGeometry implements GeometryProvider {
         RasterPipelines.Geometry geometry = kind == SurfaceOutput.Kind.SHADED ? null
             : renderer.geometryPipelines(kind == SurfaceOutput.Kind.DEPTH ? RasterPipelines.DEPTH : RasterPipelines.IDS);
         record(draw, targets, pass, true, typed(g, view, kind == SurfaceOutput.Kind.SHADED, draw.output().surfaces(),
-            true, hooks(targets.indirect())), geometry);
+            true, targets.compiledHooks()), geometry);
     }
 
     @AllowAllocation("building the graph, when it changes")
@@ -127,13 +127,8 @@ public final class MeshletGeometry implements GeometryProvider {
      */
     @AllowAllocation("building the graph, when it changes")
     private RasterPipelines.Typed typed(GraphBuilder g, RenderView view, boolean shaded, boolean surfaces,
-        boolean opaque, ShadingHooks.Mask hooks) {
+        boolean opaque, ShadingHooks.Set hooks) {
         return shaded && view.splitCategories() > 0 ? renderer.forwardPipelines(surfaces, opaque, hooks) : null;
-    }
-
-    /** The shading hooks a view with {@code indirect} runs (0 without). */
-    private static ShadingHooks.Mask hooks(IndirectInputs.Set indirect) {
-        return indirect == null ? ShadingHooks.Mask.NONE : indirect.hooks();
     }
 
     /**

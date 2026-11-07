@@ -141,7 +141,9 @@ public struct View
     public uint* highlights;       // VIEW_(UN)HIGHLIGHTED_ONLY: the highlight flags (2 bits per instance id)
     public uint* ids;              // or null: the instances it culls, by id, instead of every one (a shadow tile's movers)
     public uint idCount;           // how many ids there are
-    public uint pad2;              // 464 bytes in all: views lie in one array, one after another
+    public uint pad2;
+    public ShadingHookBlock* hooks; // the view's shading hooks' block (hooks.slang; RenderView writes it each frame)
+    public uint64_t pad3;          // 480 bytes in all: views lie in one array, one after another
 };
 
 /**
@@ -805,10 +807,10 @@ public Surface typedSurface<M : IMaterial>(MaterialRef ref, SurfaceInput input, 
  */
 public float4 shadeMaterial<M : IMaterial>(View view, VertexOut in, Material* materials,
     float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind,
-    IndirectLight* indirect)
+    IndirectLight* indirect, HookSite site)
 {
     SurfaceOut surface;
-    return shadeMaterialSurface<M>(view, in, materials, dx, dy, lights, pixel, features, behind, indirect,
+    return shadeMaterialSurface<M>(view, in, materials, dx, dy, lights, pixel, features, behind, indirect, site,
         surface);
 }
 
@@ -822,7 +824,7 @@ public static const float3 SKY_REFLECTED = SKY_IRRADIANCE * 0.5 / 3.14159265;
  */
 public float4 shadeMaterialSurface<M : IMaterial>(View view, VertexOut in,
     Material* materials, float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features,
-    Background behind, IndirectLight* indirect, out SurfaceOut surface)
+    Background behind, IndirectLight* indirect, HookSite site, out SurfaceOut surface)
 {
     surface = noSurface();
     if (view.mode == 2)
@@ -838,11 +840,13 @@ public float4 shadeMaterialSurface<M : IMaterial>(View view, VertexOut in,
     {
         s.albedo = meshletColor(in.meshlet) * in.color.rgb;
     }
+    // The view's surface hooks (wetness, snow), before it is lit
+    surfaceHooksAt(site, s, in.world, input.normal, toViewer, ref.slot().header);
     // Light from all around: the view's indirect-light table (an environment, later GI), or the constant sky
     float3 reflectance;
     float3 diffuseWeight;
-    float3 color = (indirect != nullptr ? indirectLightWeights(indirect, s, toViewer, in.world, reflectance,
-        diffuseWeight)
+    float3 color = (indirect != nullptr ? indirectLightWeights(indirect, site, s, toViewer, in.world, input.normal,
+        reflectance, diffuseWeight)
         : ambientWeights(s, toViewer, SKY_IRRADIANCE, reflectance, diffuseWeight)) + emissive;
     if (lights == nullptr)
     {
@@ -853,6 +857,8 @@ public float4 shadeMaterialSurface<M : IMaterial>(View view, VertexOut in,
         float depth = mul(view.viewProjection, float4(in.world, 1)).w; // along the view direction
         color += lightList(lights, s, in.world, toViewer, pixel, depth);
     }
+    float3 seen = 0;        // of the color, what is seen through it: the scene behind, already through the media
+    float3 seenWeight = 0;  // and what the scene behind is weighed by in it
     if ((features & FEATURE_TRANSMISSION) != 0 && s.transmission > 0)
     {
         float through = s.transmission * (1 - s.metallic);
@@ -866,7 +872,9 @@ public float4 shadeMaterialSurface<M : IMaterial>(View view, VertexOut in,
             {
                 fresnel = lerp(fresnel, s.iridescenceFresnel, s.iridescence);
             }
-            color += through * (1 - fresnel) * transmitted(s, view, in.world, toViewer, pixel, behind);
+            seenWeight = through * (1 - fresnel);
+            seen = seenWeight * transmitted(s, view, in.world, toViewer, pixel, behind);
+            color += seen;
         }
         else
         {
@@ -879,15 +887,24 @@ public float4 shadeMaterialSurface<M : IMaterial>(View view, VertexOut in,
         color = applyUnlit(color, s, unlit);
         reflectance *= 1 - unlit.amount; // lerp(lit, albedo, amount): the lit part scaled
         diffuseWeight *= 1 - unlit.amount;
+        seen *= 1 - unlit.amount;
+        seenWeight *= 1 - unlit.amount;
     }
-    if (indirect != nullptr)
+    if (anyShadingHooks())
     {
-        // The view's media hooks between the point and the camera (fog, aerial perspective): what arrives, and what
-        // a later change of the point's own light (its reflection, its light from all around) passes through
-        ViewRay ray = alongViewRay(indirect, color, in.world, s.normal);
-        color = ray.radiance;
-        reflectance *= ray.transmittance;
-        diffuseWeight *= ray.transmittance;
+        // The view's media hooks between the point and the camera (fog, aerial perspective): their transmittance T
+        // and in-scattered light L, what a later change of the point's own light (its reflection, its light from all
+        // around) passes through. The scene seen through a transmissive surface came through the media to the
+        // camera already: it takes them once, less the light they add in front of the surface it shows instead.
+        ViewRay ray = alongViewRay(site, float3(0), in.world, s.normal);
+        if (any(ray.transmittance != 1) || any(ray.radiance != 0)) // none ran (off by their bits): as it was
+        {
+            color = any(seenWeight > 0)
+                ? (color - seen) * ray.transmittance + ray.radiance + seen - seenWeight * ray.radiance
+                : color * ray.transmittance + ray.radiance;
+            reflectance *= ray.transmittance;
+            diffuseWeight *= ray.transmittance;
+        }
     }
     surface.normal = s.normal;
     surface.roughness = s.roughness;

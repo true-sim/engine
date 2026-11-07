@@ -9,9 +9,9 @@ import com.truesim.engine.settings.TechniqueSlot;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
+import com.truesim.engine.vulkan.Specialization;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -187,16 +187,18 @@ public final class GraphBuilder {
         this.graph = graph;
         this.implementations = implementations;
         this.views = List.copyOf(views);
+        frame = withDefaults(frame);
         List<Technique> all = new ArrayList<>(frame);
         // Modifier order within each scope: the frame's, then each view's (a view's may share ids with another's).
         Map<Technique, Integer> positions = new IdentityHashMap<>(positions(frame));
         for (ViewPort view : views) {
-            Map<Technique, Integer> local = positions(view.techniques);
-            for (Technique technique : view.techniques) {
+            List<Technique> scope = withDefaults(view.techniques);
+            Map<Technique, Integer> local = positions(scope);
+            for (Technique technique : scope) {
                 viewOf.put(technique, view);
                 positions.put(technique, all.size() + local.get(technique));
             }
-            all.addAll(view.techniques);
+            all.addAll(scope);
         }
         this.techniques = List.copyOf(all);
         for (Technique technique : all) {
@@ -242,6 +244,32 @@ public final class GraphBuilder {
                 return GraphBuilder.name(technique) + (view == null ? "" : " of " + view);
             }
         }, Comparator.comparingInt(positions::get), "technique");
+    }
+
+    /**
+     * {@code techniques} of a scope, with a new default provider of each key that has one ({@link Key#buffer(String,
+     * java.util.function.Supplier)}) and none of them provides.
+     */
+    private static List<Technique> withDefaults(List<Technique> techniques) {
+        List<Technique> scope = null;
+        Set<Key<?>> provided = new HashSet<>(); // asked first: their classes declare the keys, defaulted ones too
+        for (Technique technique : techniques) {
+            provided.addAll(technique.provides());
+        }
+        for (Key<?> key : Key.defaulted()) {
+            if (!provided.contains(key)) {
+                if (scope == null) {
+                    scope = new ArrayList<>(techniques);
+                }
+                Technique made = key.defaultProvider();
+                if (!made.provides().contains(key)) {
+                    throw new IllegalStateException(name(made) + ", the default provider of " + key
+                        + ", does not provide it");
+                }
+                scope.add(made);
+            }
+        }
+        return scope == null ? techniques : scope;
     }
 
     /** The internal key of {@code key} provided in {@code view}'s scope (null: the frame's). */
@@ -429,8 +457,17 @@ public final class GraphBuilder {
      * same; it lives as long as the graph.
      */
     public Pipeline computeProgram(String shader, String entry, int pushBytes, int... constants) {
+        return computeProgram(shader, entry, pushBytes, Specialization.of(constants));
+    }
+
+    /**
+     * The compute program running {@code entry} of {@code shader}, with {@code pushBytes} of push constants and its
+     * specialization constants {@code constants}, by id (sparse: a shader's own from 0, the engine's from
+     * {@link Specialization#REQUIRED_FROM}). Built and shared as {@link #computeProgram(String, String, int, int...)}.
+     */
+    public Pipeline computeProgram(String shader, String entry, int pushBytes, Specialization constants) {
         ComputeKey key = new ComputeKey(Objects.requireNonNull(shader, "shader"), Objects.requireNonNull(entry, "entry"),
-            pushBytes, List.of(Arrays.stream(constants).boxed().toArray(Integer[]::new)));
+            pushBytes, Objects.requireNonNull(constants, "constants"));
         return graph.cached(key, device -> {
             try (ShaderModule module = ShaderModule.load(device, shader)) {
                 return Pipeline.compute(device, module, entry, pushBytes, constants);
@@ -504,7 +541,7 @@ public final class GraphBuilder {
         pass(name).read(from, Access.TRANSFER_SRC).sideEffects().record(ctx -> ctx.readback(plan, from));
     }
 
-    private record ComputeKey(String shader, String entry, int pushBytes, List<Integer> constants) {
+    private record ComputeKey(String shader, String entry, int pushBytes, Specialization constants) {
     }
 
     /** The device, for the graph's own tests. */

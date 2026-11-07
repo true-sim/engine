@@ -173,7 +173,7 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
         Buffer states = g.persistentBuffer("cascade states", (long) STATE_BYTES * first);
         Buffer data = g.createBuffer("cascade volume", ProbeVolumeDataLayout.BYTES);
         Buffer levels = g.createBuffer("cascade levels", (long) LEVEL_BYTES * MAX_CASCADES);
-        Buffer table = g.createBuffer("cascade indirect light", ProbeVolume.ownTableBytes(renderer));
+        Buffer table = g.createBuffer("cascade indirect light", IndirectLightLayout.BYTES);
         Buffer inside = g.createBuffer("cascade probes inside", 4L * grid.totalProbes());
         Image rayImage = g.create("cascade rays", ImageDesc.of(RAY_FORMAT, grid.width(), grid.height()));
         long capacity = grid.totalRays();
@@ -207,16 +207,16 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
         Pipeline tracing = g.computeProgram(trace, "traceMain", PathPush.BYTES);
         Pipeline layout = g.computeProgram(trace, "layoutMain", PathPush.BYTES);
         Pipeline scatter = g.computeProgram(trace, "scatterMain", PathPush.BYTES);
-        int hook = ProbeVolume.hookIndex(renderer);
+        ProbeHooks own = new ProbeHooks(g, anchor.view(), data, camera, coarsest); // its hits lit by itself
         Pipeline[] shade = new Pipeline[bins];
         for (int bin = 0; bin < bins; bin++) {
             MaterialType type = materials.binType(bin);
             if (type.hitShader() != null) {
                 shade[bin] = g.computeProgram(type.hitShader(), type.hitEntry(), PathPush.BYTES,
-                    ShadingHooks.Mask.NONE.with(hook).constants(materials.binFeatures(bin))); // its own
+                    own.specialization(materials.binFeatures(bin)));
             }
         }
-        Frame frame = new Frame(grid, spacing, coarsest, hook);
+        Frame frame = new Frame(grid, spacing, coarsest, own);
 
         pass(g, "cascade setup").write(data, BufferAccess.TRANSFER_DST).write(table, BufferAccess.TRANSFER_DST)
             .write(levels, BufferAccess.TRANSFER_DST).write(counts, BufferAccess.TRANSFER_DST)
@@ -287,7 +287,8 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 .read(current, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
                 .write(counts, BufferAccess.STORAGE_WRITE).read(binTables, BufferAccess.INDIRECT)
                 .read(binTables, BufferAccess.STORAGE_READ).write(rayImage, Access.STORAGE_WRITE)
-                .read(table, BufferAccess.STORAGE_READ).read(data, BufferAccess.STORAGE_READ)
+                .read(table, BufferAccess.STORAGE_READ)
+                .read(data, BufferAccess.STORAGE_READ)
                 .read(states, BufferAccess.STORAGE_READ).read(irradiance, Access.SAMPLED_COMPUTE)
                 .read(depth, Access.SAMPLED_COMPUTE).read(maps.specular(), Access.SAMPLED_COMPUTE)
                 .read(maps.sheen(), Access.SAMPLED_COMPUTE).read(brdf, Access.SAMPLED_COMPUTE);
@@ -372,12 +373,12 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
         final Grid grid;
         final float spacing;
         final double coarsest;
-        final int hook; // the probe volume's shading hook's index: the cascades' rays' hits are lit by the first
+        final ProbeHooks own; // the cascades' rays' hits' hook block: lit by the first cascade
         final long[] base = new long[3]; // each cascade's lowest probe's world grid coordinate, while set up
 
-        Frame(Grid grid, float spacing, double coarsest, int hook) {
+        Frame(Grid grid, float spacing, double coarsest, ProbeHooks own) {
             this.grid = grid;
-            this.hook = hook;
+            this.own = own;
             this.spacing = spacing;
             this.coarsest = coarsest;
         }
@@ -452,10 +453,7 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 RenderView view = anchor.view();
                 long handleTable = ctx.unsafe().buffer(table);
                 Commands.updateBuffer(ctx.unsafe().commands(), handleTable, 0, IndirectLightLayout.SH, t);
-                ProbeVolume.writeOwnHook(ctx, renderer, table, hook, ctx.address(data),
-                    view.position(0) - ProbeVolume.Volume.origin(camera.position(0), coarsest),
-                    view.position(1) - ProbeVolume.Volume.origin(camera.position(1), coarsest),
-                    view.position(2) - ProbeVolume.Volume.origin(camera.position(2), coarsest));
+                own.point(ctx, table); // its hits' hook block, which the view's hook inputs write
             }
             ctx.copy(maps.sh(), 0, table, IndirectLightLayout.SH, 27 * 4L);
         }

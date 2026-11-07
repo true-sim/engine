@@ -1,21 +1,24 @@
 package {package};
 
+import com.truesim.engine.render.ShadingHookListing;
 import com.truesim.engine.render.ShadingHooks;
 
 /**
  * Generated from the {@code [ShadingHook]} structs of these shaders and their libraries: the hooks by index, as the
  * generated dispatch numbers them, with their parameters' records, and the libraries' shaders rebuilt with them, each
- * beside its variant.
+ * beside its variant. A service ({@link ShadingHookListing}): the engine finds it on the classpath.
  */
 @lombok.Generated
-public final class {class} {
+public final class {class} implements ShadingHookListing {
 
-    /** The hooks, for {@link ShadingHooks#use}. */
+    /** The hooks. */
     public static final ShadingHooks HOOKS = ShadingHooks.of("{class}", new String[] {{names}},
-        new Class<?>[] {{parameters}}, new int[] {{bytes}}, {firstConstant}, {words}, new String[] {
+        new Class<?>[] {{parameters}}, new int[] {{bytes}}, {firstSwitch}, new String[] {
             {replaced}
         });
 
-    private {class}() {
+    @Override
+    public ShadingHooks hooks() {
+        return HOOKS;
     }
 }

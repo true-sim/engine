@@ -30,5 +30,6 @@ float4 fragmentMain(VertexOut in) : SV_Target
 {
     float4 uvs = float4(in.uv, in.uv1);
     return shadeMaterial<MetallicRoughnessMaterial>(push.view[0], in, push.materials, ddx(uvs),
-        ddy(uvs), nullptr, uint2(0, 0), materialFeatures(push.materials[in.material]), Background.none(), nullptr);
+        ddy(uvs), nullptr, uint2(0, 0), materialFeatures(push.materials[in.material]), Background.none(), nullptr,
+        HookSite.at(push.view[0].hooks, uint2(0, 0), SHADING_RASTER));
 }

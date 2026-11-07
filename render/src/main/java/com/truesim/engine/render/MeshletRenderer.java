@@ -85,7 +85,10 @@ public final class MeshletRenderer implements AutoCloseable {
     private final ShadingPipelines shading; // the material types' pipelines, made as they are first wanted or ahead
     // Shaded draws outside a frame graph (record, drawView): the pipelines by type for the table as last drawn.
     private RasterPipelines.Typed immediate;
-    private volatile ShadingHooks.Mask preparedHooks = ShadingHooks.Mask.NONE; // the shading hooks the last graph's views run: pipelines made ahead run them
+    // The sets of shading hooks graphs' views made pipelines with: pipelines made ahead are made for each; the last one
+    // asked for is the one draws outside a graph run
+    private volatile ShadingHooks.Set[] preparedHooks = {ShadingHooks.Set.NONE};
+    private volatile ShadingHooks.Set lastHooks = ShadingHooks.Set.NONE;
     private volatile boolean surfacesWanted; // a graph drew with the surface outputs: prepare their pipelines too
     private Materials immediateTable;
     private long immediateVersion;
@@ -183,30 +186,33 @@ public final class MeshletRenderer implements AutoCloseable {
             if ((rasters & 1 << raster) == 0) {
                 continue;
             }
-            ShadingHooks.Mask hooks = preparedHooks;
-            shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.COLOR, hooks));
-            if (surfacesWanted && raster != BIN_BLENDED) {
-                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading,
-                    ShadingPipelines.COLOR_SURFACES, hooks));
-            }
-            if (raster == BIN_BLENDED) {
-                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading,
-                    ShadingPipelines.WEIGHTED, hooks));
-                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.OVER,
+            for (ShadingHooks.Set hooks : preparedHooks) { // every set of hooks a graph made pipelines with
+                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.COLOR,
                     hooks));
-            }
-            for (ClassicLodGeometry classic : classics) {
-                for (int list = raster; list < 2 * BINS; list += BINS) {
-                    shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.COLOR, hooks));
-                    if (surfacesWanted && raster != BIN_BLENDED) {
-                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list,
-                            ShadingPipelines.COLOR_SURFACES, hooks));
-                    }
-                    if (raster == BIN_BLENDED) {
-                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list,
-                            ShadingPipelines.WEIGHTED, hooks));
-                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.OVER,
+                if (surfacesWanted && raster != BIN_BLENDED) {
+                    shading.prepare(this.raster.forwardKey(type, features, raster, meshShading,
+                        ShadingPipelines.COLOR_SURFACES, hooks));
+                }
+                if (raster == BIN_BLENDED) {
+                    shading.prepare(this.raster.forwardKey(type, features, raster, meshShading,
+                        ShadingPipelines.WEIGHTED, hooks));
+                    shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.OVER,
+                        hooks));
+                }
+                for (ClassicLodGeometry classic : classics) {
+                    for (int list = raster; list < 2 * BINS; list += BINS) {
+                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.COLOR,
                             hooks));
+                        if (surfacesWanted && raster != BIN_BLENDED) {
+                            shading.prepare(ClassicLodGeometry.forwardKey(type, features, list,
+                                ShadingPipelines.COLOR_SURFACES, hooks));
+                        }
+                        if (raster == BIN_BLENDED) {
+                            shading.prepare(ClassicLodGeometry.forwardKey(type, features, list,
+                                ShadingPipelines.WEIGHTED, hooks));
+                            shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.OVER,
+                                hooks));
+                        }
                     }
                 }
             }
@@ -679,18 +685,25 @@ public final class MeshletRenderer implements AutoCloseable {
      * then on also made ahead as materials are written); without {@code opaque}, the blended bin's only.
      */
     RasterPipelines.Typed forwardPipelines(boolean surfaces, boolean opaque) {
-        return forwardPipelines(surfaces, opaque, ShadingHooks.Mask.NONE);
+        return forwardPipelines(surfaces, opaque, lastHooks);
     }
 
     /**
      * Like {@link #forwardPipelines(boolean, boolean)}, running the shading hooks {@code hooks} (a view's
-     * {@link IndirectInputs.Set#hooks}): pipelines made ahead from then on run them too.
+     * {@link ShadingHookInputs.Set#compiled}): pipelines made ahead from then on are made with them too, and draws
+     * outside a graph run them (their view's block's bits deciding).
      */
-    RasterPipelines.Typed forwardPipelines(boolean surfaces, boolean opaque, ShadingHooks.Mask hooks) {
+    RasterPipelines.Typed forwardPipelines(boolean surfaces, boolean opaque, ShadingHooks.Set hooks) {
         if (surfaces) {
             surfacesWanted = true;
         }
-        preparedHooks = hooks;
+        lastHooks = hooks;
+        ShadingHooks.Set[] sets = preparedHooks;
+        if (!java.util.Arrays.asList(sets).contains(hooks)) {
+            ShadingHooks.Set[] more = java.util.Arrays.copyOf(sets, sets.length + 1);
+            more[sets.length] = hooks;
+            preparedHooks = more;
+        }
         return raster.typed(scene.materials(), path() == Path.MESH_SHADERS, surfaces, opaque, hooks);
     }
 

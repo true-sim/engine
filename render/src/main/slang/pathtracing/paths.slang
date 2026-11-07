@@ -705,6 +705,8 @@ public void shadeHit<M : IMaterial>(uint index, uint features)
     float3 emissive;
     Surface s = typedSurface<M>(ref, input, features, emissive);
     float3 side = front ? ng : -ng; // the geometric normal on the viewer's side
+    // The view's surface hooks (wetness, snow), as rasterizing sees them
+    surfaceHooksAt(hitSite(push.view[0].hooks, path.instance, SHADING_RAY_HIT), s, p, side, v, m.header);
     // A shading normal (a normal map's) nearly in the plane of the view or facing away from it: moved towards the viewer
     // until it faces it by at least 0.01, so the lobes sampled about it see the viewer (a normal facing away has no
     // directions to reflect into; one barely facing makes samples whose density rounds to nothing)
@@ -907,6 +909,20 @@ public void recordProbeRay(uint pixel, float3 radiance, float distance)
 }
 
 /**
+ * Where a hit on instance `instance` is shaded (SHADING_RAY_HIT, SHADING_PROBE_HIT), for the view's hooks: a probe
+ * volume's rays' hits by the hook block of its own table (its own light at its hits), others by the view's.
+ */
+HookSite hitSite(ShadingHookBlock* block, uint instance, uint path)
+{
+    HookSite site = HookSite.at(block, NO_PIXEL, path);
+    if (anyShadingHooks() && (push.scene[0].instances[instance].mesh & INSTANCE_NO_SURFACE_HOOKS) != 0)
+    {
+        site.flags |= SITE_NO_SURFACE_HOOKS;
+    }
+    return site;
+}
+
+/**
  * Shades probe ray `index` (PATH_PROBES), whose hit is of material type M: the light the hit sends back along the ray,
  * its distance; a back face of a one-sided material is recorded as one (no light, the distance shortened to a fifth and
  * negative, DDGI's mark of a probe inside geometry); holes and what blended surfaces let pass go on.
@@ -962,6 +978,9 @@ public void shadeProbeHit<M : IMaterial>(uint index, uint features)
     bool through = materialGeometry(m) != 0 && !M.keep(materialParameters<M.Parameters>(ref), ref, input);
     float3 emissive;
     Surface s = typedSurface<M>(ref, input, features, emissive);
+    HookSite site = hitSite(push.indirect[0].hooks, path.instance, SHADING_PROBE_HIT);
+    float3 side = front ? ng : -ng;
+    surfaceHooksAt(site, s, p, side, v, m.header); // the view's surface hooks, as rasterizing sees them
     through = through || (materialBlended(m) && random01(rng) >= s.alpha);
     if (through)
     {
@@ -988,12 +1007,11 @@ public void shadeProbeHit<M : IMaterial>(uint index, uint features)
     {
         unlit = materialFeature<UnlitParameters>(ref, FEATURE_UNLIT).amount;
     }
-    float3 side = front ? ng : -ng;
     // Its emission, its lights (shadow rays), and the light from all around it: the volume's of the frame before
     // (further bounces), the environment's reflections as far as the volume's probes see the sky
     float3 reflectance;
     float3 diffuseWeight;
-    float3 around = indirectLightWeights(push.indirect, s, v, p, reflectance, diffuseWeight);
+    float3 around = indirectLightWeights(push.indirect, site, s, v, p, side, reflectance, diffuseWeight);
     lightWeight = 1 - unlit;
     lightPixel = path.pixel;
     float3 radiance = emissive * (1 - unlit) + s.albedo * unlit

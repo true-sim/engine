@@ -215,7 +215,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
 
         /** Shading reads the volume through {@code set}. */
         @AllowAllocation("building the graph, when it changes")
-        void readBy(IndirectInputs.Set set) {
+        void readBy(ShadingHookInputs.Set set) {
             set.sample(irradiance).sample(depth).read(data).read(states);
         }
 
@@ -237,21 +237,6 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
     /** The name of the probe volume's shading hook (probes/hook.slang): how shading samples a volume. */
     public static final String HOOK = "probeVolume";
 
-    /** The probe volume hook's index in the shaders {@code renderer} draws with ({@link ShadingHooks}). */
-    static int hookIndex(MeshletRenderer renderer) {
-        return ShadingHooks.of(renderer.device()).require(HOOK);
-    }
-
-    /** Where a probe table of its own (the volume's rays' hits) holds the hook's parameters: past its addresses. */
-    static long ownRecord(MeshletRenderer renderer) {
-        return (ShadingHooks.of(renderer.device()).tableBytes() + 15) / 16 * 16;
-    }
-
-    /** The bytes of a probe table of its own: the table, its hooks' addresses, the probe hook's parameters. */
-    static long ownTableBytes(MeshletRenderer renderer) {
-        return ownRecord(renderer) + ProbeVolumeParametersLayout.BYTES;
-    }
-
     /**
      * Writes the probe volume hook's parameters (probes/hook.slang's ProbeVolumeParameters) at {@code at}: the volume's
      * data at {@code volume}, and the view's camera less the volume's origin. Allocates nothing.
@@ -261,24 +246,6 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         memPutFloat(at + ProbeVolumeParametersLayout.OFFSET, (float) x);
         memPutFloat(at + ProbeVolumeParametersLayout.OFFSET + 4, (float) y);
         memPutFloat(at + ProbeVolumeParametersLayout.OFFSET + 8, (float) z);
-    }
-
-    /**
-     * Into a probe table of its own ({@code table}, {@link #ownTableBytes}): hook {@code hook}'s parameters past its
-     * addresses, and their address. Allocates nothing.
-     */
-    static void writeOwnHook(PassContext ctx, MeshletRenderer renderer, Buffer table, int hook, long volume, double x,
-        double y, double z) {
-        long record = ownRecord(renderer);
-        try (MemoryStack stack = stackPush()) {
-            long values = stack.ncalloc(16, 1, ProbeVolumeParametersLayout.BYTES);
-            putParameters(values, volume, x, y, z);
-            long handle = ctx.unsafe().buffer(table);
-            Commands.updateBuffer(ctx.unsafe().commands(), handle, record, ProbeVolumeParametersLayout.BYTES, values);
-            long address = stack.nmalloc(8, 8);
-            memPutLong(address, ctx.address(table) + record);
-            Commands.updateBuffer(ctx.unsafe().commands(), handle, ShadingHooks.entry(hook), 8, address);
-        }
     }
 
     @Override
@@ -304,7 +271,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             up * cascades * DEPTH_TEXELS));
         Buffer states = g.persistentBuffer("probe states", (long) STATE_BYTES * count);
         Buffer data = g.createBuffer("probe volume", ProbeVolumeDataLayout.BYTES);
-        Buffer table = g.createBuffer("probe volume indirect light", ownTableBytes(renderer));
+        Buffer table = g.createBuffer("probe volume indirect light", IndirectLightLayout.BYTES);
         Image rayImage = g.create("probe rays", ImageDesc.of(RAY_FORMAT, rays * RAY_ROW,
             (count + RAY_ROW - 1) / RAY_ROW));
         long capacity = (long) count * rays;
@@ -351,16 +318,16 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         Pipeline tracing = g.computeProgram(trace, "traceMain", PathPush.BYTES);
         Pipeline layout = g.computeProgram(trace, "layoutMain", PathPush.BYTES);
         Pipeline scatter = g.computeProgram(trace, "scatterMain", PathPush.BYTES);
-        int hook = hookIndex(renderer);
+        ProbeHooks own = new ProbeHooks(g, anchor.view(), data, camera, coarsest); // its hits lit by itself
         Pipeline[] shade = new Pipeline[bins];
         for (int bin = 0; bin < bins; bin++) {
             MaterialType type = materials.binType(bin);
             if (type.hitShader() != null) {
                 shade[bin] = g.computeProgram(type.hitShader(), type.hitEntry(), PathPush.BYTES,
-                    ShadingHooks.Mask.NONE.with(hook).constants(materials.binFeatures(bin))); // its own
+                    own.specialization(materials.binFeatures(bin)));
             }
         }
-        Frame frame = new Frame(across, up, cascades, spacing, rays, fixed, count, skinnedWords, hook);
+        Frame frame = new Frame(across, up, cascades, spacing, rays, fixed, count, skinnedWords, own);
 
         g.pass("probe volume setup").write(data, BufferAccess.TRANSFER_DST).write(table, BufferAccess.TRANSFER_DST)
             .write(status, BufferAccess.TRANSFER_DST).write(counts, BufferAccess.TRANSFER_DST)
@@ -469,7 +436,8 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                     .read(current, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
                     .write(counts, BufferAccess.STORAGE_WRITE).read(binTables, BufferAccess.INDIRECT)
                     .read(binTables, BufferAccess.STORAGE_READ).write(rayImage, Access.STORAGE_WRITE)
-                    .read(table, BufferAccess.STORAGE_READ).read(data, BufferAccess.STORAGE_READ)
+                    .read(table, BufferAccess.STORAGE_READ)
+                    .read(data, BufferAccess.STORAGE_READ)
                     .read(states, BufferAccess.STORAGE_READ).read(irradiance, Access.SAMPLED_COMPUTE)
                     .read(depth, Access.SAMPLED_COMPUTE).read(maps.specular(), Access.SAMPLED_COMPUTE)
                     .read(maps.sheen(), Access.SAMPLED_COMPUTE).read(brdf, Access.SAMPLED_COMPUTE);
@@ -555,7 +523,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         final int fixed;
         final int count;
         final int skinnedWords;
-        final int hook; // the probe volume's shading hook's index: its own rays' hits are lit by it
+        final ProbeHooks own; // its rays' hits' hook block: lit by the volume itself
         final int[] skinnedBits;
         final int[] skinsBefore;
         int lightsBefore;
@@ -566,8 +534,8 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         long firstFrame = Long.MIN_VALUE;
 
         Frame(int across, int up, int cascades, float spacing, int rays, int fixed, int count, int skinnedWords,
-            int hook) {
-            this.hook = hook;
+            ProbeHooks own) {
+            this.own = own;
             this.across = across;
             this.up = up;
             this.cascades = cascades;
@@ -644,10 +612,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 RenderView view = anchor.view();
                 long handle = ctx.unsafe().buffer(table);
                 Commands.updateBuffer(ctx.unsafe().commands(), handle, 0, IndirectLightLayout.SH, t);
-                writeOwnHook(ctx, renderer, table, hook, ctx.address(data),
-                    view.position(0) - Volume.origin(camera.position(0), coarsest),
-                    view.position(1) - Volume.origin(camera.position(1), coarsest),
-                    view.position(2) - Volume.origin(camera.position(2), coarsest));
+                own.point(ctx, table); // its hits' hook block, which the view's hook inputs write
                 // The meshes skinned since the frame before
                 Deformation deformation = renderer.pool().deformation();
                 java.util.Arrays.fill(skinnedBits, 0);

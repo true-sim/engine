@@ -145,13 +145,24 @@ public VertexOut lean(LeanVertex in, uint primitive, float3 bary)
 
 // ---------------------------------------------------------------- a material type's fragment stages
 
+/** Where pixel `pixel` of instance `instance` is shaded, for the view's hooks: its block, a rasterized pixel. */
+public HookSite rasterSite(uint instance, uint2 pixel)
+{
+    HookSite site = HookSite.at(push.view[0].hooks, pixel, SHADING_RASTER);
+    if (anyShadingHooks() && (push.scene[0].instances[instance].mesh & INSTANCE_NO_SURFACE_HOOKS) != 0)
+    {
+        site.flags |= SITE_NO_SURFACE_HOOKS;
+    }
+    return site;
+}
+
 /** Surface `s` at `pixel` shaded with material type M and the variant's FEATURES; its holes (GEOMETRY_KEEP) left out. */
 public float4 shadeTyped<M : IMaterial>(VertexOut s, uint2 pixel)
 {
     float4 uvs = float4(s.uv, s.uv1);
     discardHoles<M>(s, ddx(uvs), ddy(uvs));
     return shadeMaterial<M>(push.view[0], s, push.scene[0].materials, ddx(uvs), ddy(uvs),
-        push.lights, pixel, FEATURES, behind(s.instance), push.indirect);
+        push.lights, pixel, FEATURES, behind(s.instance), push.indirect, rasterSite(s.instance, pixel));
 }
 
 /** A fragment's color and its surface outputs (surfaces.slang), for passes a technique asked them of. */
@@ -183,7 +194,8 @@ public ShadedSurface shadeTypedSurface<M : IMaterial>(VertexOut s, uint2 pixel)
     discardHoles<M>(s, ddx(uvs), ddy(uvs));
     SurfaceOut surface;
     float4 color = shadeMaterialSurface<M>(push.view[0], s, push.scene[0].materials, ddx(uvs),
-        ddy(uvs), push.lights, pixel, FEATURES, behind(s.instance), push.indirect, surface);
+        ddy(uvs), push.lights, pixel, FEATURES, behind(s.instance), push.indirect, rasterSite(s.instance, pixel),
+        surface);
     return surfaceTargets(color, surface);
 }
 

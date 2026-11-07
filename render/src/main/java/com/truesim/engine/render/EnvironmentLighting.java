@@ -71,9 +71,7 @@ public final class EnvironmentLighting implements Technique {
         view.checkBuilding(g, this);
         EnvironmentMaps.Maps maps = g.request(new EnvironmentMaps(environment, quality));
         Image brdf = g.request(new EnvironmentMaps.BrdfTable());
-        // Its fields, then an address per shading hook the shaders were built with (ShadingHooks.add writes them)
-        Buffer table = g.createBuffer("indirect light",
-            ShadingHooks.of(view.view().renderer().device()).tableBytes());
+        Buffer table = g.createBuffer("indirect light", IndirectLightLayout.BYTES);
         int specularMips = maps.specular().mips();
         int sheenMips = maps.sheen().mips();
         // The table each frame: the cubes' slots, the intensity and rotation as they are now, the harmonics copied in.

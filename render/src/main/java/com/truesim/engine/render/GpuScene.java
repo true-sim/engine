@@ -63,6 +63,7 @@ public final class GpuScene implements AutoCloseable {
     /** Instance flags above the mesh id, as meshlets/common.slang has them. */
     private static final int LIVE = CommonConstants.INSTANCE_LIVE;
     private static final int CASTS_SHADOWS = CommonConstants.INSTANCE_CASTS_SHADOWS;
+    private static final int NO_SURFACE_HOOKS = com.truesim.engine.render.layout.HooksConstants.INSTANCE_NO_SURFACE_HOOKS;
     private static final int MESH_BITS = (1 << 24) - 1;
     /** Layer 0: where instances are unless set otherwise. */
     private static final int DEFAULT_LAYERS = 1;
@@ -176,6 +177,7 @@ public final class GpuScene implements AutoCloseable {
         private int material;
         private int layers = DEFAULT_LAYERS;
         private boolean castsShadows = true;
+        private boolean surfaceHooks = true;
         private double x;
         private double y;
         private double z;
@@ -209,6 +211,15 @@ public final class GpuScene implements AutoCloseable {
         /** Whether it casts shadows: shadow views and shadow rays leave out those that do not. */
         public Instance castsShadows(boolean castsShadows) {
             this.castsShadows = castsShadows;
+            return this;
+        }
+
+        /**
+         * Whether the views' surface hooks (hooks.slang: wetness, snow) change its surfaces; on by default. Its
+         * materials may opt out too ({@link Material#surfaceHooks}).
+         */
+        public Instance surfaceHooks(boolean surfaceHooks) {
+            this.surfaceHooks = surfaceHooks;
             return this;
         }
 
@@ -258,15 +269,20 @@ public final class GpuScene implements AutoCloseable {
 
     /** Sets instance {@code id} as {@code instance} describes (taking the id if free). Allocates nothing. */
     public void set(int id, Instance instance) {
-        set(id, instance.mesh, instance.material, instance.layers, instance.castsShadows, instance.x, instance.y,
-            instance.z, instance.qx, instance.qy, instance.qz, instance.qw, instance.sx, instance.sy, instance.sz);
+        if (id < 0) {
+            throw new IllegalArgumentException("No instance " + id);
+        }
+        check(instance.mesh, instance.material);
+        write(claim(id), instance);
         setMobility(id, instance.mobility);
     }
 
     /** Writes the instance of entry {@code entry} ({@link #claim}) as {@code instance} describes. */
     public void write(int entry, Instance instance) {
-        write(entry, instance.mesh, instance.material, instance.layers, instance.castsShadows, instance.x, instance.y,
-            instance.z, instance.qx, instance.qy, instance.qz, instance.qw, instance.sx, instance.sy, instance.sz);
+        write(entry, instance.mesh, instance.material, instance.layers,
+            (instance.castsShadows ? CASTS_SHADOWS : 0) | (instance.surfaceHooks ? 0 : NO_SURFACE_HOOKS), instance.x,
+            instance.y, instance.z, instance.qx, instance.qy, instance.qz, instance.qw, instance.sx, instance.sy,
+            instance.sz);
     }
 
     public GeometryPool pool() {
@@ -470,6 +486,13 @@ public final class GpuScene implements AutoCloseable {
      */
     public void write(int entry, int mesh, int material, int layers, boolean castsShadows, double x, double y,
         double z, float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
+        write(entry, mesh, material, layers, castsShadows ? CASTS_SHADOWS : 0, x, y, z, qx, qy, qz, qw, sx, sy, sz);
+    }
+
+    /** {@link #write(int, int, int, int, boolean, double, double, double, float, float, float, float, float, float,
+     * float)} with the mesh word's flags {@code flags} (CASTS_SHADOWS, NO_SURFACE_HOOKS). */
+    private void write(int entry, int mesh, int material, int layers, int flags, double x, double y,
+        double z, float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
         long o = instances.offset(entry);
         check(mesh, material);
         MemorySegment m = instances.changes(entry);
@@ -483,7 +506,7 @@ public final class GpuScene implements AutoCloseable {
         m.set(FLOAT, o + InstanceLayout.POSITION, hx);
         m.set(FLOAT, o + InstanceLayout.POSITION + 4, hy);
         m.set(FLOAT, o + InstanceLayout.POSITION + 8, hz);
-        int word = mesh | LIVE | (castsShadows ? CASTS_SHADOWS : 0);
+        int word = mesh | LIVE | flags;
         m.set(INT, o + InstanceLayout.MESH, word);
         meshWords[instances.pendingIndex(entry)] = word; // by id: the entry is its place among the changes
         m.set(FLOAT, o + InstanceLayout.SCALE, sx);

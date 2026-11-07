@@ -23,9 +23,11 @@ import java.util.Objects;
  * @param behind the opaque scene behind, which transmissive surfaces sample ({@link SceneBehind}), or null: they blend
  *               by what they let through
  * @param indirect the view's indirect light ({@link IndirectInputs}), or null: the constant sky
+ * @param shadingHooks the view's shading hooks ({@link ShadingHookInputs})
  */
 public record BlendedTargets(Kind kind, Image color, Image accumulated, Image revealage, Image depth, Buffer lights,
-    ShadowInputs.Set shadows, ViewPort region, Image behind, IndirectInputs.Set indirect) {
+    ShadowInputs.Set shadows, ViewPort region, Image behind, IndirectInputs.Set indirect,
+    ShadingHookInputs.Set shadingHooks) {
 
     /** How blended surfaces are drawn. */
     public enum Kind {
@@ -43,6 +45,7 @@ public record BlendedTargets(Kind kind, Image color, Image accumulated, Image re
     public BlendedTargets {
         Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(depth, "depth");
+        Objects.requireNonNull(shadingHooks, "shadingHooks");
         if (kind == Kind.WEIGHTED ? accumulated == null || revealage == null : color == null) {
             throw new IllegalArgumentException(kind + " takes its targets");
         }
@@ -54,12 +57,14 @@ public record BlendedTargets(Kind kind, Image color, Image accumulated, Image re
             indirect.readBy(pass, com.truesim.engine.graph.Access.SAMPLED_FRAGMENT,
                 com.truesim.engine.graph.BufferAccess.DRAW_READ);
         }
+        shadingHooks.readBy(pass, com.truesim.engine.graph.Access.SAMPLED_FRAGMENT,
+            com.truesim.engine.graph.BufferAccess.DRAW_READ);
         return behind == null ? pass : pass.read(behind, com.truesim.engine.graph.Access.SAMPLED_FRAGMENT);
     }
 
-    /** The shading hooks the view runs ({@link IndirectInputs.Set#hooks}); 0 without indirect light. */
-    public ShadingHooks.Mask hooks() {
-        return indirect == null ? ShadingHooks.Mask.NONE : indirect.hooks();
+    /** The shading hooks the view's pipelines are made with ({@link ShadingHookInputs.Set#compiled}). */
+    public ShadingHooks.Set hooks() {
+        return shadingHooks.compiled();
     }
 
     /** The indirect light's table address in a pass with context {@code ctx}; 0 without. Allocates nothing. */

@@ -19,21 +19,49 @@ public struct ProbeVolumeParameters
 
 /** The probe volume's light at a shaded point. */
 [ShadingHook("probeVolume")]
-public struct ProbeVolumeHook
+public struct ProbeVolumeHook : IIndirectHook
 {
     public typealias Parameters = ProbeVolumeParameters;
 
-    public static void indirect(ShadingPoint p, ProbeVolumeParameters probes, float3 direction,
+    public static void indirect(ShadingPoint p, ProbeVolumeParameters* probes, AroundQuery q,
         inout AroundLight light)
     {
+        uint64_t address = probes[0].volume;
+        if (address == 0)
+        {
+            return; // no volume this frame (the hook's defaults)
+        }
+        ProbeVolumeData* volume = (ProbeVolumeData*) address;
+        float3 at = p.position + probes[0].offset;
         float sky;
         bool found;
-        float3 e = probeLight((ProbeVolumeData*) probes.volume, p.position + probes.offset, p.normal, p.toViewer,
-            direction, sky, found);
-        if (found)
+        if (q.wanted(AROUND_DIFFUSE | AROUND_VISIBILITY))
         {
-            light.add(e, 1);
-            light.visibility *= sky;
+            float3 e = probeLight(volume, at, p.normal, p.toViewer, q.direction, sky, found);
+            if (found)
+            {
+                if (q.wanted(AROUND_DIFFUSE))
+                {
+                    light.add(e, 1);
+                }
+                light.visibility *= sky;
+            }
+        }
+        if (q.wanted(AROUND_COAT))
+        {
+            probeLight(volume, at, p.normal, p.toViewer, q.coatDirection, sky, found);
+            if (found)
+            {
+                light.coatVisibility *= sky;
+            }
+        }
+        if (q.wanted(AROUND_BACK))
+        {
+            float3 e = probeLight(volume, at, -p.normal, p.toViewer, -p.normal, sky, found);
+            if (found)
+            {
+                light.addBack(e, 1);
+            }
         }
     }
 };

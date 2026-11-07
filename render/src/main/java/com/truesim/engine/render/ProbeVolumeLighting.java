@@ -28,13 +28,13 @@ import java.util.Objects;
  * reaches; elsewhere the environment lights as before. Shading samples it through the probe volume's shading hook
  * ({@link ProbeVolume#HOOK}, probes/hook.slang), which this technique turns on for the view and whose slot of the
  * view's table it writes: every shading path running the view's hooks (opaque on both shading techniques, blended and
- * transmissive surfaces, AO, reflections) gets it, and the core's shading knows no probe format. It modifies the view's {@link Keys#INDIRECT_LIGHT} (an
+ * transmissive surfaces, AO, reflections) gets it, and the core's shading knows no probe format. It modifies the view's {@link Keys#SHADING_HOOKS} (an
  * {@link EnvironmentLighting} of the view provides it). Views given equal volumes (a headset's eyes, design D7) share
  * one: the volume is updated once a frame. Its tunables are the probes kind's ({@link Probes}, {@code
  * render.gi.probes.*}), which the volume reads.
  *
  * <p>A game's own kind ({@link Techniques#register}) makes a {@link Technique} built in this one's place, given this
- * one ({@link #view()}, {@link #volume()}): it modifies {@link Keys#INDIRECT_LIGHT}.
+ * one ({@link #view()}, {@link #volume()}): it modifies {@link Keys#SHADING_HOOKS}.
  *
  * <pre>{@code
  * ProbeVolume volume = new ProbeVolume(rayTracing, renderer, lights, environment, leftEye);
@@ -175,7 +175,7 @@ public final class ProbeVolumeLighting implements Technique {
 
     @Override
     public List<Key<?>> modifies() {
-        return List.of(Keys.INDIRECT_LIGHT);
+        return List.of(Keys.SHADING_HOOKS);
     }
 
     /** The chosen kind's technique: built in this one's place. */
@@ -224,20 +224,21 @@ public final class ProbeVolumeLighting implements Technique {
         }
         ProbeVolume.Volume probes = cascades ? g.request(RadianceCascades.of(volume)) : g.request(volume);
         // The probe volume's shading hook, its parameters this view's: the volume, and the camera from its origin
-        ShadingHooks.of(volume.renderer().device()).add(g, ProbeVolume.HOOK, new ShadingHookSource() {
+        ShadingHookInputs.Set hooks = ShadingHooks.of(volume.renderer().device()).add(g, ProbeVolume.HOOK,
+            new ShadingHookSource() {
             @Override
             public int bytes() {
                 return ProbeVolumeParametersLayout.BYTES;
             }
 
             @Override
-            public void write(PassContext ctx, MemorySegment into, long offset) {
+            public void write(PassContext ctx, ShadingHookParameters authored, MemorySegment into, long offset) {
                 ProbeVolume.putParameters(into.address() + offset, probes.address(ctx),
                     view.view().position(0) - probes.origin(0), view.view().position(1) - probes.origin(1),
                     view.view().position(2) - probes.origin(2));
             }
         });
-        probes.readBy(g.request(new IndirectInputs(g.view())));
+        probes.readBy(hooks);
     }
 
     /**

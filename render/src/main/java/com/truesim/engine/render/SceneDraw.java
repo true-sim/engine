@@ -58,10 +58,15 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
      * all of them).
      */
     public record Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows,
-        IndirectInputs.Set indirect, ViewPort region, SurfaceOutputs.Images surfaces) {
+        IndirectInputs.Set indirect, ShadingHookInputs.Set hooks, ViewPort region, SurfaceOutputs.Images surfaces) {
 
         public Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows) {
-            this(depth, color, lights, shadows, null, null, null);
+            this(depth, color, lights, shadows, null, null, null, null);
+        }
+
+        /** The hooks shaded draws are made with (none without shading). */
+        public ShadingHooks.Set compiledHooks() {
+            return hooks == null ? ShadingHooks.Set.NONE : hooks.compiled();
         }
 
         /** Declares the surface outputs as attachments of {@code pass}, cleared (no surface) or, with {@code load}, kept. */
@@ -81,6 +86,9 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
         /** Declares that {@code pass} reads the indirect light, where shading has some. */
         public GraphBuilder.PassBuilder readIndirect(GraphBuilder.PassBuilder pass, com.truesim.engine.graph.Access access,
             com.truesim.engine.graph.BufferAccess read) {
+            if (hooks != null) {
+                hooks.readBy(pass, access, read);
+            }
             return indirect == null ? pass : indirect.readBy(pass, access, read);
         }
 
@@ -108,7 +116,9 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
             && built.height() == height ? built : null;
         IndirectInputs.Set indirect = output.kind() == SurfaceOutput.Kind.SHADED ? IndirectInputs.of(g) : null;
         SurfaceOutputs.Images surfaces = output.surfaces() ? SurfaceOutputs.create(g, name, width, height) : null;
-        Targets targets = new Targets(depth, color, lights, shadows, indirect, region, surfaces);
+        ShadingHookInputs.Set hooks = output.kind() == SurfaceOutput.Kind.SHADED ? ShadingHookInputs.of(g, view)
+            : null;
+        Targets targets = new Targets(depth, color, lights, shadows, indirect, hooks, region, surfaces);
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawFirst(g, this, targets, load);

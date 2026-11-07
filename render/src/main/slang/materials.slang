@@ -71,7 +71,8 @@ public static const int SRGB = 1;
 public struct Material
 {
     public uint header;            // type bits 0-7 (0: metallic-roughness), double-sided bit 8, masked bit 9,
-                                   // blended bit 10, cutoff bits 16-31
+                                   // blended bit 10, no surface hooks bit 11, hook coat bit 12 (hooks.slang),
+                                   // cutoff bits 16-31
     public uint parameters;        // its block: its type's parameters, then its features' sections
     public int maskTexture;        // masking: the texture whose alpha it compares (-1: none)
     public float maskAlpha;        // masking: the alpha factor

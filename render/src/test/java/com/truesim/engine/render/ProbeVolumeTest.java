@@ -208,6 +208,36 @@ class ProbeVolumeTest {
     }
 
     /**
+     * A surface hook changes surfaces at the probes' rays' hits as it does on screen: the furnace's walls tinted to half
+     * their albedo everywhere is E / (1 - rho / 2); tinted on screen alone it would be E + rho / 2 E / (1 - rho). A
+     * material opting out is untouched at hits too: E / (1 - rho).
+     */
+    @Test
+    void aSurfaceHookChangesTheProbesHitsAsItDoesTheScreenButNotTheOptedOut() {
+        float rho = 0.5f;
+        float glow = 0.25f;
+        Material walls = new Material(MR.withBaseColor(new Color(rho, rho, rho, 1))
+            .withEmissive(new Color(glow, glow, glow, 1))).feature(LAMBERT);
+        int furnace = materials.add(walls);
+        int optedOut = materials.add(walls.surfaceHooks(false));
+        box(furnace);
+        lights.setCount(0);
+        ShadingHookValues values = ShadingHookValues.of(device);
+        values.set("test.tint", new com.truesim.engine.render.materials.TestTintParameters(
+            new com.truesim.common.math.Vec3(0.5, 0.5, 0.5), 0), true);
+        try {
+            lit("main", Environment.uniform("black", 0, 0, 0));
+            double tinted = glow / (1 - rho / 2);
+            assertThat(mean(frames(60), 0)).as("tinted at hits and on screen").isCloseTo(tinted, within(tinted * 0.03));
+            box(optedOut);
+            double plain = glow / (1 - rho);
+            assertThat(mean(frames(60), 0)).as("opted out").isCloseTo(plain, within(plain * 0.03));
+        } finally {
+            values.remove("test.tint");
+        }
+    }
+
+    /**
      * The probes' shadow rays go through the holes of a type's keep(): a closed box lit by the sun through its ceiling,
      * a type cut in a checkerboard (half holes), shows the sun's light bounced inside through the probe volume; with
      * the same type keeping all of the ceiling (one cell), nothing comes in. Without light rays waiting for keep(),
@@ -327,8 +357,13 @@ class ProbeVolumeTest {
             frames(4);
             assertThat(Collections.frequency(graph.passes(), "probe blending")).as("updates of the volume a frame")
                 .isEqualTo(1);
-            assertThat(Collections.frequency(graph.passes(), "probe volume lighting")).as("views lit by it")
+            assertThat(Collections.frequency(graph.passes(), "shading hooks")).as("views writing their hook blocks")
                 .isEqualTo(2);
+            int hook = ShadingHooks.of(device).require(ProbeVolume.HOOK);
+            for (RenderView lit : new RenderView[] {view, otherView}) {
+                assertThat(lit.hooks().getInt(ShadingHooks.activeWord(hook)) & 1 << hook % 32)
+                    .as("view %d lit by it: its hook on", lit.index()).isNotZero();
+            }
         } finally {
             device.waitIdle();
             graph.close();

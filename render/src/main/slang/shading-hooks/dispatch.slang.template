@@ -1,27 +1,34 @@
 // The shading hooks' dispatch (hooks.slang; README, "Writing a shading hook"), included by indirect.slang: each hook
-// point's function calling the hooks having it, each under its bit of SHADING_HOOKS_<n>.
+// point's function calling the hooks having it, in their order, each under its specialization constant and its bit of
+// the view's hook block.
 {imports}
 {constants}
 /** Hooks of the dispatch. */
 public static const uint SHADING_HOOK_COUNT = {count};
 
-// The hooks a pipeline runs, a bit each (HOOK_* n: bit n % 32 of SHADING_HOOKS_<n / 32>): set when it is made, from
-// the hooks its view uses (engine-render's IndirectInputs.Set.hooks()); the code of the others is left out.
-{specialization}
+// Whether a pipeline runs each hook: set when it is made (engine-render's ShadingHooks.Set), the code of the others
+// left out.
+{switches}
 /** Whether the pipeline runs any hook. */
-bool anyShadingHooks()
+public bool anyShadingHooks()
 {
     return {any};
 }
 
-/** The indirect hooks' light around `p`, `direction` the one its visibility is asked for. */
-void indirectHooks(IndirectLight* t, ShadingPoint p, float3 direction, inout AroundLight light)
+/** The surface hooks' change of `s` at `p`, for the view of `block`. */
+public void surfaceHooks(ShadingHookBlock* block, ShadingPoint p, inout Surface s)
+{
+{calls:surface}
+}
+
+/** The indirect hooks' light around `p`, as `q` asks it, for the view of `block`. */
+public void indirectHooks(ShadingHookBlock* block, ShadingPoint p, AroundQuery q, inout AroundLight light)
 {
 {calls:indirect}
 }
 
-/** The media hooks' change of `ray` between the camera and `p`. */
-void mediaHooks(IndirectLight* t, ShadingPoint p, inout ViewRay ray)
+/** The media hooks' change of `ray` between the camera and `p`, for the view of `block`. */
+public void mediaHooks(ShadingHookBlock* block, ShadingPoint p, inout ViewRay ray)
 {
 {calls:media}
 }
