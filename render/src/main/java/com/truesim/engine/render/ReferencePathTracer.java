@@ -203,7 +203,7 @@ public final class ReferencePathTracer implements Technique {
             }
         }
         Pipeline single = singleShader == null ? null
-            : g.computeProgram(singleShader, singleEntry, PathPush.BYTES); // every hit in one dispatch: no bins
+            : g.computeProgram(singleShader, singleEntry, PathPush.BYTES, hooks.specialization()); // one dispatch
         String shader = "shaders/pathtracing/trace.spv";
         Pipeline generate = g.computeProgram(shader, "generateMain", PathPush.BYTES);
         Pipeline trace = g.computeProgram(shader, "traceMain", PathPush.BYTES);

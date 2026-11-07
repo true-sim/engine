@@ -68,7 +68,7 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
     @AllowAllocation("building the graph, when it changes")
     public static Set of(GraphBuilder g, RenderView shaded) {
         Buffer token = g.require(Keys.SHADING_HOOKS);
-        return g.request(new ShadingHookInputs(g.view())).token(g, token).view(shaded);
+        return g.request(new ShadingHookInputs(g.view())).view(shaded).token(g, token);
     }
 
     /** The shading hooks of one build of a view. */
@@ -102,6 +102,9 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
         Set token(GraphBuilder g, Buffer token) {
             if (this.token == null) {
                 this.token = Objects.requireNonNull(token, "token");
+                if (compiled().none() && probes.isEmpty()) {
+                    return this; // nothing reads the blocks: no pass
+                }
                 GraphBuilder.PassBuilder pass = g.pass("shading hooks");
                 for (Image image : images) {
                     pass.read(image, Access.SAMPLED_COMPUTE);

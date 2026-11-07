@@ -270,8 +270,13 @@ class RadianceCascadesTest {
             frames(4);
             assertThat(Collections.frequency(graph.passes(), "cascade merge 0")).as("updates of the cascades a frame")
                 .isEqualTo(1);
-            assertThat(Collections.frequency(graph.passes(), "probe volume lighting")).as("views lit by it")
+            assertThat(Collections.frequency(graph.passes(), "shading hooks")).as("views writing their hook blocks")
                 .isEqualTo(2);
+            int hook = ShadingHooks.of(device).require(ProbeVolume.HOOK);
+            for (RenderView lit : new RenderView[] {view, otherView}) {
+                assertThat(lit.hooks().getInt(ShadingHooks.activeWord(hook)) & 1 << hook % 32)
+                    .as("view %d lit by it: its hook on", lit.index()).isNotZero();
+            }
         } finally {
             device.waitIdle();
             graph.close();

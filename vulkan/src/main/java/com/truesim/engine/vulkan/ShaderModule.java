@@ -88,7 +88,7 @@ public final class ShaderModule implements AutoCloseable {
     }
 
     /** The {@code SpecId} decorations' ids of SPIR-V {@code code} (little-endian words, after the 5-word header). */
-    private static int[] constantIds(ByteBuffer code) {
+    static int[] constantIds(ByteBuffer code) {
         java.nio.IntBuffer words = code.duplicate().order(java.nio.ByteOrder.LITTLE_ENDIAN).asIntBuffer();
         java.util.TreeSet<Integer> ids = new java.util.TreeSet<>();
         int at = 5;
