@@ -1,20 +1,13 @@
 package com.truesim.engine.render;
 
-import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutFloat;
-import static org.lwjgl.system.MemoryUtil.memPutInt;
-import static org.lwjgl.system.MemoryUtil.memPutLong;
-
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.graph.Id;
-import com.truesim.engine.graph.Buffer;
-import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
-import com.truesim.engine.render.layout.IndirectConstants;
-import com.truesim.engine.render.layout.IndirectLightLayout;
+import com.truesim.engine.render.layout.ProbeVolumeParametersLayout;
+import java.lang.foreign.MemorySegment;
 import com.truesim.engine.settings.Setting;
 import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.engine.settings.TechniqueConfig;
@@ -22,26 +15,27 @@ import com.truesim.engine.settings.TechniqueConfig.Tunable;
 import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.settings.TechniqueSlot;
 import com.truesim.engine.settings.Techniques;
-import com.truesim.engine.vulkan.Commands;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import org.lwjgl.system.MemoryStack;
 
 /**
  * A view's surfaces lit by global illumination, as the kind chosen for {@link #SLOT} ({@code render.gi}) does it: with
  * {@link #PROBES} (the default), the {@link ProbeVolume}'s (with {@link #CASCADES}, the first of {@link
  * RadianceCascades} made of its scene, lights, environment and anchor, sampled the same way) diffuse light replaces the
- * environment's spherical harmonics (every shading path reads the view's indirect-light table: opaque on both shading
- * techniques, blended and transmissive surfaces) and its sky visibility dims the environment's reflections, where the
- * volume reaches; elsewhere the environment lights as before. It modifies the view's {@link Keys#INDIRECT_LIGHT} (an
- * {@link EnvironmentLighting} of the view provides it). Views given equal volumes (a headset's eyes, design D7) share
+ * environment's spherical harmonics and its sky visibility dims the environment's reflections, where the volume
+ * reaches; elsewhere the environment lights as before. Shading samples it through the probe volume's shading hook
+ * ({@link ProbeVolume#HOOK}, probes/hook.slang), which this technique adds to the view ({@link ShadingHooks#add}), its
+ * record the view's camera from the volume's origin: every shading path running the view's hooks (opaque on both
+ * shading techniques, blended and transmissive surfaces, AO, reflections) gets it, and the core's shading knows no
+ * probe format. It modifies the view's {@link Keys#SHADING_HOOKS}; an {@link EnvironmentLighting} of the view lights
+ * what the volume does not reach. Views given equal volumes (a headset's eyes, design D7) share
  * one: the volume is updated once a frame. Its tunables are the probes kind's ({@link Probes}, {@code
  * render.gi.probes.*}), which the volume reads.
  *
  * <p>A game's own kind ({@link Techniques#register}) makes a {@link Technique} built in this one's place, given this
- * one ({@link #view()}, {@link #volume()}): it modifies {@link Keys#INDIRECT_LIGHT}.
+ * one ({@link #view()}, {@link #volume()}): it modifies {@link Keys#SHADING_HOOKS}.
  *
  * <pre>{@code
  * ProbeVolume volume = new ProbeVolume(rayTracing, renderer, lights, environment, leftEye);
@@ -182,7 +176,7 @@ public final class ProbeVolumeLighting implements Technique {
 
     @Override
     public List<Key<?>> modifies() {
-        return List.of(Keys.INDIRECT_LIGHT);
+        return List.of(Keys.SHADING_HOOKS);
     }
 
     /** The chosen kind's technique: built in this one's place. */
@@ -229,29 +223,23 @@ public final class ProbeVolumeLighting implements Technique {
         if (!g.capabilities().rayTracing()) {
             return;
         }
-        Buffer table = g.modify(Keys.INDIRECT_LIGHT);
         ProbeVolume.Volume probes = cascades ? g.request(RadianceCascades.of(volume)) : g.request(volume);
-        g.pass("probe volume lighting").write(table, BufferAccess.TRANSFER_DST)
-            .read(probes.data, BufferAccess.STORAGE_READ).record(ctx -> write(ctx, table, probes));
-        probes.readBy(g.request(new IndirectInputs(g.view())));
-    }
-
-    /** The table's flags and its probe volume section: the volume, and where the view's camera is from its origin. */
-    private void write(PassContext ctx, Buffer table, ProbeVolume.Volume probes) {
-        try (MemoryStack stack = stackPush()) {
-            int bytes = IndirectLightLayout.BYTES - IndirectLightLayout.RESERVED;
-            long section = stack.ncalloc(16, 1, bytes);
-            memPutLong(section + IndirectLightLayout.VOLUME - IndirectLightLayout.RESERVED, probes.address(ctx));
-            for (int axis = 0; axis < 3; axis++) {
-                memPutFloat(section + IndirectLightLayout.VOLUME_OFFSET - IndirectLightLayout.RESERVED + 4L * axis,
-                    (float) (view.view().position(axis) - probes.origin(axis)));
+        // The probe volume's shading hook, its parameters this view's: the volume, and the camera from its origin
+        ShadingHookInputs.Set hooks = ShadingHooks.of(volume.renderer().device()).add(g, ProbeVolume.HOOK,
+            new ShadingHookSource() {
+            @Override
+            public int bytes() {
+                return ProbeVolumeParametersLayout.BYTES;
             }
-            long flags = stack.ncalloc(4, 1, 4);
-            memPutInt(flags, IndirectConstants.INDIRECT_ENVIRONMENT | IndirectConstants.INDIRECT_PROBES);
-            long handle = ctx.unsafe().buffer(table);
-            Commands.updateBuffer(ctx.unsafe().commands(), handle, IndirectLightLayout.FLAGS, 4, flags);
-            Commands.updateBuffer(ctx.unsafe().commands(), handle, IndirectLightLayout.RESERVED, bytes, section);
-        }
+
+            @Override
+            public void write(PassContext ctx, ShadingHookParameters authored, MemorySegment into, long offset) {
+                ProbeVolume.putParameters(into.address() + offset, probes.address(ctx),
+                    view.view().position(0) - probes.origin(0), view.view().position(1) - probes.origin(1),
+                    view.view().position(2) - probes.origin(2));
+            }
+        });
+        probes.readBy(hooks);
     }
 
     /**

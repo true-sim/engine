@@ -1,5 +1,6 @@
 package com.truesim.engine.render;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
@@ -48,6 +49,9 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
  */
 @EnabledIfEnvironmentVariable(named = "TRUESIM_SCREENSHOTS", matches = "true")
 class Screenshots {
+
+    /** Chunks of 64 meshlets renderShadowOwner's culling has room for: more than any of its frames wants. */
+    private static final int OWNER_CHUNKS = 1 << 19;
 
     private static final int WIDTH = 1920;
     private static final int HEIGHT = 1080;
@@ -129,8 +133,10 @@ class Screenshots {
              GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
                  VK_BUFFER_USAGE_TRANSFER_DST_BIT);
              GpuScene gpu = new GpuScene(device, pool, 100_000);
+             // Room for the chunks the shadow tiles culled together want (the point lights' maps about 140,000): on the
+             // scene's single frame slot the renderer cannot grow it as frames end (ShadowsBenchmark's CHUNKS)
              MeshletRenderer renderer = MeshletBenchmark.withView(new MeshletRenderer(device, gpu,
-                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT), 20_000_000);
+                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, gpu.frameSlots(), OWNER_CHUNKS), 20_000_000);
              RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null;
              Lights lights = new Lights(device, 32, 256)) {
             com.truesim.scene.assets.mesh.MeshData rockMesh = MeshletBenchmark.rock(6);
@@ -173,6 +179,7 @@ class Screenshots {
                         capture(device, graph, target, pixels);
                     }
                     write(capture(device, graph, target, pixels), out.resolve("owner-" + shot[0] + ".png"));
+                    checkRoom(renderer, "owner-" + shot[0] + ".png");
                 }
                 // Dusk: 24 point lights over the rocks
                 lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 0.05f, 0.05f, 0.08f);
@@ -207,6 +214,7 @@ class Screenshots {
                         capture(device, graph, target, pixels);
                     }
                     write(capture(device, graph, target, pixels), out.resolve("owner-" + shot[0] + ".png"));
+                    checkRoom(renderer, "owner-" + shot[0] + ".png");
                 }
                 shadows.close();
             }
@@ -224,9 +232,16 @@ class Screenshots {
                         capture(device, graph, target, pixels);
                     }
                     write(capture(device, graph, target, pixels), out.resolve("owner-sun-soft-reference.png"));
+                    checkRoom(renderer, "owner-sun-soft-reference.png");
                 }
             }
         }
+    }
+
+    /** Fails where the culling of the last frames wanted more room than {@code renderer} has: casters left out. */
+    private static void checkRoom(MeshletRenderer renderer, String shot) {
+        assertThat(renderer.chunksOverflowed()).as("%s: culling wanted %,d chunks, room for %,d", shot,
+            renderer.wantedChunks(), renderer.chunkCapacity()).isFalse();
     }
 
     /** An RGBA texel (red lowest) as Java's RGB. */

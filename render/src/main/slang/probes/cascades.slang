@@ -4,7 +4,7 @@
 // ended. No history: every frame finds every probe's light anew, and merges the cascades from the last (whose rays go
 // on to the environment) to the first, each direction of a probe that met nothing within its interval taking what the
 // next cascade's probes around it found beyond, in its four finer directions. The first cascade's merged light becomes
-// a probe volume of one cascade, as indirect.slang's probeLight samples it (irradiance / pi with the sky's visibility,
+// a probe volume of one cascade, as probes/volume.slang's probeLight samples it (irradiance / pi with the sky's visibility,
 // and distance moments), so every shading path reads it as it reads the ray-traced probe volume. A frame's passes:
 //
 // - generateMain, a dispatch per cascade, a thread per probe and direction: the interval's ray as a path of the
@@ -19,7 +19,7 @@
 //   out (each cascade marks them as it merges); written in place. For the first cascade, the merged light into the
 //   probe's irradiance and sky visibility per octahedral texel (cosine and solid angle weighted), its rays' distances
 //   into mean and mean square, and its state (inside geometry: not sampled).
-import indirect;
+import probes.volume;
 import surfaces;
 import bindless;
 import raytracing;

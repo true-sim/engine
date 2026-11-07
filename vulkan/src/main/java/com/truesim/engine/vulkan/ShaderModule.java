@@ -32,11 +32,13 @@ public final class ShaderModule implements AutoCloseable {
     private final VulkanDevice device;
     private final long handle;
     private final String name;
+    private final int[] constantIds;
     private boolean closed;
 
     private ShaderModule(VulkanDevice device, ByteBuffer code, String name) {
         this.device = device;
         this.name = name;
+        this.constantIds = constantIds(code);
         try (MemoryStack stack = stackPush()) {
             LongBuffer module = stack.mallocLong(1);
             Vulkan.check(vkCreateShaderModule(device.handle(), VkShaderModuleCreateInfo.calloc(stack)
@@ -46,8 +48,12 @@ public final class ShaderModule implements AutoCloseable {
         }
     }
 
-    /** The SPIR-V at classpath resource {@code resource}, e.g. {@code shaders/meshlets.spv}. */
+    /**
+     * The SPIR-V at classpath resource {@code resource}, e.g. {@code shaders/meshlets.spv}, or at its replacement on
+     * the device ({@link VulkanDevice#shaderVariants}).
+     */
     public static ShaderModule load(VulkanDevice device, String resource) {
+        resource = device.shaderVariants().resolve(resource);
         byte[] bytes;
         try (InputStream in = ShaderModule.class.getClassLoader().getResourceAsStream(resource)) {
             if (in == null) {
@@ -72,6 +78,38 @@ public final class ShaderModule implements AutoCloseable {
             MemoryUtil.memFree(spirv);
         }
     }
+
+    /**
+     * The ids of the specialization constants the module declares ({@code SpecId} decorations), sorted: what
+     * {@link Specialization} checks a pipeline sets.
+     */
+    public int[] constantIds() {
+        return constantIds.clone();
+    }
+
+    /** The {@code SpecId} decorations' ids of SPIR-V {@code code} (little-endian words, after the 5-word header). */
+    static int[] constantIds(ByteBuffer code) {
+        java.nio.IntBuffer words = code.duplicate().order(java.nio.ByteOrder.LITTLE_ENDIAN).asIntBuffer();
+        java.util.TreeSet<Integer> ids = new java.util.TreeSet<>();
+        int at = 5;
+        int n = words.limit();
+        while (at < n) {
+            int word = words.get(at);
+            int count = word >>> 16;
+            int opcode = word & 0xffff;
+            if (count == 0) {
+                break; // not SPIR-V past here
+            }
+            if (opcode == OP_DECORATE && count >= 4 && words.get(at + 2) == DECORATION_SPEC_ID) {
+                ids.add(words.get(at + 3));
+            }
+            at += count;
+        }
+        return ids.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    private static final int OP_DECORATE = 71;
+    private static final int DECORATION_SPEC_ID = 1;
 
     public long handle() {
         return handle;

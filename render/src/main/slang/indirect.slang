@@ -1,69 +1,14 @@
 // Indirect light: what a view's surfaces receive from all around rather than from its lights. Shading reads it from one
-// table per view (engine-render's Keys.INDIRECT_LIGHT), whose sections its providers fill: the distant environment
-// (EnvironmentLighting: prefiltered cubes and spherical harmonics), later probe volumes, reflection probes and
-// screen-space techniques, each a section and a flag. Without a table, the constant sky of shading.slang's ambient().
+// table per view (engine-render's Keys.INDIRECT_LIGHT): the distant environment (EnvironmentLighting: prefiltered
+// cubes and spherical harmonics), with what the view's shading hooks (hooks.slang) add of light from all around (an
+// irradiance volume, probes). The hooks' other points, a surface's change before it is lit and the media along the view
+// ray, need no table: they run from the view's hook block (ShadingHookBlock) alone, through the generated dispatch
+// included below. Without a table, the constant sky of shading.slang's ambient().
 module indirect;
 
 import bindless;
 import shading;
-
-/** The most cascades a probe volume has. */
-public static const uint PROBE_CASCADES = 6;
-/** Texels of a probe's irradiance (and sky visibility) along each side, its border of one texel included. */
-public static const uint PROBE_IRRADIANCE_TEXELS = 8;
-/** Texels of a probe's distance moments along each side, its border included. */
-public static const uint PROBE_DEPTH_TEXELS = 16;
-
-/** A probe is traced and sampled (classification: not inside geometry). */
-public static const uint PROBE_ACTIVE = 1;
-/** A probe holds light: updated at least once since its slot took it. */
-public static const uint PROBE_VALID = 2;
-
-/**
- * In a volume's flags: a point beyond the last cascade takes the probes at its border nearest to it (their light as
- * they see it, the bound of Chebyshev weighing them) rather than the environment's (radiance cascades, whose one
- * cascade ends where the scene may go on).
- */
-public static const uint PROBE_VOLUME_CLAMP = 1;
-
-/** One probe's state: 48 bytes. */
-[HostLayout]
-public struct ProbeState
-{
-    public float3 offset;          // relocation: from its grid position, world units
-    public uint flags;             // PROBE_*
-    public int3 coordinates;       // the world grid coordinate its slot holds (scrolling: a new one resets it)
-    public uint frames;            // updates its history holds (the adaptive hysteresis' count)
-    public float drift;            // the updates' mean relative difference from the history, averaged over a few
-    public uint pad0;              // (adaptive hysteresis: a change too small for one update to show); its square
-    public uint pad1;
-    public uint pad2;
-};
-
-/**
- * A probe volume as its frame wrote it (engine-render's ProbeVolume, design S2: DDGI, Majercik et al. 2019 and
- * 2021): cascades of probes on grids around an anchor camera, each twice as far apart as the one before, scrolling
- * with it (a probe's slot is its world grid coordinate modulo the grid). Positions relative to the volume's origin, a
- * world position (ProbeVolume's), with world axes. Read a field at a time.
- */
-[HostLayout]
-public struct ProbeVolumeData
-{
-    public uint cascades;
-    public uint irradiance;        // sampled slot: the irradiance atlas (rgb: irradiance / pi; a: sky visibility)
-    public uint depth;             // sampled slot: the distance moments atlas (mean distance, mean squared)
-    public uint flags;             // PROBE_VOLUME_*
-    public uint3 probes;           // probes along each axis of a cascade
-    public float normalBias;       // how far a shaded point is moved along its normal, of the probes' spacing
-    public float viewBias;         // and towards the viewer
-    public float blend;            // of a cascade's probes from its edge: where it blends into the next one
-    public float maxDistance;      // the longest distance moments hold
-    public uint pad;
-    public ProbeState* states;     // per probe: its relocation, its state
-    public float4 cascade[6];      // the cascade's lowest probe relative to the origin (xyz), its spacing (w)
-    public int4 base[6];           // that probe's world grid coordinate (xyz): slots are coordinates modulo probes
-};
-
+__exported import hooks;
 
 /** The table. Read a field at a time (pitfalls.md: no loads of whole structs through pointers). */
 [HostLayout]
@@ -79,17 +24,91 @@ public struct IndirectLight
     public uint pad;
     public float4 rotation;        // a unit quaternion from the world to the environment's frame
     public float sh[27];           // diffuse light (irradiance / pi): 9 spherical harmonics, rgb each
-    public uint reserved;          // for the sections to come: reflection probes, screen space
-    public ProbeVolumeData* volume; // INDIRECT_PROBES: the probe volume lighting the view's surfaces
-    public float3 volumeOffset;    // INDIRECT_PROBES: the view's camera less the volume's origin (world axes)
     public uint pad1;
+    public ShadingHookBlock* hooks; // a probe volume's own table (its rays' hits): its own hook block; else unused
 };
 
 /** The table holds a distant environment. */
 public static const uint INDIRECT_ENVIRONMENT = 1;
-/** The table holds a probe volume: its diffuse light replaces the environment's harmonics where it reaches. */
-public static const uint INDIRECT_PROBES = 2;
 
+// The shading hooks' dispatch, generated by the build from the [ShadingHook] structs of this project and its
+// libraries (surfaceHooks, indirectHooks, mediaHooks, RUN_HOOK_*): on the include path of every project importing this
+// module.
+#include "shading-hooks/dispatch.slang"
+
+/**
+ * Where a point is shaded, as its hooks need it beyond the point itself: the view's hook block (never null in a
+ * pipeline running hooks), the pixel (NO_PIXEL off the screen), the way it is shaded (SHADING_*), the override entry
+ * its hooks' switches and records come from (0: the view's; an instance's, hookEntry: its node's switches and values
+ * layered over the view's, engine-render's ShadingHookOverrides) and the hooks its material refuses (words, a bit per
+ * hook; refusing none by default). Every hook point follows the entry and the refusals, media too; the sky has none.
+ */
+public struct HookSite
+{
+    public ShadingHookBlock* block;
+    public uint2 pixel;
+    public uint path;
+    public uint entry;
+    public uint* refused;
+
+    public static HookSite at(ShadingHookBlock* block, uint2 pixel, uint path)
+    {
+        HookSite site;
+        site.block = block;
+        site.pixel = pixel;
+        site.path = path;
+        site.entry = 0;
+        site.refused = noHooksRefused(block, SHADING_HOOK_COUNT);
+        return site;
+    }
+
+    /** The site of a point of instance `instance` (an id of the scene's instances): its override entry. */
+    public static HookSite ofInstance(ShadingHookBlock* block, uint2 pixel, uint path, uint instance)
+    {
+        HookSite site = at(block, pixel, path);
+        if (anyShadingHooks())
+        {
+            site.entry = hookEntry(block, instance);
+        }
+        return site;
+    }
+
+    /** This site, its material refusing the hooks of `words` (MATERIAL_REFUSES_HOOKS), or none (null: as it was). */
+    public HookSite refusing(uint* words)
+    {
+        HookSite site = this;
+        if (words != nullptr)
+        {
+            site.refused = words;
+        }
+        return site;
+    }
+};
+
+/** The point at `position` (relative to the view's camera) as hooks see it. */
+public ShadingPoint hookPoint(HookSite site, float3 position, float3 n, float3 geometric, float3 toViewer,
+    uint flags)
+{
+    return shadingPoint(site.block, position, n, geometric, toViewer, site.pixel, site.path, flags);
+}
+
+/**
+ * Surface `s` at `position` (relative to the view's camera) as the view's surface hooks change it before it is lit,
+ * `geometric` its normal before normal maps, `materialHeader` its material's (MATERIAL_HOOK_COAT); the hooks its
+ * material refuses (the site's) leave it alone. Its alpha stays.
+ */
+public void surfaceHooksAt(HookSite site, inout Surface s, float3 position, float3 geometric, float3 toViewer,
+    uint materialHeader)
+{
+    if (anyShadingHooks())
+    {
+        float alpha = s.alpha;
+        uint flags = (materialHeader & MATERIAL_HOOK_COAT) != 0 ? SHADING_COAT_ALLOWED : 0;
+        surfaceHooks(site.block, site.entry, site.refused, hookPoint(site, position, s.normal, geometric, toViewer,
+            flags), s);
+        s.alpha = alpha;
+    }
+}
 
 float3 rotateBy(float4 q, float3 v)
 {
@@ -103,7 +122,7 @@ float3 environmentDirection(IndirectLight* t, float3 d)
     return rotateBy(t[0].rotation, d);
 }
 
-/** The diffuse light (irradiance / pi) from all around arriving at a surface facing `n`. */
+/** The diffuse light (irradiance / pi) from all around arriving at a surface facing `n`: the environment's. */
 public float3 diffuseLight(IndirectLight* t, float3 n)
 {
     float3 d = environmentDirection(t, n);
@@ -118,191 +137,83 @@ public float3 diffuseLight(IndirectLight* t, float3 n)
     return max(sum, 0.0) * t[0].intensity;
 }
 
-/** The octahedral coordinate of unit `d` in [0, 1]. */
-public float2 octahedralUnit(float3 d)
+/**
+ * The light from all around a surface at `position` (relative to the view's camera) facing `n` (`geometric` before
+ * normal maps), seen from `toViewer`, as the view's indirect hooks give what `q` asks (none: AroundLight.none()): one
+ * query per point, every hook asked once.
+ */
+public AroundLight aroundLight(HookSite site, float3 position, float3 n, float3 geometric, float3 toViewer,
+    AroundQuery q)
 {
-    d /= abs(d.x) + abs(d.y) + abs(d.z);
-    float2 p = d.xy;
-    if (d.z < 0)
+    AroundLight light = AroundLight.none();
+    if (anyShadingHooks())
     {
-        p = (1 - abs(d.yx)) * float2(d.x >= 0 ? 1 : -1, d.y >= 0 ? 1 : -1);
+        indirectHooks(site.block, site.entry, site.refused, hookPoint(site, position, n, geometric, toViewer, 0), q, light);
     }
-    return p * 0.5 + 0.5;
+    return light;
 }
 
-/** Where a direction's texel of probe tile `column`, `row` lies in an atlas of tiles `tile` texels wide, normalized. */
-float2 atlasCoordinate(float3 d, uint column, uint row, uint tile, float2 atlas)
+/** A query for what `wants` (AROUND_*) along `direction` at `roughness`. */
+public AroundQuery around(float3 direction, float roughness, uint wants)
 {
-    float interior = float(tile - 2);
-    float2 texel = float2(column, row) * float(tile) + 1 + octahedralUnit(d) * interior;
-    return texel / atlas;
+    AroundQuery q;
+    q.direction = direction;
+    q.roughness = roughness;
+    q.coatDirection = direction;
+    q.wants = wants;
+    return q;
 }
 
-/** `a` modulo `n`, never negative. */
-public int3 wrapProbe(int3 a, int3 n)
+/** `light`'s diffuse light, with the environment's harmonics around `n` where the hooks leave some uncovered. */
+public float3 aroundDiffuse(IndirectLight* t, AroundLight light, float3 n)
 {
-    return ((a % n) + n) % n;
+    return light.coverage < 1 ? light.diffuse + (1 - light.coverage) * diffuseLight(t, n) : light.diffuse;
 }
 
 /**
- * The probe volume's light at `p` (relative to its origin) on a surface facing `n`, seen from `toViewer`: the
- * irradiance / pi of the probes around the point, weighed by trilinear weights, how much each faces the surface and
- * whether it can see the point (the bound of Chebyshev on its distance moments), blended between cascades near their
- * edges; and in `sky` the fraction of the environment visible around `skyDirection` (the probes' rays that met
- * nothing), for specular occlusion. `found`: false outside every cascade.
+ * `light`'s specular radiance along `r` at `roughness`: the hooks' where they cover it, the rest the environment's
+ * reflection seen by their visibility.
  */
-public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toViewer, float3 skyDirection,
-    out float sky, out bool found)
+public float3 aroundSpecular(IndirectLight* t, AroundLight light, float3 r, float roughness)
 {
-    sky = 1;
-    found = false;
-    uint cascades = volume[0].cascades;
-    int3 probes = int3(volume[0].probes);
-    float normalBias = volume[0].normalBias;
-    float viewBias = volume[0].viewBias;
-    float blend = volume[0].blend;
-    uint irradianceSlot = volume[0].irradiance;
-    uint depthSlot = volume[0].depth;
-    ProbeState* states = volume[0].states;
-    float2 tiles = float2(probes.x * probes.z, probes.y * int(cascades));
-    float2 irradianceAtlas = tiles * float(PROBE_IRRADIANCE_TEXELS);
-    float2 depthAtlas = tiles * float(PROBE_DEPTH_TEXELS);
-    float3 sum = 0;
-    float skySum = 0;
-    float remaining = 1; // of the point's light not yet taken from a finer cascade
-    for (uint c = 0; c < cascades && remaining > 1.0e-4; c++)
-    {
-        float4 cascade = volume[0].cascade[c];
-        float spacing = cascade.w;
-        float3 biased = p + (n * normalBias + toViewer * viewBias) * spacing;
-        float3 local = (biased - cascade.xyz) / spacing;
-        float3 last = float3(probes - 1);
-        if (any(local < 0) || any(local > last))
-        {
-            if (c + 1 < cascades || (volume[0].flags & PROBE_VOLUME_CLAMP) == 0)
-            {
-                continue;
-            }
-            local = clamp(local, float3(0), last);
-        }
-        // Near its edge a cascade hands over to the next coarser one
-        float3 edge = min(local, last - local);
-        float share = c + 1 < cascades
-            ? saturate(min(edge.x, min(edge.y, edge.z)) / max(blend * min(last.x, min(last.y, last.z)), 1.0e-4))
-            : 1.0;
-        int3 base = volume[0].base[c].xyz;
-        int3 lower = clamp(int3(floor(local)), int3(0), probes - 2);
-        float3 alpha = saturate(local - float3(lower));
-        float3 irradiance = 0;
-        float visible = 0;
-        float weights = 0;
-        for (uint k = 0; k < 8; k++)
-        {
-            int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
-            int3 i = lower + o;
-            int3 slot = wrapProbe(base + i, probes);
-            uint index = uint(slot.x + probes.x * (slot.z + probes.z * (slot.y + probes.y * int(c))));
-            uint flags = states[index].flags;
-            if ((flags & (PROBE_ACTIVE | PROBE_VALID)) != (PROBE_ACTIVE | PROBE_VALID))
-            {
-                continue;
-            }
-            float3 probe = cascade.xyz + float3(i) * spacing + states[index].offset;
-            float3 toProbe = probe - biased;
-            float distance = max(length(toProbe), 1.0e-5);
-            float3 direction = toProbe / distance;
-            float3 trilinear = lerp(1 - alpha, alpha, float3(o));
-            float w = (dot(direction, n) + 1) * 0.5;
-            w = w * w + 0.2;
-            uint column = uint(slot.x + probes.x * slot.z);
-            uint row = uint(slot.y + probes.y * int(c));
-            float2 moments = textures[depthSlot].SampleLevel(samplers[LINEAR_CLAMP],
-                atlasCoordinate(-direction, column, row, PROBE_DEPTH_TEXELS, depthAtlas), 0).rg;
-            if (distance > moments.x)
-            {
-                float variance = abs(moments.x * moments.x - moments.y);
-                float d = distance - moments.x;
-                float chebyshev = variance / (variance + d * d);
-                w *= chebyshev * chebyshev * chebyshev;
-            }
-            w = max(w, 1.0e-6);
-            if (w < 0.2)
-            {
-                w *= w * w / 0.04; // crushed: what a probe barely sees fades out quickly
-            }
-            w *= trilinear.x * trilinear.y * trilinear.z;
-            float3 value = textures[irradianceSlot].SampleLevel(samplers[LINEAR_CLAMP],
-                atlasCoordinate(n, column, row, PROBE_IRRADIANCE_TEXELS, irradianceAtlas), 0).rgb;
-            float skyValue = textures[irradianceSlot].SampleLevel(samplers[LINEAR_CLAMP],
-                atlasCoordinate(skyDirection, column, row, PROBE_IRRADIANCE_TEXELS, irradianceAtlas), 0).a;
-            irradiance += w * value;
-            visible += w * skyValue;
-            weights += w;
-        }
-        if (weights <= 0)
-        {
-            continue; // no probe of this cascade sees the point: the next one's
-        }
-        float take = remaining * share;
-        sum += take * irradiance / weights;
-        skySum += take * visible / weights;
-        remaining -= take;
-        found = true;
-    }
-    if (!found)
-    {
-        return 0;
-    }
-    float taken = 1 - remaining;
-    sky = skySum / taken;
-    return sum / taken;
+    return light.specularCoverage < 1
+        ? light.specular + (1 - light.specularCoverage) * specularLight(t, r, roughness) * light.visibility
+        : light.specular;
 }
 
 /**
- * The diffuse light (irradiance / pi) from all around arriving at a surface facing `n` at `position` (relative to the
- * view's camera), seen from `toViewer`: the probe volume's where the table holds one and it reaches the point, else
- * the environment's harmonics.
+ * `radiance` leaving a point at `position` (relative to the view's camera, normal `n`) towards the camera, through the
+ * view's media hooks: what arrives, and the transmittance between (1 without media). Needs no indirect-light table.
  */
-public float3 diffuseLightAt(IndirectLight* t, float3 n, float3 position, float3 toViewer)
+public ViewRay alongViewRay(HookSite site, float3 radiance, float3 position, float3 n)
 {
-    if ((t[0].flags & INDIRECT_PROBES) != 0)
+    ViewRay ray;
+    ray.radiance = radiance;
+    ray.transmittance = 1;
+    if (anyShadingHooks())
     {
-        float sky;
-        bool found;
-        float3 e = probeLight(t[0].volume, position + t[0].volumeOffset, n, toViewer, n, sky, found);
-        if (found)
-        {
-            return e;
-        }
+        mediaHooks(site.block, site.entry, site.refused, hookPoint(site, position, n, n, normalize(-position), 0), ray);
     }
-    return diffuseLight(t, n);
+    return ray;
 }
 
 /**
- * How much of the environment a surface at `position` (relative to the view's camera) facing `n` sees around
- * direction `r`: the probe volume's sky visibility where the table holds one (specular occlusion at the probes'
- * scale), else 1.
+ * The sky's `radiance` seen along `direction` (unit, world axes) through the view's media hooks: a point at infinity
+ * (SHADING_SKY; its position is `direction` itself), by the view's records (no instance: no override entry).
  */
-public float environmentVisibility(IndirectLight* t, float3 r, float3 position, float3 n, float3 toViewer)
+public float3 skyThroughMedia(HookSite site, float3 radiance, float3 direction)
 {
-    if ((t[0].flags & INDIRECT_PROBES) == 0)
+    if (anyShadingHooks())
     {
-        return 1;
+        ViewRay ray;
+        ray.radiance = radiance;
+        ray.transmittance = 1;
+        site.path = SHADING_SKY;
+        mediaHooks(site.block, 0, noHooksRefused(site.block, SHADING_HOOK_COUNT),
+            hookPoint(site, direction, -direction, -direction, -direction, 0), ray);
+        return ray.radiance;
     }
-    float sky;
-    bool found;
-    probeLight(t[0].volume, position + t[0].volumeOffset, n, toViewer, r, sky, found);
-    return found ? sky : 1.0;
-}
-
-/**
- * The environment reflected along `r` by a GGX lobe of `roughness` at `position` on a surface facing `n`: dimmed by
- * the probe volume's sky visibility around `r` where the table holds one.
- */
-public float3 specularLightAt(IndirectLight* t, float3 r, float roughness, float3 position, float3 n,
-    float3 toViewer)
-{
-    return specularLight(t, r, roughness) * environmentVisibility(t, r, position, n, toViewer);
+    return radiance;
 }
 
 /** The environment reflected along `r` by a GGX lobe of `roughness`. */
@@ -332,12 +243,15 @@ public float3 brdfTable(IndirectLight* t, float nv, float roughness)
  * Surface `s` lit by the table's indirect light, seen from `toViewer` (unit), the image-based lighting of the glTF
  * sample viewer: diffuse light from the spherical harmonics, the prefiltered environment's reflections scaled by the
  * lookup table (with multiple scattering), the sheen's, a clear coat's; a thin film in the Fresnel, anisotropy bending
- * the reflected normal, diffuse transmission lit from behind. Darkened by the surface's occlusion.
+ * the reflected normal, diffuse transmission lit from behind. Darkened by the surface's occlusion. What the view's
+ * indirect hooks give (`site`; `geometric` the normal before normal maps) takes the place of the environment's where
+ * they cover it, asked once.
  */
-public float3 indirectLight(IndirectLight* t, Surface s, float3 toViewer, float3 position)
+public float3 indirectLight(IndirectLight* t, HookSite site, Surface s, float3 toViewer, float3 position,
+    float3 geometric)
 {
     float3 reflectance;
-    return indirectLightWeighed(t, s, toViewer, position, reflectance);
+    return indirectLightWeighed(t, site, s, toViewer, position, geometric, reflectance);
 }
 
 /**
@@ -346,11 +260,11 @@ public float3 indirectLight(IndirectLight* t, Surface s, float3 toViewer, float3
  * and bias, the occlusion, and what a sheen and a clear coat over it let through. Screen-space reflections replace
  * that term by it (surfaces.slang). 0 where the reflection bends from the mirror direction (anisotropy).
  */
-public float3 indirectLightWeighed(IndirectLight* t, Surface s, float3 toViewer, float3 position,
-    out float3 reflectance)
+public float3 indirectLightWeighed(IndirectLight* t, HookSite site, Surface s, float3 toViewer, float3 position,
+    float3 geometric, out float3 reflectance)
 {
     float3 diffuseWeight;
-    return indirectLightWeights(t, s, toViewer, position, reflectance, diffuseWeight);
+    return indirectLightWeights(t, site, s, toViewer, position, geometric, reflectance, diffuseWeight);
 }
 
 /**
@@ -360,8 +274,8 @@ public float3 indirectLightWeighed(IndirectLight* t, Surface s, float3 toViewer,
  * term by it (surfaces.slang). The part a surface transmitting diffusely takes from behind (diffuseLight(t, -n)) is
  * left out: it is not of the light around the normal.
  */
-public float3 indirectLightWeights(IndirectLight* t, Surface s, float3 toViewer, float3 position,
-    out float3 reflectance, out float3 diffuseWeight)
+public float3 indirectLightWeights(IndirectLight* t, HookSite site, Surface s, float3 toViewer, float3 position,
+    float3 geometric, out float3 reflectance, out float3 diffuseWeight)
 {
     float3 n = s.normal;
     float nv = saturate(dot(n, toViewer));
@@ -389,21 +303,17 @@ public float3 indirectLightWeights(IndirectLight* t, Surface s, float3 toViewer,
     float ess = lut.x + lut.y;
     float3 fAvg = f0 + (1 - f0) / 21;
     float3 fmsEms = (1 - ess) * fssEss * fAvg / (1 - fAvg * (1 - ess));
-    // Where a probe volume lights the view, its sky visibility dims the environment's reflections (specular
-    // occlusion at the probes' scale) and its irradiance replaces the environment's harmonics: one look-up for both
-    float sky = 1;
-    float3 around = 0;
-    bool found = false;
-    if ((t[0].flags & INDIRECT_PROBES) != 0)
-    {
-        around = probeLight(t[0].volume, position + t[0].volumeOffset, n, toViewer, r, sky, found);
-    }
-    if (!found)
-    {
-        around = diffuseLight(t, n);
-        sky = 1;
-    }
-    float3 specular = specularLight(t, r, s.roughness) * sky * fssEss;
+    // The indirect hooks' light (probes), asked once for all the point uses: their diffuse light replaces the
+    // environment's harmonics where they have some, their specular radiance its reflection, and their visibility
+    // around r (and the coat's direction) dims the environment's reflections (specular occlusion)
+    float3 coatDirection = reflect(-toViewer, s.clearcoatNormal);
+    AroundQuery q = around(r, s.roughness, AROUND_DIFFUSE | AROUND_SPECULAR | AROUND_VISIBILITY
+        | (s.clearcoat > 0 ? AROUND_COAT : 0) | (s.diffuseTransmission > 0 ? AROUND_BACK : 0));
+    q.coatDirection = coatDirection;
+    AroundLight hooked = aroundLight(site, position, n, geometric, toViewer, q);
+    float sky = hooked.visibility;
+    float3 around = aroundDiffuse(t, hooked, n);
+    float3 specular = aroundSpecular(t, hooked, r, s.roughness) * fssEss;
     float3 diffuseColor = (1 - s.metallic) * (1 - s.transmission) * s.albedo;
     diffuseWeight = (fmsEms + diffuseColor * (1 - fssEss - fmsEms)) * (1 - s.diffuseTransmission) * s.occlusion;
     float3 diffuse = (fmsEms + diffuseColor * (1 - fssEss - fmsEms)) * around;
@@ -411,7 +321,8 @@ public float3 indirectLightWeights(IndirectLight* t, Surface s, float3 toViewer,
     {
         // Light through the surface, from behind it, in its transmission color
         float3 through = (1 - s.metallic) * (1 - s.transmission) * s.diffuseTransmissionColor
-            * diffuseLightAt(t, -n, position, toViewer) * (1 - fssEss - fmsEms);
+            * (hooked.backCoverage < 1 ? hooked.back + (1 - hooked.backCoverage) * diffuseLight(t, -n)
+                : hooked.back) * (1 - fssEss - fmsEms);
         diffuse = lerp(diffuse, through, s.diffuseTransmission);
     }
     float3 color = (diffuse + specular) * s.occlusion;
@@ -431,9 +342,7 @@ public float3 indirectLightWeights(IndirectLight* t, Surface s, float3 toViewer,
         float cv = saturate(dot(s.clearcoatNormal, toViewer));
         float fresnel = coatFresnel(cv);
         float3 coatLut = brdfTable(t, cv, s.clearcoatRoughness);
-        float3 coatDirection = reflect(-toViewer, s.clearcoatNormal);
-        float3 coat = specularLight(t, coatDirection, s.clearcoatRoughness)
-            * environmentVisibility(t, coatDirection, position, s.clearcoatNormal, toViewer)
+        float3 coat = specularLight(t, coatDirection, s.clearcoatRoughness) * hooked.coatVisibility
             * (0.04 * coatLut.x + coatLut.y) * s.occlusion;
         color = color * (1 - s.clearcoat * fresnel) + s.clearcoat * coat;
         reflectance *= 1 - s.clearcoat * fresnel;

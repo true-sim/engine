@@ -246,7 +246,9 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
         float scale = g.setting(kind.<Float>setting("resolutionScale"));
         Image hits = g.create("reflection hits", ImageDesc.of(HITS_FORMAT,
             Math.max(1, (int) Math.ceil(color.width() * scale)), Math.max(1, (int) Math.ceil(color.height() * scale))));
-        int[] constants = {hierarchical ? 1 : 0, indirect != null ? 1 : 0, occlusion != null ? 1 : 0};
+        ShadingHookInputs.Set hooks = ShadingHookInputs.of(g, view.view()); // the indirect hooks, with the light
+        com.truesim.engine.vulkan.Specialization constants = hooks.specialization(hierarchical ? 1 : 0,
+            indirect != null ? 1 : 0, occlusion != null ? 1 : 0);
         Pipeline trace = g.computeProgram("shaders/reflections/reflect.spv", "traceMain", ReflectPush.BYTES,
             constants);
         Pipeline composite = g.computeProgram("shaders/reflections/reflect.spv", "compositeMain", ReflectPush.BYTES,
@@ -274,6 +276,7 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
             .read(normal, Access.STORAGE_READ).read(material, Access.STORAGE_READ)
             .read(reflectance, Access.STORAGE_READ).read(hits, Access.STORAGE_READ)
             .read(chain, Access.SAMPLED_COMPUTE).write(color, Access.STORAGE_WRITE);
+        hooks.readBy(compositing, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         if (indirect != null) {
             indirect.readBy(compositing, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         }

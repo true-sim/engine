@@ -1168,6 +1168,166 @@ dropped out of the device list. Both times the first loss came in a test drawing
 
 Next (#46): light binning, shadows per light, buckets, transparency and post effects as swappable techniques.
 
+### Writing a shading hook
+
+What a library adds to every way of shading without the core naming it comes through **shading hooks**: global
+illumination's light from all around, fog, aerial perspective and volumetrics along the view ray, weather's wetness or
+snow on surfaces. They run in forward shading, the visibility buffer, both blended transparencies, the sky, the
+composites of ambient occlusion and reflections, the reference path tracer's hits and the probes' hits. The engine's
+own probe volume is one (`probes/hook.slang`); it leaves with global illumination.
+
+A hook is a Slang struct marked `[ShadingHook("name")]` (`hooks.slang`) conforming to the interface of each **hook
+point** it has, the compiler checking its functions, with its parameters as a record of its own:
+
+```slang
+import hooks;
+
+[ShadingHookParameters]                       // a Java record is generated for it, as for material records
+public struct AcmeFogParameters
+{
+    public float density = 0.02;
+    public float3 color = float3(0.6, 0.7, 0.8);
+    public uint64_t volume;                   // addresses as Java longs: what only the frame knows
+};
+
+[ShadingHook("acme.fog")]
+[ShadingHookAfter("acme.rain")]               // ordered after another hook, where there is one (or ShadingHookBefore)
+public struct AcmeFog : IMediaHook
+{
+    public typealias Parameters = AcmeFogParameters;
+
+    // Between the camera and the shaded point: radiance * T + L, transmittance * T
+    public static void media(ShadingPoint p, AcmeFogParameters* fog, inout ViewRay ray)
+    {
+        float t = exp(-fog[0].density * length(p.position));
+        ray.through(float3(t), (1 - t) * fog[0].color);
+    }
+};
+```
+
+- **The points.** `ISurfaceHook.surface(p, params, inout Surface s)` changes a surface before it is lit, in world
+  terms (`p.world()`, `p.camera` and `p.cameraLow`: the same for every view), at rasterized pixels, the visibility
+  buffer's, ray hits and probe hits alike; never its alpha (the dispatch keeps it). A hook puts a coat of its own (a
+  water layer, `s.clearcoat`) only where `p.flags & SHADING_COAT_ALLOWED`, which `Material.hookCoat(true)` sets.
+  Opting out is per hook, of any point: a material refuses hooks by name (`Material.refuseHooks("weather.snow")`: a
+  bit per hook after its feature table, tested in the dispatch before each hook; names the shaders lack are ignored),
+  and an override entry switches hooks off or on for instances (below); a material's refusal wins.
+  `IIndirectHook.indirect(p, params, q, inout AroundLight light)` gives the light from all around, asked once per point
+  for what it uses (`q.wants`, `AROUND_*`): diffuse light and how much of it the hooks cover, specular radiance along
+  `q.direction` at `q.roughness` and its coverage, the environment's visibility around the direction and the coat's,
+  the back side's diffuse light. `IMediaHook.media(p, params, inout ViewRay ray)` changes the light on its way to the
+  camera; the sky is a point at infinity (`p.path == SHADING_SKY`). `ShadingPoint` also gives the geometric normal, the
+  pixel (`NO_PIXEL` off screen) and how the point is shaded (`SHADING_RASTER`, `SHADING_COMPOSITE`, `SHADING_RAY_HIT`,
+  `SHADING_PROBE_HIT`, `SHADING_SKY`).
+- **Imports.** A hook imports `hooks`, `bindless`, `shading` and `lights`, and its own library's modules; never a
+  shading path's (`indirect`, `meshlets.*`, `surfaces`, ...): it runs inside all of them (`ShadingHookImportsTest`).
+- **One dispatch, merged at build time.** build-logic's `truesim.slang` merges the hooks of a project and its libraries,
+  in their order, into `shading-hooks/dispatch.slang` (from this module's `shading-hooks` templates), which
+  `indirect.slang` includes. Hook `i` runs under its bool specialization constant, id 1024 + `i`, and its bit of the
+  view's hook block. A pipeline must set every such constant its shader declares (vulkan's `Specialization` refuses
+  one that does not), so a shading path made without the view's hooks fails rather than silently running none.
+- **Listings, found on the classpath.** A project whose shaders declare hooks gets a listing (`<javaPackage>.<Project>
+  ShadingHooks`, or `slang { shadingHooks = ... }`) and variants of its libraries' shaders that shade, rebuilt with
+  every hook it sees. Listings are services: before a device loads its first shader it takes the one holding every
+  other one's hooks and loads its variants wherever the engine asks for the libraries' shaders
+  (`VulkanDevice.shaderVariants()`, which takes no replacement once a shader is loaded). A game seeing two hook
+  libraries that know nothing of each other lists them in its own build (`slang { shadingHooks =
+  "com.example.game.GameShadingHooks" }`); the engine fails naming that line otherwise.
+- **Values in layers, one writer.** Every hook has a record in each view's hook block (`ShadingHookBlock`, a copy per
+  frame slot, host-visible, its defaults where the view runs it not), written once a frame in one piece. What content
+  says goes in a scene component (engine-scene's `ShadingHookComponent`: the hook's values by field name, on or off,
+  saved with the scene; `ShadingHookSync` hands them to `ShadingHookValues`). A hook with values in the scene runs in
+  every view that shades, with those values, needing no Java. A library's technique adding the hook to a view
+  (`ShadingHooks.add`, modifying `Keys.SHADING_HOOKS`) is then its only writer there: its `ShadingHookSource` gets the
+  scene's record and merges what each frame knows (a graph buffer's address, regions culled to the view, time):
+
+  ```java
+  public List<Key<?>> modifies() { return List.of(Keys.SHADING_HOOKS); }   // built before the view's shading
+  public void build(GraphBuilder g) {
+      Buffer volume = ...;
+      ShadingHooks.of(device).add(g, "acme.fog", new ShadingHookSource() {
+          public int bytes() { return AcmeFogParameters.BYTES; }
+          public boolean active() { return enabled; }                       // its bit, frame by frame
+          public void write(PassContext ctx, ShadingHookParameters authored, MemorySegment into, long offset) {
+              ((AcmeFogParameters) authored).withVolume(ctx.address(volume)).write(into, offset);
+          }
+      }).read(volume);                                                      // shading reads it
+  }
+  ```
+- **Per-instance overrides.** Switches and values can differ per instance, layered over the view's: fog thinner in
+  a house, snow off under a roof. `GpuScene.hookOverrides()` (`ShadingHookOverrides`) holds numbered entries, each
+  with, per hook, whether it runs (`turn(entry, hook, false / true / null)`: off, on, or as the view) and the fields it
+  sets (by field name, or a whole record), and gives each instance one entry or none. Wherever a point of an instance
+  is shaded (rasterized, the visibility buffer, ray and probe hits, the media between it and the camera) every hook
+  runs as the entry switches it (a material refusing it wins; switched on, it runs where the view's pipelines have it)
+  and reads the view's record with the entry's fields in place; only the sky, which has no instance, keeps the view's.
+  In content, engine-scene's `ShadingHookOverride` component (a hook, the fields it sets, and on/off/null;
+  `ShadingHookOverride.off("weather.snow")`) on a node counts for its subtree, the
+  nearest overriding node at or above a renderable giving its entry (`ShadingHookOverrideSync`, after the scene sync each
+  frame); a library drawing a node itself asks `entryOf(node)` (effects-particles gives each emitter its node's). Each
+  view's block carries the entries' merged records (composed each frame, a technique's source adjusting each in
+  `ShadingHookSource.override`), growing as they do (`render.shadingHooks.blockGrowth`, no cap); the instances' entries
+  are a host-visible uint per instance id, growing with the scene. Change them between frames, from the scene's thread:
+
+  ```java
+  ShadingHookOverrides overrides = gpuScene.hookOverrides();
+  int inside = overrides.add();
+  overrides.set(inside, "acme.fog", values);   // MaterialValues: the fields held override the view's
+  overrides.turn(inside, "acme.snow", false);  // no snow inside (null: as the view again)
+  overrides.assign(houseInstance, inside);     // 0: none again; removed instances drop theirs
+  ```
+- **Compiled in, switched by bits.** A view's pipelines are made with the hooks it runs (`render.shadingHooks.specialize`
+  `VIEW`, the default) or with every hook any view of the device has run (`UNION`: one set of pipelines for all views;
+  `ShadingHooksBenchmark` measures what a view pays for hooks it runs not). Either way a hook turns on and off from frame
+  to frame by its bit (`ShadingHookSource.active`, `ShadingHookValues.on`), with no new pipelines or graph; a hook added
+  or removed rebuilds the graph, and pipelines made ahead are made for every set in use. On an RX 9070 XT (30,000
+  rocks, 1920 x 1080, GPU per frame and the CPU recording it, ranges of 5 rounds' medians; 2026-11-07, without JaCoCo;
+  the override rows give every 10th rock an entry of the fog, one shared or one each):
+
+  | shading | configuration | GPU per frame | CPU recording |
+  |---|---|---|---|
+  | forward | no hooks | 1.251-1.276 ms | 0.043-0.061 ms |
+  | forward | fog, per view | 1.271-1.304 ms | 0.046-0.050 ms |
+  | forward | fog, union of 5 | 1.334-1.367 ms | 0.045-0.050 ms |
+  | forward | none on, union of 5 | 1.326-1.351 ms | 0.045-0.049 ms |
+  | forward | fog, 3,000 rocks overridden, 1 entry | 1.284-1.306 ms | 0.045-0.050 ms |
+  | forward | fog, 3,000 rocks overridden, 3,000 entries | 1.316-1.320 ms | 0.113-0.139 ms |
+  | visibility buffer | no hooks | 0.944-0.949 ms | 0.044-0.047 ms |
+  | visibility buffer | fog, per view | 0.958-0.960 ms | 0.046-0.048 ms |
+  | visibility buffer | fog, union of 5 | 0.983-0.989 ms | 0.047-0.066 ms |
+  | visibility buffer | none on, union of 5 | 0.983-0.994 ms | 0.046-0.050 ms |
+  | visibility buffer | fog, 3,000 rocks overridden, 1 entry | 0.949-0.959 ms | 0.046-0.066 ms |
+  | visibility buffer | fog, 3,000 rocks overridden, 3,000 entries | 0.953-0.960 ms | 0.102-0.137 ms |
+
+  Hooks compiled in but off (the union: the test listing's probe volume, an indirect and two surface hooks) cost a
+  view about 0.03-0.06 ms (2-5 %): `VIEW` stays the default, `UNION` trades that for one set of pipelines across views.
+  Override entries cost the shading nothing measurable against the fog alone (an entry looked up per point); the CPU
+  composes every entry's records into each view's block each frame, about 0.02-0.03 us an entry (0.07-0.09 ms for
+  3,000). Testing each hook against the material's refusals and the entry's switches (none set here) left the fog's
+  frame where it was before them (forward 1.269-1.298 ms, visibility buffer 0.962-0.966 ms in the run before, the
+  same day).
+- **Glass and the sky.** The scene seen through a transmissive surface came through the media already: shading takes
+  the media once for it, less the light they add in front of the glass (`(own) * T + L + through * (1 - F) * (behind -
+  L)`). The sky background takes the media as a point at infinity.
+- **Known approximations.** The reference path tracer runs surface hooks at its hits but no media: its images are
+  unfogged. Screen-space reflections and ambient occlusion's bounce take the color of already fogged pixels, so what
+  they add is fogged once more, slightly, where the media are thick. A probe volume's hits read its anchor view's hooks
+  (surface hooks are the same in every view) with its own record for the probe hook: its further bounces come from
+  itself.
+
+`ShadingHooksTest` (the test sources' `test/hooks/*.slang`, merged with the engine's into `TestEngineShadingHooks`)
+draws through a media, an indirect and a surface hook on every way of shading and geometry path; checks that a hook
+compiled in but off, or made in only by the union, leaves the image the same, pixel for pixel, and turns on and off
+without a rebuild; runs a hook from the scene's values alone and merged by a technique; fogs glass once and the sky;
+leaves alpha alone and coats only where allowed; leaves a material refusing a surface hook (and an instance whose
+entry switches it off) unchanged while a second surface hook still changes it, a refusal winning over an entry
+switching the hook on, an entry switching on a hook the view has off; gives instances side by side
+override entries setting one field each (the other the view's), takes one away, turns a technique's fog off for one
+instance (bit for bit as without fog) with 41 entries in the block. `ProbeVolumeTest` checks a surface hook at the
+probes' hits (the white furnace with its walls tinted) and an override entry there (tinted only with the entry).
+engine-scene's `ShadingHookOverrideSyncTest` follows override components through nesting, reparenting, replacing and
+removal.
+
 ### Transparency
 
 Blended materials (`Material.alphaBlend`, glTF's `BLEND`) and transmissive ones are drawn over a view's opaque scene by
@@ -1723,7 +1883,8 @@ entries; each entry has a **kind**, evaluated in shading by an implementation of
 
 `Screenshots.renderShadowOwner` renders every method on 3,000 rocks (`owner-*.png`): the sun by one map, cascades,
 AUTO cascades, hard and soft rays and the soft sun path traced; 24 point lights at dusk by AUTO maps, hard and soft
-rays.
+rays. Its renderer has room for 2^19 chunks of culling (the point lights' AUTO maps want about 140,000 on one frame
+slot, where the renderer cannot grow), and each shot fails if a frame left casters out (`chunksOverflowed()`).
 
 ### Global illumination: foundations
 
@@ -1923,8 +2084,9 @@ mean square (14 x 14 and a border), so a shaded point ignores probes that cannot
   (`WorldLights`: the sun, punctual lights, the GPU's particle lights) and a shadow ray each, emission, the
   environment where rays leave, and the volume's own light of the frame before at the hit (infinite bounces). Back
   faces mark probes inside geometry: they move out (`relocate`) or are turned off (`classify`).
-- **Shading everywhere:** the volume's diffuse light replaces the environment's spherical harmonics through the view's
-  indirect-light table in every path: opaque on both shading techniques, blended and transmissive surfaces, lit
+- **Shading everywhere:** the volume's diffuse light replaces the environment's spherical harmonics through the probe
+  volume's shading hook (`probes/hook.slang`, `ProbeVolume.HOOK`; "Writing a shading hook": the core's shading knows no
+  probe format) in every path running the view's hooks: opaque on both shading techniques, blended and transmissive surfaces, lit
   particles (which took the constant sky before), and the composites of ambient occlusion and reflections; its sky
   visibility dims the environment's reflections (specular occlusion at the probes' scale), which is what keeps a
   closed room dark. One look-up gives both. Views given equal volumes share one update (a headset's eyes, D7:

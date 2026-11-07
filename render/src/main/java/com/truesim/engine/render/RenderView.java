@@ -54,6 +54,8 @@ public final class RenderView implements AutoCloseable {
     private boolean visibilityGrown; // replaced by a bigger one, cleared at the next cull
     private final VulkanDevice device;
     private GpuBuffer frameIndices; // the indexed path's, made when it first draws
+    private final ShadingHookBlock hooks; // its shading hooks' block: the camera written here, the rest by its graph
+    private ShadingHookBlock probeHooks; // the hook block of probe volumes anchored on it (ProbeHooks), made at need
     // Its lists split by shading bin (split.slang), for forward shading by type: made when a graph first splits it,
     // with room for splitRoom shading bins; split while splitCategories > 0 (set by the graph's build).
     private GpuBuffer split;
@@ -133,6 +135,7 @@ public final class RenderView implements AutoCloseable {
         drawImport = new ExternalBuffer("view " + index + " draw command", drawCommand);
         countImport = new ExternalBuffer("view " + index + " draw count", drawCount);
         visibilityImport = visibility == null ? null : new ExternalBuffer("view " + index + " visibility", visibility);
+        hooks = new ShadingHookBlock(device, ShadingHooks.of(device), slots);
         FrameBuffer v = renderer.viewConstants();
         v.put(base, MemorySegment.ofArray(new byte[BYTES]), 0, BYTES); // an earlier view's entry, gone
         putInt(ViewLayout.MAX_DRAWS, options.draws());
@@ -143,6 +146,7 @@ public final class RenderView implements AutoCloseable {
         putLong(ViewLayout.LISTS_DRAW_COMMAND, drawCommand.deviceAddress());
         putLong(ViewLayout.LISTS_VISIBLE_COUNT, drawCount.deviceAddress());
         putLong(ViewLayout.VISIBILITY, visibility == null ? 0 : visibility.deviceAddress());
+        writeHooksAddress(); // a valid block from the start: shaders never load through null (pitfalls.md)
     }
 
     /**
@@ -294,6 +298,7 @@ public final class RenderView implements AutoCloseable {
             float high = (float) p;
             putFloat(ViewLayout.POSITION + 4L * axis, high);
             putFloat(ViewLayout.POSITION_LOW + 4L * axis, (float) (p - high));
+            hooks.camera(axis, high, (float) (p - high));
             putFloat(ViewLayout.EYE + 4L * axis, (float) camera.eye(axis));
         }
         // The jitter of the frame before; this frame's stays until set again.
@@ -871,12 +876,34 @@ public final class RenderView implements AutoCloseable {
         }
     }
 
+    /** The hook block of probe volumes anchored on it, for their rays' hits ({@link ProbeHooks}); made at need. */
+    @AllowAllocation("made once")
+    synchronized ShadingHookBlock probeHooks() {
+        if (probeHooks == null) {
+            probeHooks = new ShadingHookBlock(device, hooks.hooks(), slots);
+        }
+        return probeHooks;
+    }
+
+    /** Its shading hooks' block (hooks.slang's ShadingHookBlock). */
+    ShadingHookBlock hooks() {
+        return hooks;
+    }
+
+    /**
+     * Points the view's shaders at its hook block's copy for the frame recording: called every frame its shading
+     * runs (the address differs from frame slot to frame slot). Allocates nothing.
+     */
+    void writeHooksAddress() {
+        putLong(ViewLayout.HOOKS, hooks.address());
+    }
+
     /** Frees the view's buffers through {@code retiring}: once no frame in flight reads them, or now once it closed. */
     @AllowAllocation("closing a view")
     void freeBuffers(Retiring retiring) {
         closed = true;
         for (AutoCloseable buffer : new AutoCloseable[] {visible, expandCommand, drawCommand, drawCount,
-            visibility, frameIndices, noIndices, split, sort}) {
+            visibility, frameIndices, noIndices, split, sort, hooks, probeHooks}) {
             if (buffer == null) {
                 continue;
             }

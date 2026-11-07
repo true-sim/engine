@@ -34,6 +34,15 @@ public struct ShadePush
     uint diffuse;              // and the diffuse weight
 };
 
+/**
+ * Where pixel `pixel` of instance `instance` is shaded, for the view's hooks: its block, a rasterized pixel, the
+ * instance's override entry.
+ */
+HookSite resolveSite(uint instance, uint2 pixel)
+{
+    return HookSite.ofInstance(push.view[0].hooks, pixel, SHADING_RASTER, instance);
+}
+
 /** The features a variant of a shading pass shows (FEATURE_*): set when its pipeline is made. */
 [vk::constant_id(0)]
 const uint FEATURES = 0;
@@ -245,7 +254,8 @@ public void shadePixel<M : IMaterial>(uint3 id)
         + baryY.z * float4(v[2].uv, v[2].uv1);
     SurfaceOut surface;
     images[push.color][id.xy] = shadeMaterialSurface<M>(view, s, push.scene[0].materials, uvX - uvs,
-        uvY - uvs, push.lights, id.xy, FEATURES, Background.none(), push.indirect, surface); // transmissive: blended
+        uvY - uvs, push.lights, id.xy, FEATURES, Background.none(), push.indirect, resolveSite(ids.x - 1, id.xy),
+        surface); // transmissive: blended
     if (SURFACES != 0)
     {
         writeSurface(view, id.xy, surface, 1);

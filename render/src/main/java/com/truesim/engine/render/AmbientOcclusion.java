@@ -384,11 +384,13 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
         Image specular = g.create("specular occlusion", ImageDesc.of(SPECULAR_FORMAT, color.width(),
             color.height()));
         int indirectConstant = indirect != null ? 1 : 0;
-        Pipeline trace = rays ? g.computeProgram("shaders/ao/ao.spv", "raysMain", AoPush.BYTES, 0, indirectConstant)
-            : g.computeProgram("shaders/ao/ao.spv", "screenMain", AoPush.BYTES, mode == Mode.BITMASK ? 1 : 0,
-                indirectConstant);
+        ShadingHookInputs.Set hooks = ShadingHookInputs.of(g, view.view()); // the indirect hooks, with the light
+        Pipeline trace = rays ? g.computeProgram("shaders/ao/ao.spv", "raysMain", AoPush.BYTES,
+            hooks.specialization(0, indirectConstant))
+            : g.computeProgram("shaders/ao/ao.spv", "screenMain", AoPush.BYTES,
+                hooks.specialization(mode == Mode.BITMASK ? 1 : 0, indirectConstant));
         Pipeline composite = g.computeProgram("shaders/ao/ao.spv", "compositeMain", AoPush.BYTES,
-            mode == Mode.BITMASK ? 1 : 0, indirectConstant);
+            hooks.specialization(mode == Mode.BITMASK ? 1 : 0, indirectConstant));
         EngineSettings settings = g.settings();
         boolean bitmask = mode == Mode.BITMASK;
 
@@ -460,6 +462,7 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
             .read(diffuse, Access.STORAGE_READ).read(result.a(), Access.STORAGE_READ)
             .read(result.b(), Access.STORAGE_READ).write(color, Access.STORAGE_WRITE)
             .write(specular, Access.STORAGE_WRITE);
+        hooks.readBy(compositing, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         if (indirect != null) {
             indirect.readBy(compositing, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         }

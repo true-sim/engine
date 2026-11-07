@@ -95,11 +95,14 @@ public final class SkyBackground implements Technique {
         Image color = g.modify(Keys.SCENE_COLOR);
         Image depth = g.read(Keys.SCENE_DEPTH);
         EnvironmentMaps.Maps maps = g.request(new EnvironmentMaps(environment, quality));
-        Pipeline sky = g.computeProgram("shaders/environment/sky.spv", "skyMain", SkyPush.BYTES);
+        ShadingHookInputs.Set hooks = ShadingHookInputs.of(g, view.view()); // its media hooks, at infinity
+        Pipeline sky = g.computeProgram("shaders/environment/sky.spv", "skyMain", SkyPush.BYTES,
+            hooks.specialization());
         SkyPush push = new SkyPush();
         ViewPort region = g.view();
         GraphBuilder.PassBuilder pass = g.pass("sky").read(depth, Access.SAMPLED_COMPUTE)
             .read(maps.radiance(), Access.SAMPLED_COMPUTE).write(color, Access.STORAGE_WRITE);
+        hooks.readBy(pass, Access.SAMPLED_COMPUTE, com.truesim.engine.graph.BufferAccess.STORAGE_READ);
         if (region != null) {
             pass.region(region);
         }

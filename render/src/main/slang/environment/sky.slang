@@ -1,6 +1,7 @@
 // An environment shown behind the scene (engine-render's SkyBackground): over every pixel nothing covers (reverse
 // depth 0, at infinity), the environment's radiance cube along the pixel's direction, turned and scaled as the
-// environment is. A compute pass over the render region, in place on the scene's color.
+// environment is, through the view's media hooks (fog, aerial perspective: hooks.slang) as a point at infinity. A
+// compute pass over the render region, in place on the scene's color.
 import meshlets.common;
 
 struct SkyPush
@@ -38,5 +39,6 @@ void skyMain(uint3 id : SV_DispatchThreadID)
     float3 t = 2.0 * cross(push.rotation.xyz, d);
     float3 turned = d + push.rotation.w * t + cross(push.rotation.xyz, t);
     float3 c = cubes[push.cube].SampleLevel(samplers[LINEAR_CLAMP], turned, push.blur).rgb * push.intensity;
+    c = skyThroughMedia(HookSite.at(push.view[0].hooks, id.xy, SHADING_SKY), c, d);
     images[push.color][id.xy] = float4(c, 1);
 }

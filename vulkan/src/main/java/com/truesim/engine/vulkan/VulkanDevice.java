@@ -123,6 +123,7 @@ public final class VulkanDevice implements AutoCloseable {
     private final long allocator;
     private final Bindless bindless;
     private final PipelineCache pipelineCache;
+    private final ShaderVariants shaderVariants = new ShaderVariants();
     private final DirectCalls direct;
     private final int apiVersion;
     private final Vulkan14Features features14;
@@ -561,6 +562,11 @@ public final class VulkanDevice implements AutoCloseable {
         if (!supported) {
             missing.add(feature);
         }
+    }
+
+    /** Which build of each shader {@link ShaderModule#load} loads on this device: replacements of library shaders. */
+    public ShaderVariants shaderVariants() {
+        return shaderVariants;
     }
 
     /** The cache every pipeline is made through; {@link PipelineCache#persist} keeps it across runs. */

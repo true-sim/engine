@@ -138,6 +138,7 @@ public final class VisibilityBufferShading implements Technique {
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         IndirectInputs.Set indirect = IndirectInputs.of(g);
+        ShadingHookInputs.Set hooks = ShadingHookInputs.of(g, view.view());
         // The surface outputs, written by the shading passes' variants with SURFACES where a technique asks for them
         SurfaceOutputs.Images surfaces = SurfaceOutputs.wanted(g) ? SurfaceOutputs.create(g, "scene", width, height)
             : null;
@@ -147,9 +148,10 @@ public final class VisibilityBufferShading implements Technique {
         for (int bin = 0; bin < shade.length; bin++) {
             MaterialType type = materials.binType(bin);
             int features = materials.binFeatures(bin);
-            shade[bin] = compute(g, type.shader(), type.entry(), features, surfaces != null ? 1 : 0);
+            shade[bin] = compute(g, type.shader(), type.entry(), hooks.specialization(features, surfaces != null ? 1 : 0));
         }
-        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0, 0);
+        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain",
+            hooks.listing().specialization(ShadingHooks.Set.NONE, 0, 0));
         Image ids = targets.color();
         Image color = g.create("scene color", ImageDesc.of(Format.of(colorFormat), width, height));
         int tilesX = (width + TILE - 1) / TILE;
@@ -203,6 +205,7 @@ public final class VisibilityBufferShading implements Technique {
         if (shadows != null) {
             shadows.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         }
+        hooks.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         if (indirect != null) {
             indirect.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         }
@@ -236,9 +239,13 @@ public final class VisibilityBufferShading implements Technique {
     }
 
     @AllowAllocation("building the graph, when it changes")
-    /** {@code entry} of {@code shader}, with resolve.slang's FEATURES {@code features} and SURFACES {@code surfaces}. */
-    private static Pipeline compute(GraphBuilder g, String shader, String entry, int features, int surfaces) {
-        return g.computeProgram(shader, entry, PUSH_BYTES, features, surfaces);
+    /**
+     * {@code entry} of {@code shader}, with {@code constants}: resolve.slang's FEATURES and SURFACES, and the view's
+     * shading hooks.
+     */
+    private static Pipeline compute(GraphBuilder g, String shader, String entry,
+        com.truesim.engine.vulkan.Specialization constants) {
+        return g.computeProgram(shader, entry, PUSH_BYTES, constants);
     }
 
     /**

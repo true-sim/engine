@@ -491,6 +491,46 @@ each other did not help; the white furnace lost 4 to 7 % of its light to the sam
 - Rule: light continued from other rays is checked to continue the same path: the start of each continuation in sight
   of where the ray it continues ended.
 
+**A generated file `#include`-ing a library shader of the same relative path includes itself.** A shading-hooks
+variant of a library's `lit.slang`, written as `shading-hooks/GameHooks/lit.slang` holding `#include "lit.slang"`,
+failed with E15302 "cyclic `#include`": slangc looks next to the including file first, and the variant's own name
+matched. Paths with a directory (`ao/ao.slang` included from `.../ao/ao.slang`) did not, since `.../ao/ao/ao.slang` does
+not exist, which hid it.
+- Proof: build-logic's `ShadingHooksTest` (true-sim/build-logic#32) failed so until variants were renamed.
+- Rule: a generated file including a library's file never has that file's name: variants are `<path>.hooks.slang`.
+
+**A pipeline made without the hooks' constants runs no hooks, silently.** In the first design the hooks ran under
+specialization constant 3, 0 unless a pipeline set it: a shading path whose pipelines were made without the view's
+hooks (a new technique, a library's shading) compiled and drew, but without fog or the probe volume's light.
+- Proof: the code of the first design (`hooks.slang`, `indirect.slang`'s `aroundLight` and `alongViewRay`).
+- Rule: the hooks' switches are specialization constants from 1024 (vulkan's `Specialization.REQUIRED_FROM`), and
+  `Pipeline` refuses a pipeline whose shader declares one it does not set
+  (`ShadingHooksTest.aPipelineOfAHookedShaderMadeWithoutTheHooksSwitchesIsRefused`): make shading pipelines with
+  `ShadingHookInputs.Set.specialization`, or the listing's for none.
+
+**A view's hook block written by a pass declared before its hooks could not take their buffers' addresses.** The pass
+writing each view's hook block was first the block's provider's (`ViewShadingHooks`), declared before the techniques
+adding hooks built: a hook's source taking the address of a buffer of its own (the probe volume's data) failed every
+probe volume test with "shading hooks uses probe volume without declaring it", the provider's pass not reading it.
+- Proof: `ProbeVolumeTest`, 7 of 7 failing so; passing with the pass declared when shading first takes the view's
+  hooks (`ShadingHookInputs.of`), after every technique adding one, reading their buffers and images.
+- Rule: a pass recording data that other techniques add to a request is declared once the request is complete (when
+  its readers take it), not when the request is made. Its CPU writes still come before the GPU's reads: a frame's
+  passes all record before it is submitted.
+
+**The GI scenes' real-time images change with an unrelated allocation.** Comparing the shading hooks' two designs
+image by image (GiHarness: every GI scene's reference, raster, probe and cascade images, 40 x 24, lavapipe 26.2.6),
+50 of 52 were bit-exact and mover state 1's probe and cascade images were not; run alone, the mover scene matched
+bit for bit, after other scenes it did not, while each design repeated its own images exactly. The first design alone,
+with a 3 MiB host-visible buffer allocated before the harness and never used, changed toggle 0's raster, probe and
+cascade images (2,556 to 2,843 of 3,840 floats, up to 100 %) and mover 1's probe and cascade images; mover 1's
+real-time images hold NaNs in both designs (150 and 175 pixels). Some pass reads memory it never wrote, or stale
+memory, in those scenes; which one was not found.
+- Proof: the dumps of both designs and the padded run (true-sim/engine, shading hook records PR); followed up in
+  [#442](https://github.com/true-sim/engine/issues/442).
+- Rule: an image comparison across a change that allocates differently is checked against the base itself with an
+  unrelated allocation before a difference is put down to the change.
+
 ## Tests and measurements
 
 **A still scene's benchmark hides what motion costs.** 200 shadowed point lights over the rocks cost 0.98 ms against
