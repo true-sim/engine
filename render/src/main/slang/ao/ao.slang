@@ -555,27 +555,34 @@ void compositeMain(uint3 id : SV_DispatchThreadID)
         float3 c = 2.7552 * albedo + 0.6903;
         occlusion = max(ao, ((ao * a + b) * ao + c) * ao);
     }
-    float3 diffuseLight = INDIRECT != 0 ? diffuseLightAt(push.indirect, n, position, toViewer)
-        : SKY_IRRADIANCE / PI;
+    float4 material = images[push.material][id.xy];
+    float3 reflectance = images[push.reflectance][id.xy].rgb;
+    bool specularOcclusion = (push.flags & AO_SPECULAR) != 0 && any(reflectance > 0);
+    float3 r = reflect(-toViewer, n);
+    // The view's indirect hooks asked once for all the pixel uses: the diffuse light, and with specular occlusion the
+    // environment's reflection along r
+    AroundLight hooked = AroundLight.none();
+    if (INDIRECT != 0)
+    {
+        hooked = aroundLight(HookSite.at(push.view[0].hooks, id.xy, SHADING_COMPOSITE), position, n, n, toViewer,
+            around(r, material.a, AROUND_DIFFUSE | (specularOcclusion ? AROUND_SPECULAR | AROUND_VISIBILITY : 0)));
+    }
+    float3 diffuseLight = INDIRECT != 0 ? aroundDiffuse(push.indirect, hooked, n) : SKY_IRRADIANCE / PI;
     float3 color = images[push.color][id.xy].rgb;
     float3 delta = weight.rgb * ((occlusion - 1) * diffuseLight + bounce);
     float specular = 1;
-    float4 material = images[push.material][id.xy];
-    float3 reflectance = images[push.reflectance][id.xy].rgb;
-    if ((push.flags & AO_SPECULAR) != 0 && any(reflectance > 0))
+    if (specularOcclusion)
     {
         // The visible directions as a cone around the bent normal (a cosine-weighted cone holding the occlusion),
         // against the GGX lobe's cone around the mirror direction
         float3 bentNormal = dot(signal.xyz, signal.xyz) > 0.25 ? normalize(fromView(axes, signal.xyz)) : n;
-        float3 r = reflect(-toViewer, n);
         // relative to what the open hemisphere around it leaves of the lobe (which the split sum already takes as
         // seen): an unoccluded surface keeps all of it
         float cosVisible = sqrt(saturate(1 - ao));
         float cosLobe = lobeCosine(material.a);
         float open = capsIntersection(0, cosLobe, dot(bentNormal, r));
         specular = open > 1.0e-6 ? saturate(capsIntersection(cosVisible, cosLobe, dot(bentNormal, r)) / open) : 1;
-        float3 environment = INDIRECT != 0 ? specularLightAt(push.indirect, r, material.a, position, n, toViewer)
-            : SKY_REFLECTED;
+        float3 environment = INDIRECT != 0 ? aroundSpecular(push.indirect, hooked, r, material.a) : SKY_REFLECTED;
         delta -= reflectance * (1 - specular) * environment;
     }
     images[push.occlusion][id.xy] = float4(specular, 0, 0, 0);

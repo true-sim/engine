@@ -8,7 +8,7 @@
 //   spacing.
 // - lightsMain, a thread per light: switched, moved, recolored or reshaped: the probes within its reach (times a
 //   margin, for the surfaces it lights beyond it), where it was and where it is; a directional light: every probe.
-import indirect;
+import probes.volume;
 import meshlets.common;
 
 struct InvalidatePush

@@ -56,11 +56,12 @@ final class ShadingPipelines implements AutoCloseable {
     /**
      * What a pipeline is made of: its geometry stage (a vertex or mesh entry point), its fragment stage (or none, for
      * depth from positions alone), the specialization constants of its fragment entry point (a shading bin's
-     * features, a type's geometry hooks), its rasterization ({@link #CULL_BACK}, {@link #DOUBLE_SIDED}, with
-     * {@link #CLOCKWISE}), its targets ({@link #COLOR} ...) and its push block's bytes.
+     * features, a type's geometry hooks, the shading hooks its view runs: their switches from 1024), its
+     * rasterization ({@link #CULL_BACK}, {@link #DOUBLE_SIDED}, with {@link #CLOCKWISE}), its targets
+     * ({@link #COLOR} ...) and its push block's bytes.
      */
     record Key(String geometryShader, String geometryEntry, boolean mesh, String fragmentShader, String fragmentEntry,
-        int features, int geometry, int raster, int target, int push) {
+        int features, int geometry, int raster, int target, int push, ShadingHooks.Set hooks) {
 
         Key {
             Objects.requireNonNull(geometryShader, "geometryShader");
@@ -78,6 +79,7 @@ final class ShadingPipelines implements AutoCloseable {
     }
 
     private final VulkanDevice device;
+    private final ShadingHooks hooks; // the shading hooks the shaders were built with
     private final int colorFormat;
     private final int depthFormat;
     private final ConcurrentHashMap<Key, Entry> pipelines = new ConcurrentHashMap<>();
@@ -89,6 +91,7 @@ final class ShadingPipelines implements AutoCloseable {
 
     ShadingPipelines(VulkanDevice device, int colorFormat, int depthFormat) {
         this.device = device;
+        this.hooks = ShadingHooks.of(device);
         this.colorFormat = colorFormat;
         this.depthFormat = depthFormat;
     }
@@ -152,11 +155,10 @@ final class ShadingPipelines implements AutoCloseable {
                 graphics.stage(VK_SHADER_STAGE_FRAGMENT_BIT, fragment != null ? fragment : geometry,
                     key.fragmentEntry());
                 int salt = coldSalt;
-                if (salt != 0) {
-                    graphics.constants(key.features(), key.geometry(), salt);
-                } else {
-                    graphics.constants(key.features(), key.geometry());
-                }
+                graphics.constants(salt != 0 ? hooks.specialization(key.hooks(), key.features(), key.geometry(), salt)
+                    : hooks.specialization(key.hooks(), key.features(), key.geometry()));
+            } else {
+                graphics.constants(hooks.specialization(ShadingHooks.Set.NONE)); // the hooks' switches, all off
             }
             if ((key.raster() & DOUBLE_SIDED) != 0) {
                 graphics.doubleSided();

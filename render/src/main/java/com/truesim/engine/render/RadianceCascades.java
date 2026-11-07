@@ -207,15 +207,16 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
         Pipeline tracing = g.computeProgram(trace, "traceMain", PathPush.BYTES);
         Pipeline layout = g.computeProgram(trace, "layoutMain", PathPush.BYTES);
         Pipeline scatter = g.computeProgram(trace, "scatterMain", PathPush.BYTES);
+        ProbeHooks own = new ProbeHooks(g, anchor.view(), data, camera, coarsest); // its hits lit by itself
         Pipeline[] shade = new Pipeline[bins];
         for (int bin = 0; bin < bins; bin++) {
             MaterialType type = materials.binType(bin);
             if (type.hitShader() != null) {
                 shade[bin] = g.computeProgram(type.hitShader(), type.hitEntry(), PathPush.BYTES,
-                    materials.binFeatures(bin));
+                    own.specialization(materials.binFeatures(bin)));
             }
         }
-        Frame frame = new Frame(grid, spacing, coarsest);
+        Frame frame = new Frame(grid, spacing, coarsest, own);
 
         pass(g, "cascade setup").write(data, BufferAccess.TRANSFER_DST).write(table, BufferAccess.TRANSFER_DST)
             .write(levels, BufferAccess.TRANSFER_DST).write(counts, BufferAccess.TRANSFER_DST)
@@ -286,7 +287,8 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 .read(current, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
                 .write(counts, BufferAccess.STORAGE_WRITE).read(binTables, BufferAccess.INDIRECT)
                 .read(binTables, BufferAccess.STORAGE_READ).write(rayImage, Access.STORAGE_WRITE)
-                .read(table, BufferAccess.STORAGE_READ).read(data, BufferAccess.STORAGE_READ)
+                .read(table, BufferAccess.STORAGE_READ)
+                .read(data, BufferAccess.STORAGE_READ)
                 .read(states, BufferAccess.STORAGE_READ).read(irradiance, Access.SAMPLED_COMPUTE)
                 .read(depth, Access.SAMPLED_COMPUTE).read(maps.specular(), Access.SAMPLED_COMPUTE)
                 .read(maps.sheen(), Access.SAMPLED_COMPUTE).read(brdf, Access.SAMPLED_COMPUTE);
@@ -371,10 +373,12 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
         final Grid grid;
         final float spacing;
         final double coarsest;
+        final ProbeHooks own; // the cascades' rays' hits' hook block: lit by the first cascade
         final long[] base = new long[3]; // each cascade's lowest probe's world grid coordinate, while set up
 
-        Frame(Grid grid, float spacing, double coarsest) {
+        Frame(Grid grid, float spacing, double coarsest, ProbeHooks own) {
             this.grid = grid;
+            this.own = own;
             this.spacing = spacing;
             this.coarsest = coarsest;
         }
@@ -388,7 +392,7 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 long header = stack.ncalloc(16, 1, ProbeVolumeDataLayout.BYTES);
                 int[] first = grid.probes()[0];
                 memPutInt(header + ProbeVolumeDataLayout.CASCADES, 1);
-                memPutInt(header + ProbeVolumeDataLayout.FLAGS, IndirectConstants.PROBE_VOLUME_CLAMP);
+                memPutInt(header + ProbeVolumeDataLayout.FLAGS, com.truesim.engine.render.layout.VolumeConstants.PROBE_VOLUME_CLAMP);
                 memPutInt(header + ProbeVolumeDataLayout.IRRADIANCE, ctx.sampled(irradiance));
                 memPutInt(header + ProbeVolumeDataLayout.DEPTH, ctx.sampled(depth));
                 for (int axis = 0; axis < 3; axis++) {
@@ -436,8 +440,7 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 // The cascades' own table, for their rays' hits: the environment, and the first cascade of the frame
                 // before (further bounces)
                 long t = stack.ncalloc(16, 1, IndirectLightLayout.BYTES);
-                memPutInt(t + IndirectLightLayout.FLAGS, IndirectConstants.INDIRECT_ENVIRONMENT
-                    | IndirectConstants.INDIRECT_PROBES);
+                memPutInt(t + IndirectLightLayout.FLAGS, IndirectConstants.INDIRECT_ENVIRONMENT);
                 memPutInt(t + IndirectLightLayout.SPECULAR, ctx.sampled(maps.specular()));
                 memPutInt(t + IndirectLightLayout.SHEEN, ctx.sampled(maps.sheen()));
                 memPutInt(t + IndirectLightLayout.BRDF, ctx.sampled(brdf));
@@ -447,16 +450,10 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 for (int i = 0; i < 4; i++) {
                     memPutFloat(t + IndirectLightLayout.ROTATION + 4L * i, environment.toEnvironment(i));
                 }
-                memPutLong(t + IndirectLightLayout.VOLUME, ctx.address(data));
                 RenderView view = anchor.view();
-                for (int axis = 0; axis < 3; axis++) {
-                    memPutFloat(t + IndirectLightLayout.VOLUME_OFFSET + 4L * axis,
-                        (float) (view.position(axis) - ProbeVolume.Volume.origin(camera.position(axis), coarsest)));
-                }
                 long handleTable = ctx.unsafe().buffer(table);
                 Commands.updateBuffer(ctx.unsafe().commands(), handleTable, 0, IndirectLightLayout.SH, t);
-                Commands.updateBuffer(ctx.unsafe().commands(), handleTable, IndirectLightLayout.RESERVED,
-                    IndirectLightLayout.BYTES - IndirectLightLayout.RESERVED, t + IndirectLightLayout.RESERVED);
+                own.point(ctx, table); // its hits' hook block, which the view's hook inputs write
             }
             ctx.copy(maps.sh(), 0, table, IndirectLightLayout.SH, 27 * 4L);
         }

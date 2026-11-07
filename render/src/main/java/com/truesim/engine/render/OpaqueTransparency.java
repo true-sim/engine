@@ -53,7 +53,7 @@ public final class OpaqueTransparency implements Transparency {
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         BlendedTargets targets = new BlendedTargets(BlendedTargets.Kind.OPAQUE, color, null, null, depth, lights,
-            shadows, g.view(), behind, IndirectInputs.of(g));
+            shadows, g.view(), behind, IndirectInputs.of(g), ShadingHookInputs.of(g, view.view()));
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawBlended(g, view.view(), targets, load);

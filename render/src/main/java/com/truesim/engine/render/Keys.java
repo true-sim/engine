@@ -24,6 +24,13 @@ public final class Keys {
      */
     public static final Key<Buffer> INDIRECT_LIGHT = Key.buffer("truesim.indirectLight");
     /**
+     * A view's shading hooks (hooks.slang; {@link ShadingHooks}), a token buffer: provided in every view by a
+     * {@link ViewShadingHooks} of its own, which writes the view's hook block each frame. A technique adding a hook
+     * ({@link ShadingHooks#add}) modifies it; shading requires it ({@link ShadingHookInputs#of}), and so builds after
+     * every hook of the view.
+     */
+    public static final Key<Buffer> SHADING_HOOKS = Key.buffer("truesim.shadingHooks", ViewShadingHooks::new);
+    /**
      * A view's UI, an image (frame-graph-v2 §4.8): premultiplied alpha, linear light, 1.0 meaning paper white, at the
      * size the view shows at (its output size), transparent where there is no UI. {@link DisplayTransform} composites it
      * over the tone-mapped scene, after the tone curve, so the UI is neither exposed nor tone mapped: SDR shows it as

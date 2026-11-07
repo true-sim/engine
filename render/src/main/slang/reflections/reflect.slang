@@ -512,9 +512,13 @@ void compositeMain(uint3 id : SV_DispatchThreadID)
     float3 r = reflect(normalize(px.position), px.normal);
     // The environment's reflection as shading and ambient occlusion left it: dimmed by the probe volume's sky
     // visibility where one lights the view, and by the specular occlusion
-    float3 environment = INDIRECT != 0
-        ? specularLightAt(push.indirect, r, px.roughness, px.position, px.normal, normalize(-px.position))
-        : SKY_REFLECTED;
+    float3 environment = SKY_REFLECTED;
+    if (INDIRECT != 0)
+    {
+        AroundLight hooked = aroundLight(HookSite.at(push.view[0].hooks, id.xy, SHADING_COMPOSITE), px.position, px.normal,
+            px.normal, normalize(-px.position), around(r, px.roughness, AROUND_SPECULAR | AROUND_VISIBILITY));
+        environment = aroundSpecular(push.indirect, hooked, r, px.roughness);
+    }
     if (OCCLUSION != 0)
     {
         environment *= images[push.occlusion][id.xy].r;

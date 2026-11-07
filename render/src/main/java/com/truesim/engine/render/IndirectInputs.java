@@ -17,7 +17,7 @@ import java.util.Objects;
  * table ({@link Keys#INDIRECT_LIGHT}) and the images and buffers its sections name (an environment's cubes, later probe
  * atlases), which shading samples. A shared request: whatever fills a section adds to the same set, and every shading
  * pass reads all of it, so a new indirect technique needs no change to shading. Each {@link ViewPort} has a set of its
- * own.
+ * own. The view's shading hooks are gathered apart, by {@link ShadingHookInputs}.
  *
  * <pre>{@code
  * IndirectInputs.Set indirect = IndirectInputs.of(g);  // null without indirect light: the constant sky
