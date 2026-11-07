@@ -899,7 +899,24 @@ public float probeRayEnd(PathState path)
 public void recordProbeMiss(PathState path)
 {
     bool bounded = (push.limits & PATH_INTERVALS) != 0 && (path.flags & PATH_BOUNDED) != 0;
-    recordProbeRay(path.pixel, bounded ? float3(0) : environment(path.direction), PROBE_MISSED);
+    recordProbeRay(path.pixel, bounded ? float3(0) : probeEnvironment(path.direction), PROBE_MISSED);
+}
+
+/**
+ * The environment a probe ray that met nothing brings back: through the GGX lobe of the table's missRoughness, the
+ * prefiltered cube's level, so that each ray takes the environment over the directions it stands for. Looked up along
+ * its direction alone, a small bright source (a sun in the sky) was met by one ray in some frames and by none in the
+ * others; every probe turns its rays the same way in a frame, so every probe updated met it in the same frame and the
+ * volume's light jumped for that frame.
+ */
+public float3 probeEnvironment(float3 direction)
+{
+    IndirectLight* t = push.indirect;
+    if (t == nullptr || (t[0].flags & INDIRECT_ENVIRONMENT) == 0)
+    {
+        return environment(direction);
+    }
+    return specularLight(t, direction, t[0].missRoughness);
 }
 
 /** Writes a probe ray's light and distance (negative: a back face) into its texel of the ray image. */

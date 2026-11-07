@@ -105,14 +105,16 @@ public final class ProbeVolumeLighting implements Technique {
             min = 1, max = 100, formerly = "render.gi.response.instanceMargin") float instanceMargin,
         @Tunable(value = "updates a restarted probe makes every frame before it takes its turns of the budget",
             min = 0, max = 1024) int fresh,
-        @Tunable(value = "global illumination's updates run on the async compute queue") boolean async)
+        @Tunable(value = "global illumination's updates run on the async compute queue") boolean async,
+        @Tunable(value = "how wide a lobe a probe ray meeting nothing takes the environment through, of the solid "
+            + "angle each ray stands for (0: its direction alone)", min = 0, max = 16) float skyFootprint)
         implements TechniqueConfig {
     }
 
     /** The ray-traced probe volume (devices with ray tracing; elsewhere none). */
     public static final TechniqueKind<Probes, ProbeVolumeLighting, Technique> PROBES = TechniqueKind.of(SLOT, "probes",
         new Probes(3, 16, 8, 1f, 128, 32, 0.5f, 4, 0.25f, 0.25f, 0.2f, 1.5f, true, true, 30, true, 4f, 0.01f, true, 2f,
-            2, 3f, 8, false),
+            2, 3f, 8, false, 2f),
         "the ray-traced probe volume", (lighting, config) -> lighting.new Engine(false));
 
     /**

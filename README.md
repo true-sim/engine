@@ -2082,7 +2082,9 @@ mean square (14 x 14 and a border), so a shaded point ignores probes that cannot
   relocation and classification, run as paths of the reference path tracer's wavefront in its probe mode: hits binned
   and shaded by their material type's own hit entry point, with the BRDF shading uses, the world light grid
   (`WorldLights`: the sun, punctual lights, the GPU's particle lights) and a shadow ray each, emission, the
-  environment where rays leave, and the volume's own light of the frame before at the hit (infinite bounces). Back
+  environment where rays leave (through its prefiltered level `skyFootprint` (2) times as wide as the directions each
+  ray stands for: a sun in the sky reaches every update by its share, not only the frames a ray meets it), and the
+  volume's own light of the frame before at the hit (infinite bounces). Back
   faces mark probes inside geometry: they move out (`relocate`) or are turned off (`classify`).
 - **Shading everywhere:** the volume's diffuse light replaces the environment's spherical harmonics through the probe
   volume's shading hook (`probes/hook.slang`, `ProbeVolume.HOOK`; "Writing a shading hook": the core's shading knows no

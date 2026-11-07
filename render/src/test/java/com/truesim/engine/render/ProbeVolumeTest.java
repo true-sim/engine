@@ -368,6 +368,91 @@ class ProbeVolumeTest {
             .isGreaterThan(unannounced);
     }
 
+    /**
+     * A dim sky holding a small bright sun (10 degrees across, 320 times as bright as the sky: two thirds of what reaches
+     * the ground), no lights: a floor seen from above, lit by the volume alone. The rays are turned anew each frame,
+     * the same way for every probe; taken along their directions alone, the sun was met in a few frames by one of them
+     * (by every probe at once) and in the others by none: the floor's light jumped by more than half in those frames
+     * (the film of effects-particles' ParticleHookScreenshots flashed so). Through the environment's level twice as wide
+     * as each ray's share of the sphere (the default), every frame takes the sun by its share.
+     */
+    @Test
+    void aSmallBrightSunInTheSkyLightsEveryFrameAlikeNotInJumps() {
+        int floor = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1))).feature(LAMBERT));
+        wall(0, floor, 0, -1, 0, ReferencePathTracerTest.UP, 8);
+        lights.setCount(0);
+        try (Textures textures = new Textures(device)) {
+            int width = 256;
+            int sky = textures.add(TextureFormat.RGBA16F, width, width / 2, Textures.GENERATE, sunSky(width,
+                width / 2));
+            Environment environment = Environment.panorama("sun sky", sky, 128);
+            camera.set(0, -1, -0.4, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.01);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), view, camera);
+            main.port().add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_D32_SFLOAT)).add(new ClusteredLights(lights, main))
+                .add(new EnvironmentLighting(environment, main))
+                .add(new ProbeVolumeLighting(main, new ProbeVolume(rayTracing, renderer, lights, environment, main)))
+                .output(Keys.SCENE_COLOR, new ExternalImage("target", SIZE, SIZE, Format.R32G32B32A32_SFLOAT,
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT
+                        | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view()));
+            double footprint = largestJump(means(60));
+            // Along the rays' directions alone (the volume before): the sun met in some frames only
+            graph.settings().set(ProbeVolume.SKY_FOOTPRINT, 0f);
+            double alone = largestJump(means(60));
+            System.out.printf("largest jump of a frame's mean from its neighbours': %.4f along the rays alone, %.4f"
+                + " through their footprints%n", alone, footprint);
+            assertThat(alone).as("the test meets the sun along the rays alone").isGreaterThan(0.2);
+            assertThat(footprint).as("a frame's light against its neighbours'").isLessThan(0.01);
+        }
+    }
+
+    /** {@code count} frames' mean red, each frame's, after 40 frames to settle. */
+    private double[] means(int count) {
+        frames(40); // settled: no update before in the histories
+        double[] means = new double[count];
+        for (int f = 0; f < count; f++) {
+            means[f] = mean(frames(1), 0);
+        }
+        return means;
+    }
+
+    /** The largest difference of a frame's mean from its neighbours' mean, relative to it. */
+    private static double largestJump(double[] means) {
+        double largest = 0;
+        for (int f = 1; f + 1 < means.length; f++) {
+            double around = (means[f - 1] + means[f + 1]) / 2;
+            largest = Math.max(largest, Math.abs(means[f] - around) / around);
+        }
+        return largest;
+    }
+
+    /**
+     * A panorama of half floats: a dim sky (0.05) over a dark ground (0.02), and a sun 10 degrees across (16), 50
+     * degrees up.
+     */
+    private static java.lang.foreign.MemorySegment sunSky(int width, int height) {
+        java.lang.foreign.MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(8L * width * height);
+        ValueLayout.OfShort half = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(java.nio.ByteOrder.LITTLE_ENDIAN);
+        double up = Math.toRadians(50);
+        double[] sun = {Math.cos(up) * 0.6, Math.sin(up), Math.cos(up) * 0.8};
+        double edge = Math.cos(Math.toRadians(5));
+        for (int y = 0; y < height; y++) {
+            double theta = Math.PI * (y + 0.5) / height; // environment/filter.slang's panoramaUv
+            for (int x = 0; x < width; x++) {
+                double phi = 2 * Math.PI * ((x + 0.5) / width - 0.5);
+                double[] d = {Math.sin(theta) * Math.cos(phi), Math.cos(theta), Math.sin(theta) * Math.sin(phi)};
+                double c = d[0] * sun[0] + d[1] * sun[1] + d[2] * sun[2] > edge ? 16 : d[1] >= 0 ? 0.05 : 0.02;
+                for (int k = 0; k < 3; k++) {
+                    texels.set(half, 8L * (y * width + x) + 2L * k, Float.floatToFloat16((float) c));
+                }
+                texels.set(half, 8L * (y * width + x) + 6, Float.floatToFloat16(1));
+            }
+        }
+        return texels;
+    }
+
     @Test
     void twoViewsShareOneVolume() {
         int white = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1))).feature(LAMBERT));
