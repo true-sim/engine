@@ -384,11 +384,13 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
         Image specular = g.create("specular occlusion", ImageDesc.of(SPECULAR_FORMAT, color.width(),
             color.height()));
         int indirectConstant = indirect != null ? 1 : 0;
-        Pipeline trace = rays ? g.computeProgram("shaders/ao/ao.spv", "raysMain", AoPush.BYTES, 0, indirectConstant)
+        int hooks = indirect != null ? indirect.hooks() : 0; // SHADING_HOOKS, constant 3
+        Pipeline trace = rays ? g.computeProgram("shaders/ao/ao.spv", "raysMain", AoPush.BYTES, 0, indirectConstant, 0,
+            hooks)
             : g.computeProgram("shaders/ao/ao.spv", "screenMain", AoPush.BYTES, mode == Mode.BITMASK ? 1 : 0,
-                indirectConstant);
+                indirectConstant, 0, hooks);
         Pipeline composite = g.computeProgram("shaders/ao/ao.spv", "compositeMain", AoPush.BYTES,
-            mode == Mode.BITMASK ? 1 : 0, indirectConstant);
+            mode == Mode.BITMASK ? 1 : 0, indirectConstant, 0, hooks);
         EngineSettings settings = g.settings();
         boolean bitmask = mode == Mode.BITMASK;
 

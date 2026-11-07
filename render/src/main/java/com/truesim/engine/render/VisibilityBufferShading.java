@@ -147,9 +147,10 @@ public final class VisibilityBufferShading implements Technique {
         for (int bin = 0; bin < shade.length; bin++) {
             MaterialType type = materials.binType(bin);
             int features = materials.binFeatures(bin);
-            shade[bin] = compute(g, type.shader(), type.entry(), features, surfaces != null ? 1 : 0);
+            shade[bin] = compute(g, type.shader(), type.entry(), features, surfaces != null ? 1 : 0,
+                indirect == null ? 0 : indirect.hooks());
         }
-        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0, 0);
+        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0, 0, 0);
         Image ids = targets.color();
         Image color = g.create("scene color", ImageDesc.of(Format.of(colorFormat), width, height));
         int tilesX = (width + TILE - 1) / TILE;
@@ -236,9 +237,13 @@ public final class VisibilityBufferShading implements Technique {
     }
 
     @AllowAllocation("building the graph, when it changes")
-    /** {@code entry} of {@code shader}, with resolve.slang's FEATURES {@code features} and SURFACES {@code surfaces}. */
-    private static Pipeline compute(GraphBuilder g, String shader, String entry, int features, int surfaces) {
-        return g.computeProgram(shader, entry, PUSH_BYTES, features, surfaces);
+    /**
+     * {@code entry} of {@code shader}, with resolve.slang's FEATURES {@code features} and SURFACES {@code surfaces}, and
+     * the shading hooks {@code hooks} (SHADING_HOOKS, constant 3).
+     */
+    private static Pipeline compute(GraphBuilder g, String shader, String entry, int features, int surfaces,
+        int hooks) {
+        return g.computeProgram(shader, entry, PUSH_BYTES, features, surfaces, 0, hooks);
     }
 
     /**

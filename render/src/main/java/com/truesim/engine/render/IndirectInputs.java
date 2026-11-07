@@ -17,7 +17,8 @@ import java.util.Objects;
  * table ({@link Keys#INDIRECT_LIGHT}) and the images and buffers its sections name (an environment's cubes, later probe
  * atlases), which shading samples. A shared request: whatever fills a section adds to the same set, and every shading
  * pass reads all of it, so a new indirect technique needs no change to shading. Each {@link ViewPort} has a set of its
- * own.
+ * own. The shading hooks a technique adds to the view ({@link ShadingHooks}: probes, fog) say so here too
+ * ({@link Set#hook}), so every shading pass's pipelines run them ({@link Set#hooks}, their {@code SHADING_HOOKS}).
  *
  * <pre>{@code
  * IndirectInputs.Set indirect = IndirectInputs.of(g);  // null without indirect light: the constant sky
@@ -50,6 +51,7 @@ public record IndirectInputs(ViewPort view) implements Request<IndirectInputs.Se
         private final List<Image> images = new ArrayList<>();
         private final List<Buffer> buffers = new ArrayList<>();
         private Buffer table;
+        private int hooks;
 
         /** The table shading reads: the latest of {@link Keys#INDIRECT_LIGHT}. */
         Set table(Buffer table) {
@@ -72,6 +74,21 @@ public record IndirectInputs(ViewPort view) implements Request<IndirectInputs.Se
         public Set read(Buffer buffer) {
             buffers.add(Objects.requireNonNull(buffer, "buffer"));
             return this;
+        }
+
+        /**
+         * The view's shading runs hook {@code index} ({@link ShadingHooks#require}): its technique writes its slot of
+         * the table ({@link ShadingHooks#slot}) every frame before shading reads it.
+         */
+        public Set hook(int index) {
+            ShadingHooks.slot(index); // in range
+            hooks |= 1 << index;
+            return this;
+        }
+
+        /** The hooks the view's shading runs, a bit each: its pipelines' {@code SHADING_HOOKS}. */
+        public int hooks() {
+            return hooks;
         }
 
         /** Declares that {@code pass} reads the table and buffers with {@code read}, samples the images with {@code access}. */

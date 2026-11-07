@@ -880,6 +880,15 @@ public float4 shadeMaterialSurface<M : IMaterial>(View view, VertexOut in,
         reflectance *= 1 - unlit.amount; // lerp(lit, albedo, amount): the lit part scaled
         diffuseWeight *= 1 - unlit.amount;
     }
+    if (indirect != nullptr)
+    {
+        // The view's media hooks between the point and the camera (fog, aerial perspective): what arrives, and what
+        // a later change of the point's own light (its reflection, its light from all around) passes through
+        ViewRay ray = alongViewRay(indirect, color, in.world, s.normal);
+        color = ray.radiance;
+        reflectance *= ray.transmittance;
+        diffuseWeight *= ray.transmittance;
+    }
     surface.normal = s.normal;
     surface.roughness = s.roughness;
     surface.f0 = lerp(s.f0, s.albedo, s.metallic);

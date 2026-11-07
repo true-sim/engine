@@ -491,6 +491,24 @@ each other did not help; the white furnace lost 4 to 7 % of its light to the sam
 - Rule: light continued from other rays is checked to continue the same path: the start of each continuation in sight
   of where the ray it continues ended.
 
+**A generated file `#include`-ing a library shader of the same relative path includes itself.** A shading-hooks
+variant of a library's `lit.slang`, written as `shading-hooks/GameHooks/lit.slang` holding `#include "lit.slang"`,
+failed with E15302 "cyclic `#include`": slangc looks next to the including file first, and the variant's own name
+matched. Paths with a directory (`ao/ao.slang` included from `.../ao/ao.slang`) did not, since `.../ao/ao/ao.slang` does
+not exist, which hid it.
+- Proof: build-logic's `ShadingHooksTest` (true-sim/build-logic#32) failed so until variants were renamed.
+- Rule: a generated file including a library's file never has that file's name: variants are `<path>.hooks.slang`.
+
+**A pipeline made without `SHADING_HOOKS` runs no hooks, silently.** The hooks run under specialization constant 3,
+0 unless a pipeline sets it; a shading path whose pipelines are made without the view's
+`IndirectInputs.Set.hooks()` (a new technique, a library's shading) compiles and draws, but without fog or the probe
+volume's light: what was a dynamic flag of the table before is now decided when the pipeline is made.
+- Proof: the code (`hooks.slang`, `indirect.slang`'s `aroundLight` and `alongViewRay`); `ShadingHooksTest` checks each
+  of the engine's shading paths.
+- Rule: every pipeline that shades (calls `indirectLightWeights`, `diffuseLightAt`, `specularLightAt` or
+  `shadeMaterial`) passes the view's hooks as constant 3, and a library's shader that shades is listed in its
+  `slang.shadingShaders` so a game's listing rebuilds it.
+
 ## Tests and measurements
 
 **A still scene's benchmark hides what motion costs.** 200 shadowed point lights over the rocks cost 0.98 ms against

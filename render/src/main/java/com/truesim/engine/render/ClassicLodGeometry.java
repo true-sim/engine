@@ -423,7 +423,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         Pipeline[] pipeline = switch (kind) {
             case DEPTH -> geometry(materials, drawDepth, ShadingPipelines.DEPTH, selection);
             case SHADED -> typed(materials, draw.output().surfaces() && wantSurfaces() ? ShadingPipelines.COLOR_SURFACES
-                : ShadingPipelines.COLOR, selection.categories());
+                : ShadingPipelines.COLOR, selection.categories(), indirect == null ? 0 : indirect.hooks());
             case IDS -> geometry(materials, drawIds, ShadingPipelines.IDS, selection);
         };
         pass.record(ctx -> {
@@ -503,17 +503,17 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 ? "DepthMain" : "ClassicIdsMain"),
             0, type.geometry(), (bin == MeshletRenderer.BIN_OPAQUE && !casters ? ShadingPipelines.CULL_BACK
             : ShadingPipelines.DOUBLE_SIDED) | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0), target,
-            DRAW_PUSH);
+            DRAW_PUSH, 0);
     }
 
     /**
      * Pipelines per part of the draw lists (list * {@code categories} + category, category a shading bin of
      * {@code materials}): its type's forward entry point with only its features, into {@code target} (color; for the
      * blended lists weighted transparency's targets, or over the color); null where no material of the bin draws in
-     * the list's raster bin.
+     * the list's raster bin; running the shading hooks {@code hooks}.
      */
     @AllowAllocation("building the graph, when it changes")
-    private Pipeline[] typed(Materials materials, int target, int categories) {
+    private Pipeline[] typed(Materials materials, int target, int categories, int hooks) {
         boolean weighted = target == ShadingPipelines.WEIGHTED;
         Pipeline[] parts = new Pipeline[LISTS * categories];
         for (int category = 0; category < Math.min(categories, materials.binCount()); category++) {
@@ -527,7 +527,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                     || target == ShadingPipelines.COLOR_SURFACES && bin == MeshletRenderer.BIN_BLENDED) {
                     continue;
                 }
-                parts[list * categories + category] = shading.get(forwardKey(type, features, list, target));
+                parts[list * categories + category] = shading.get(forwardKey(type, features, list, target, hooks));
             }
         }
         return parts;
@@ -535,10 +535,11 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
 
     /**
      * What the pipeline drawing draw list {@code list}'s part of a shading bin of {@code type} with {@code features}
-     * is made of: the classic vertex stage and the type's forward entry point from full vertices.
+     * is made of: the classic vertex stage and the type's forward entry point from full vertices, running the shading
+     * hooks {@code hooks}.
      */
     @AllowAllocation("building the graph, when it changes")
-    static ShadingPipelines.Key forwardKey(MaterialType type, int features, int list, int target) {
+    static ShadingPipelines.Key forwardKey(MaterialType type, int features, int list, int target, int hooks) {
         boolean weighted = target == ShadingPipelines.WEIGHTED;
         int bin = list % MeshletRenderer.BINS;
         boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
@@ -548,7 +549,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             type.geometry(),
             (bin == MeshletRenderer.BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED)
                 | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0),
-            target, DRAW_PUSH);
+            target, DRAW_PUSH, hooks);
     }
 
     /** Bytes of a draw list of {@code categories} parts per list: the parts' counts, their commands, their records. */
@@ -700,7 +701,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         com.truesim.engine.graph.Image behind = targets.behind();
         int categories = selection.categories();
         Pipeline[] pipeline = typed(materials, weighted ? ShadingPipelines.WEIGHTED : sorted ? ShadingPipelines.OVER
-            : ShadingPipelines.COLOR, categories);
+            : ShadingPipelines.COLOR, categories, targets.hooks());
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);

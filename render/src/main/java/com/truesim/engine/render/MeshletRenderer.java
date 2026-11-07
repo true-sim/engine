@@ -85,6 +85,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private final ShadingPipelines shading; // the material types' pipelines, made as they are first wanted or ahead
     // Shaded draws outside a frame graph (record, drawView): the pipelines by type for the table as last drawn.
     private RasterPipelines.Typed immediate;
+    private volatile int preparedHooks; // the shading hooks the last graph's views run: pipelines made ahead run them
     private volatile boolean surfacesWanted; // a graph drew with the surface outputs: prepare their pipelines too
     private Materials immediateTable;
     private long immediateVersion;
@@ -182,27 +183,30 @@ public final class MeshletRenderer implements AutoCloseable {
             if ((rasters & 1 << raster) == 0) {
                 continue;
             }
-            shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.COLOR));
+            int hooks = preparedHooks;
+            shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.COLOR, hooks));
             if (surfacesWanted && raster != BIN_BLENDED) {
                 shading.prepare(this.raster.forwardKey(type, features, raster, meshShading,
-                    ShadingPipelines.COLOR_SURFACES));
+                    ShadingPipelines.COLOR_SURFACES, hooks));
             }
             if (raster == BIN_BLENDED) {
                 shading.prepare(this.raster.forwardKey(type, features, raster, meshShading,
-                    ShadingPipelines.WEIGHTED));
-                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.OVER));
+                    ShadingPipelines.WEIGHTED, hooks));
+                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.OVER,
+                    hooks));
             }
             for (ClassicLodGeometry classic : classics) {
                 for (int list = raster; list < 2 * BINS; list += BINS) {
-                    shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.COLOR));
+                    shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.COLOR, hooks));
                     if (surfacesWanted && raster != BIN_BLENDED) {
                         shading.prepare(ClassicLodGeometry.forwardKey(type, features, list,
-                            ShadingPipelines.COLOR_SURFACES));
+                            ShadingPipelines.COLOR_SURFACES, hooks));
                     }
                     if (raster == BIN_BLENDED) {
                         shading.prepare(ClassicLodGeometry.forwardKey(type, features, list,
-                            ShadingPipelines.WEIGHTED));
-                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.OVER));
+                            ShadingPipelines.WEIGHTED, hooks));
+                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.OVER,
+                            hooks));
                     }
                 }
             }
@@ -675,10 +679,19 @@ public final class MeshletRenderer implements AutoCloseable {
      * then on also made ahead as materials are written); without {@code opaque}, the blended bin's only.
      */
     RasterPipelines.Typed forwardPipelines(boolean surfaces, boolean opaque) {
+        return forwardPipelines(surfaces, opaque, 0);
+    }
+
+    /**
+     * Like {@link #forwardPipelines(boolean, boolean)}, running the shading hooks {@code hooks} (a view's
+     * {@link IndirectInputs.Set#hooks}): pipelines made ahead from then on run them too.
+     */
+    RasterPipelines.Typed forwardPipelines(boolean surfaces, boolean opaque, int hooks) {
         if (surfaces) {
             surfacesWanted = true;
         }
-        return raster.typed(scene.materials(), path() == Path.MESH_SHADERS, surfaces, opaque);
+        preparedHooks = hooks;
+        return raster.typed(scene.materials(), path() == Path.MESH_SHADERS, surfaces, opaque, hooks);
     }
 
     /** A graph draws with the surface outputs: from now on their pipelines are made ahead too. */

@@ -57,6 +57,11 @@ public record BlendedTargets(Kind kind, Image color, Image accumulated, Image re
         return behind == null ? pass : pass.read(behind, com.truesim.engine.graph.Access.SAMPLED_FRAGMENT);
     }
 
+    /** The shading hooks the view runs ({@link IndirectInputs.Set#hooks}); 0 without indirect light. */
+    public int hooks() {
+        return indirect == null ? 0 : indirect.hooks();
+    }
+
     /** The indirect light's table address in a pass with context {@code ctx}; 0 without. Allocates nothing. */
     public long indirectAddress(com.truesim.engine.graph.PassContext ctx) {
         return indirect == null ? 0 : ctx.address(indirect.table());

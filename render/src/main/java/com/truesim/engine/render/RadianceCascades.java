@@ -16,6 +16,7 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.layout.CascadePush;
 import com.truesim.engine.render.layout.IndirectConstants;
+import com.truesim.engine.render.layout.HookDataLayout;
 import com.truesim.engine.render.layout.IndirectLightLayout;
 import com.truesim.engine.render.layout.PathPush;
 import com.truesim.engine.render.layout.ProbeVolumeDataLayout;
@@ -207,15 +208,16 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
         Pipeline tracing = g.computeProgram(trace, "traceMain", PathPush.BYTES);
         Pipeline layout = g.computeProgram(trace, "layoutMain", PathPush.BYTES);
         Pipeline scatter = g.computeProgram(trace, "scatterMain", PathPush.BYTES);
+        int hook = ProbeVolume.hookIndex(renderer);
         Pipeline[] shade = new Pipeline[bins];
         for (int bin = 0; bin < bins; bin++) {
             MaterialType type = materials.binType(bin);
             if (type.hitShader() != null) {
                 shade[bin] = g.computeProgram(type.hitShader(), type.hitEntry(), PathPush.BYTES,
-                    materials.binFeatures(bin));
+                    materials.binFeatures(bin), 0, 0, 1 << hook); // SHADING_HOOKS (3): the volume's own
             }
         }
-        Frame frame = new Frame(grid, spacing, coarsest);
+        Frame frame = new Frame(grid, spacing, coarsest, hook);
 
         pass(g, "cascade setup").write(data, BufferAccess.TRANSFER_DST).write(table, BufferAccess.TRANSFER_DST)
             .write(levels, BufferAccess.TRANSFER_DST).write(counts, BufferAccess.TRANSFER_DST)
@@ -371,10 +373,12 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
         final Grid grid;
         final float spacing;
         final double coarsest;
+        final int hook; // the probe volume's shading hook's index: the cascades' rays' hits are lit by the first
         final long[] base = new long[3]; // each cascade's lowest probe's world grid coordinate, while set up
 
-        Frame(Grid grid, float spacing, double coarsest) {
+        Frame(Grid grid, float spacing, double coarsest, int hook) {
             this.grid = grid;
+            this.hook = hook;
             this.spacing = spacing;
             this.coarsest = coarsest;
         }
@@ -388,7 +392,7 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 long header = stack.ncalloc(16, 1, ProbeVolumeDataLayout.BYTES);
                 int[] first = grid.probes()[0];
                 memPutInt(header + ProbeVolumeDataLayout.CASCADES, 1);
-                memPutInt(header + ProbeVolumeDataLayout.FLAGS, IndirectConstants.PROBE_VOLUME_CLAMP);
+                memPutInt(header + ProbeVolumeDataLayout.FLAGS, com.truesim.engine.render.layout.VolumeConstants.PROBE_VOLUME_CLAMP);
                 memPutInt(header + ProbeVolumeDataLayout.IRRADIANCE, ctx.sampled(irradiance));
                 memPutInt(header + ProbeVolumeDataLayout.DEPTH, ctx.sampled(depth));
                 for (int axis = 0; axis < 3; axis++) {
@@ -436,8 +440,7 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 // The cascades' own table, for their rays' hits: the environment, and the first cascade of the frame
                 // before (further bounces)
                 long t = stack.ncalloc(16, 1, IndirectLightLayout.BYTES);
-                memPutInt(t + IndirectLightLayout.FLAGS, IndirectConstants.INDIRECT_ENVIRONMENT
-                    | IndirectConstants.INDIRECT_PROBES);
+                memPutInt(t + IndirectLightLayout.FLAGS, IndirectConstants.INDIRECT_ENVIRONMENT);
                 memPutInt(t + IndirectLightLayout.SPECULAR, ctx.sampled(maps.specular()));
                 memPutInt(t + IndirectLightLayout.SHEEN, ctx.sampled(maps.sheen()));
                 memPutInt(t + IndirectLightLayout.BRDF, ctx.sampled(brdf));
@@ -447,16 +450,15 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 for (int i = 0; i < 4; i++) {
                     memPutFloat(t + IndirectLightLayout.ROTATION + 4L * i, environment.toEnvironment(i));
                 }
-                memPutLong(t + IndirectLightLayout.VOLUME, ctx.address(data));
                 RenderView view = anchor.view();
-                for (int axis = 0; axis < 3; axis++) {
-                    memPutFloat(t + IndirectLightLayout.VOLUME_OFFSET + 4L * axis,
-                        (float) (view.position(axis) - ProbeVolume.Volume.origin(camera.position(axis), coarsest)));
-                }
+                long slot = t + ShadingHooks.slot(hook);
+                ProbeVolume.putHook(slot, ctx.address(data), view.position(0) - ProbeVolume.Volume.origin(camera.position(0), coarsest),
+                    view.position(1) - ProbeVolume.Volume.origin(camera.position(1), coarsest),
+                    view.position(2) - ProbeVolume.Volume.origin(camera.position(2), coarsest));
                 long handleTable = ctx.unsafe().buffer(table);
                 Commands.updateBuffer(ctx.unsafe().commands(), handleTable, 0, IndirectLightLayout.SH, t);
-                Commands.updateBuffer(ctx.unsafe().commands(), handleTable, IndirectLightLayout.RESERVED,
-                    IndirectLightLayout.BYTES - IndirectLightLayout.RESERVED, t + IndirectLightLayout.RESERVED);
+                Commands.updateBuffer(ctx.unsafe().commands(), handleTable, ShadingHooks.slot(hook), HookDataLayout.BYTES,
+                    slot);
             }
             ctx.copy(maps.sh(), 0, table, IndirectLightLayout.SH, 27 * 4L);
         }

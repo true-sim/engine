@@ -1168,6 +1168,66 @@ dropped out of the device list. Both times the first loss came in a test drawing
 
 Next (#46): light binning, shadows per light, buckets, transparency and post effects as swappable techniques.
 
+### Writing a shading hook
+
+Indirect light and media along the view ray come from **shading hooks**: a library (global illumination, fog, aerial
+perspective, volumetrics, weather's wetness) adds to every way of shading (forward, the visibility buffer, both blended
+transparencies, ray hits, and the composites of ambient occlusion and reflections) without the core's shading naming
+it. The engine's own probe volume is one (`probes/hook.slang`); it leaves with global illumination.
+
+A hook is a Slang struct marked `[ShadingHook("name")]` (`hooks.slang`) with a static function per **hook point** it
+has:
+
+```slang
+import hooks;
+
+[ShadingHook("acme.fog")]
+public struct AcmeFog
+{
+    // Between the camera and the shaded point: radiance * T + L, transmittance * T
+    public static void media(ShadingPoint p, inout ViewRay ray)
+    {
+        float t = exp(-p.data.values.x * length(p.position)); // values: what the technique wrote for the view
+        ray.through(float3(t), (1 - t) * p.data.more.rgb);
+    }
+
+    // Light from all around: diffuse light covering what earlier hooks left, visibility of the environment
+    // around `direction` (specular occlusion)
+    // public static void indirect(ShadingPoint p, float3 direction, inout AroundLight light) { ... }
+};
+```
+
+- **One dispatch, merged at build time.** build-logic's `truesim.slang` merges the hooks of a project and its libraries
+  into `shading-hooks/dispatch.slang` (from this module's `shading-hooks` templates), which `indirect.slang` includes;
+  hooks are numbered, the libraries' first. Each runs under its bit of the specialization constant `SHADING_HOOKS`
+  (constant 3), which every shading pipeline of a view is made with from the hooks its view runs
+  (`IndirectInputs.Set.hooks()`): a hook a view does not use is compiled out of its pipelines and costs nothing.
+- **Shaders rebuilt with every hook.** A library's shaders were compiled with the hooks it knew. The project adding
+  hooks names a listing, `slang { shadingHooks = "com.acme.AcmeHooks" }`: the build generates it, and variants of its
+  libraries' shading (the material types' entry points, the shaders a library lists in `slang.shadingShaders`) with
+  every hook. The app installs it before the first frame, so the device loads the variants
+  (`VulkanDevice.shaderVariants()`) wherever the engine asks for its shaders:
+  `ShadingHooks.use(device, AcmeHooks.HOOKS)`. Without one, the engine's own listing (`EngineShadingHooks`) holds.
+- **Data per view.** A hook's data is its slot of the view's indirect-light table (`IndirectLight.hooks`,
+  `HookData`: an address of data of its own and a few values, 48 bytes). Its technique modifies `Keys.INDIRECT_LIGHT`,
+  writes the slot (`ShadingHooks.slot(index)`) every frame, and turns the hook on for the view; images and buffers its
+  shading samples go into the same set:
+
+  ```java
+  int index = ShadingHooks.of(device).require("acme.fog");
+  Buffer table = g.modify(Keys.INDIRECT_LIGHT);
+  g.pass("fog").write(table, BufferAccess.TRANSFER_DST).record(ctx -> /* updateBuffer of its slot */);
+  g.request(new IndirectInputs(g.view())).hook(index).sample(fogVolume);
+  ```
+- A view without an indirect-light table (no `EnvironmentLighting`) is lit by the constant sky and runs no hooks.
+- Media apply to shaded surfaces (not the sky background) and scale the surface outputs' reflectance and diffuse
+  weight by their transmittance, so reflections and global illumination replacing those terms later stay behind the
+  fog. The reference path tracer runs indirect hooks at its hits, not media.
+
+`ShadingHooksTest` (the test sources' `test/hooks/*.slang`, merged with the engine's into `TestEngineShadingHooks`)
+draws through a media hook and an indirect hook on every way of shading and geometry path, and checks that a hook whose
+slot is written but which the view does not run leaves the image the same, pixel for pixel.
+
 ### Transparency
 
 Blended materials (`Material.alphaBlend`, glTF's `BLEND`) and transmissive ones are drawn over a view's opaque scene by
@@ -1723,7 +1783,8 @@ entries; each entry has a **kind**, evaluated in shading by an implementation of
 
 `Screenshots.renderShadowOwner` renders every method on 3,000 rocks (`owner-*.png`): the sun by one map, cascades,
 AUTO cascades, hard and soft rays and the soft sun path traced; 24 point lights at dusk by AUTO maps, hard and soft
-rays.
+rays. Its renderer has room for 2^19 chunks of culling (the point lights' AUTO maps want about 140,000 on one frame
+slot, where the renderer cannot grow), and each shot fails if a frame left casters out (`chunksOverflowed()`).
 
 ### Global illumination: foundations
 
@@ -1923,8 +1984,9 @@ mean square (14 x 14 and a border), so a shaded point ignores probes that cannot
   (`WorldLights`: the sun, punctual lights, the GPU's particle lights) and a shadow ray each, emission, the
   environment where rays leave, and the volume's own light of the frame before at the hit (infinite bounces). Back
   faces mark probes inside geometry: they move out (`relocate`) or are turned off (`classify`).
-- **Shading everywhere:** the volume's diffuse light replaces the environment's spherical harmonics through the view's
-  indirect-light table in every path: opaque on both shading techniques, blended and transmissive surfaces, lit
+- **Shading everywhere:** the volume's diffuse light replaces the environment's spherical harmonics through the probe
+  volume's shading hook (`probes/hook.slang`, `ProbeVolume.HOOK`; "Writing a shading hook": the core's shading knows no
+  probe format) in every path running the view's hooks: opaque on both shading techniques, blended and transmissive surfaces, lit
   particles (which took the constant sky before), and the composites of ambient occlusion and reflections; its sky
   visibility dims the environment's reflections (specular occlusion at the probes' scale), which is what keeps a
   closed room dark. One look-up gives both. Views given equal volumes share one update (a headset's eyes, D7:

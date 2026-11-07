@@ -56,11 +56,12 @@ final class ShadingPipelines implements AutoCloseable {
     /**
      * What a pipeline is made of: its geometry stage (a vertex or mesh entry point), its fragment stage (or none, for
      * depth from positions alone), the specialization constants of its fragment entry point (a shading bin's
-     * features, a type's geometry hooks), its rasterization ({@link #CULL_BACK}, {@link #DOUBLE_SIDED}, with
-     * {@link #CLOCKWISE}), its targets ({@link #COLOR} ...) and its push block's bytes.
+     * features, a type's geometry hooks, the shading hooks its view runs: {@code SHADING_HOOKS}, constant 3), its
+     * rasterization ({@link #CULL_BACK}, {@link #DOUBLE_SIDED}, with {@link #CLOCKWISE}), its targets
+     * ({@link #COLOR} ...) and its push block's bytes.
      */
     record Key(String geometryShader, String geometryEntry, boolean mesh, String fragmentShader, String fragmentEntry,
-        int features, int geometry, int raster, int target, int push) {
+        int features, int geometry, int raster, int target, int push, int hooks) {
 
         Key {
             Objects.requireNonNull(geometryShader, "geometryShader");
@@ -151,12 +152,7 @@ final class ShadingPipelines implements AutoCloseable {
             if (key.fragmentShader() != null) {
                 graphics.stage(VK_SHADER_STAGE_FRAGMENT_BIT, fragment != null ? fragment : geometry,
                     key.fragmentEntry());
-                int salt = coldSalt;
-                if (salt != 0) {
-                    graphics.constants(key.features(), key.geometry(), salt);
-                } else {
-                    graphics.constants(key.features(), key.geometry());
-                }
+                graphics.constants(key.features(), key.geometry(), coldSalt, key.hooks());
             }
             if ((key.raster() & DOUBLE_SIDED) != 0) {
                 graphics.doubleSided();

@@ -46,8 +46,12 @@ public final class ShaderModule implements AutoCloseable {
         }
     }
 
-    /** The SPIR-V at classpath resource {@code resource}, e.g. {@code shaders/meshlets.spv}. */
+    /**
+     * The SPIR-V at classpath resource {@code resource}, e.g. {@code shaders/meshlets.spv}, or at its replacement on
+     * the device ({@link VulkanDevice#shaderVariants}).
+     */
     public static ShaderModule load(VulkanDevice device, String resource) {
+        resource = device.shaderVariants().resolve(resource);
         byte[] bytes;
         try (InputStream in = ShaderModule.class.getClassLoader().getResourceAsStream(resource)) {
             if (in == null) {

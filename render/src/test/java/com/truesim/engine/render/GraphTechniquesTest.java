@@ -1638,7 +1638,7 @@ class GraphTechniquesTest {
             int glow = materials.add(new Material(GlowParameters.DEFAULTS));
             boolean meshShading = renderer.path() == MeshletRenderer.Path.MESH_SHADERS;
             ShadingPipelines.Key key = renderer.raster().forwardKey(Glow.TYPE, 0, MeshletRenderer.BIN_OPAQUE,
-                meshShading, ShadingPipelines.COLOR);
+                meshShading, ShadingPipelines.COLOR, 0);
             renderer.shading().awaitPrepared();
             assertThat(renderer.shading().ready(key)).as("made ahead, on its own thread").isNotNull();
             frames(2);

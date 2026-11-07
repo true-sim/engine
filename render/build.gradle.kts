@@ -24,7 +24,12 @@ slang {
     javaPackage = "com.truesim.engine.render.materials"
     pushPackage = "com.truesim.engine.render.layout"
     pushBase = "com.truesim.engine.vulkan.PushConstants" // push layouts are writers too
-    constantModules = listOf("bindless", "lights", "materials", "meshlets/common", "indirect", "blocks/radix") // BindlessConstants and others
+    constantModules = listOf("bindless", "lights", "materials", "meshlets/common", "indirect", "blocks/radix",
+        "probes/volume") // BindlessConstants and others
+    // The shading hooks (hooks.slang): the engine's own, listed by EngineShadingHooks (the tests' TestEngineShadingHooks,
+    // with the test hooks and the engine's shading rebuilt with them); the shaders shading beyond material types
+    shadingHooks = "com.truesim.engine.render.EngineShadingHooks"
+    shadingShaders = listOf("ao/ao", "reflections/reflect")
 }
 
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.

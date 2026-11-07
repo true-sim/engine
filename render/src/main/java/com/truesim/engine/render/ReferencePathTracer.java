@@ -198,7 +198,7 @@ public final class ReferencePathTracer implements Technique {
             MaterialType type = materials.binType(bin);
             if (type.hitShader() != null) {
                 shade[bin] = g.computeProgram(type.hitShader(), type.hitEntry(), PathPush.BYTES,
-                    materials.binFeatures(bin));
+                    materials.binFeatures(bin), 0, 0, indirect == null ? 0 : indirect.hooks()); // 3: SHADING_HOOKS
             }
         }
         Pipeline single = singleShader == null ? null

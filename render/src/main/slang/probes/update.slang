@@ -16,7 +16,7 @@
 //   update disagrees with it beyond its noise (adaptive hysteresis: changes nothing announced); borders copied for
 //   bilinear filtering across the octahedron's seams; the probe relocated off nearby surfaces and classified (inside
 //   geometry: inactive).
-import indirect;
+import probes.volume;
 import surfaces;
 import bindless;
 
@@ -79,7 +79,7 @@ static const uint PROBES_RESET_ALL = 2;  // every history restarts (the environm
 static const uint PROBES_RELOCATE = 4;   // move probes off nearby surfaces
 static const uint PROBES_CLASSIFY = 8;   // turn off probes inside geometry
 
-/** Probe flags beside indirect.slang's: marked by invalidate.slang, and to update this frame. */
+/** Probe flags beside volume.slang's: marked by invalidate.slang, and to update this frame. */
 static const uint PROBE_INVALIDATED = 4;
 static const uint PROBE_UPDATE = 8;
 /** Its history restarted this frame: a repeated update (render.gi.response.iterations) refines it again. */
