@@ -522,6 +522,26 @@ unchanged (90 % in 2 frames told, 3 found).
 - Rule: a test deciding that a Monte Carlo estimate changed weighs it against the noise its estimator showed over time,
   not that one sample's; check it with a small bright source that some samples miss, and check the lag targets with it.
 
+**Relocated probes restarted their light again and again in a still scene.** In effects-particles' dusk scene held still
+(no snow, no smoke, 300 frames), the light of the house and of the ground by the far lamps pulsed with the probe volume
+on: each 40 px region's luma about its trend, 2.40 (house) and 2.34 (left ground) of 255, against 0.08 and 0.00 without
+it. Two parts of relocation restarted probes' histories though nothing changed. Classification judged a probe by the
+rays from where it had been: one that relocation had just moved out of geometry was turned off, turned on by the next
+update's rays, and a probe turned on was taken for a new one, its relocation dropped: back inside, off, out, on, every
+other update (cascade 0, read back per frame: 1,888 and 2,017 probes active and 133 and 4 restarted, alternately, frame
+after frame). And every relocation step of more than 5 % of the spacing restarted the probe's history. A probe turned on
+now keeps its relocation, a probe moved this update keeps its activity until rays from where it is now judge it, and
+only a move beyond a quarter of the spacing restarts it (a smaller one blends in): 2.40 to 1.33 in the house; with the
+lamps' bulbs dark, 1.00 to 0.24, 0.04 on the ground.
+- Proof: `ProbeVolumeTest.probesRelocatedOffASurfaceSettleInsteadOfRestartingTheirLight` (a floor 3 cm over a row of
+  probes, lit through the volume by a small bright lamp: the image held NaNs before, either part of the classification
+  change alone removed them; the NaNs' own cause was not traced), and the still dusk scene's numbers and restart counts
+  read back per frame, before and after (true-sim/engine, GI pulse).
+- Observed, not fixed: with the bulbs lit the ground by them still varies (1.70; 0.37 with their emission a quarter):
+  probe rays meet small emissive surfaces by chance only, and a history of 30 updates carries what a few met.
+- Rule: a state machine driven by the same rays it changes (relocation, classification) is checked in a still scene
+  for states that alternate; read the probes' states back per frame, not only the image.
+
 **A radiance cascade's interval was continued by probes whose own intervals start across a wall.** Merging, a
 direction whose ray met nothing within its interval took the next cascade's light around the probe (eight probes,
 trilinear), as in 2D. Those probes' intervals start where this one's ends only along the same line from the same

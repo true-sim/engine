@@ -144,12 +144,25 @@ void prepareMain(uint3 id : SV_DispatchThreadID)
     uint frames = states[index].frames;
     bool restart = (push.flags & PROBES_RESET_ALL) != 0 || push.status[0] != 0
         || (flags & PROBE_INVALIDATED) != 0;
-    if (any(states[index].coordinates != coordinate) || (flags & PROBE_VALID) == 0)
+    if (any(states[index].coordinates != coordinate))
     {
         // A probe new to its slot: nothing it holds is its own
         states[index].coordinates = coordinate;
         states[index].offset = 0;
         flags = PROBE_ACTIVE;
+        restart = true;
+    }
+    else if ((flags & PROBE_VALID) == 0)
+    {
+        // A probe turned on again: its light starts anew where its relocation took it. Moved back to its grid point, a
+        // probe relocated out of geometry was inside it again, turned off, moved out, turned on: every other update,
+        // its light anew each time. (Never updated, what its state holds is not its own.)
+        float3 offset = states[index].offset;
+        if (!all(isfinite(offset)) || any(abs(offset) > 0.45 * push.volume[0].cascade[cascade].w))
+        {
+            states[index].offset = 0;
+        }
+        flags |= PROBE_ACTIVE;
         restart = true;
     }
     if (restart)
@@ -418,15 +431,20 @@ void blendMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         }
         if ((push.flags & PROBES_CLASSIFY) != 0)
         {
-            stillActive = inside > 0.25 ? 0 : 1;
+            // The rays tell where the probe was: moved this update, it is judged by the next update's rays
+            bool relocated = length(offset - before) > 0.05 * spacing;
+            stillActive = relocated ? (active ? 1 : 0) : (inside > 0.25 ? 0 : 1);
         }
         else
         {
             stillActive = 1;
         }
-        if (length(offset - before) > 0.05 * spacing)
+        if (length(offset - before) > least)
         {
-            changed = 1; // moved: what it saw from there is no longer its light
+            // Moved far: what it saw from there is no longer its light. A step a fraction of that sees about the same
+            // light and blends in; restarted on every step of 5 % of the spacing, probes near surfaces restarted again
+            // and again
+            changed = 1;
         }
     }
     GroupMemoryBarrierWithGroupSync();
