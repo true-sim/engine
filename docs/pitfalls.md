@@ -518,6 +518,18 @@ probe volume test with "shading hooks uses probe volume without declaring it", t
   its readers take it), not when the request is made. Its CPU writes still come before the GPU's reads: a frame's
   passes all record before it is submitted.
 
+**The GI scenes' real-time images change with an unrelated allocation.** Comparing the shading hooks' two designs
+image by image (GiHarness: every GI scene's reference, raster, probe and cascade images, 40 x 24, lavapipe 26.2.6),
+50 of 52 were bit-exact and mover state 1's probe and cascade images were not; run alone, the mover scene matched
+bit for bit, after other scenes it did not, while each design repeated its own images exactly. The first design alone,
+with a 3 MiB host-visible buffer allocated before the harness and never used, changed toggle 0's raster, probe and
+cascade images (2,556 to 2,843 of 3,840 floats, up to 100 %) and mover 1's probe and cascade images; mover 1's
+real-time images hold NaNs in both designs (150 and 175 pixels). Some pass reads memory it never wrote, or stale
+memory, in those scenes; which one was not found.
+- Proof: the dumps of both designs and the padded run (true-sim/engine, shading hook records PR).
+- Rule: an image comparison across a change that allocates differently is checked against the base itself with an
+  unrelated allocation before a difference is put down to the change.
+
 ## Tests and measurements
 
 **A still scene's benchmark hides what motion costs.** 200 shadowed point lights over the rocks cost 0.98 ms against
