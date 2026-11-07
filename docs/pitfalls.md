@@ -500,6 +500,28 @@ frames cascade 0's mean irradiance stood off its neighbours' by 0.008 at most, f
   flashes; a distant source is taken through a filtered look-up as wide as each sample's share, and a test puts a small
   bright source where the samples can miss it.
 
+**The probe volume's adaptive test took a small bright light's misses for changes.** The test restarts a probe's history
+where an update differs from it by more than `sensitivity` deviations of that update's noise, the noise its own rays
+show. A small bright light (the lamp posts' bulbs in effects-particles' dusk film, emissive boxes 26 cm across) is met
+by a probe's rays in some updates only; an update that missed it showed almost no noise, so the history that held it
+looked beyond that noise and restarted, again and again; the restarted probes' light, bounced, changed their neighbours'
+updates too. The ground under the lamps flickered from frame to frame although no light changed: noise.py's lower half
+(80 px regions, the mean second difference of their luma over 240 frames) 1.61, against 0.02 without GI, 0.02 with the
+bulbs not emissive and 0.09 with the adaptive test off; ambient occlusion, reflections, the snow's lighting and the
+budget off changed nothing (1.60 to 1.73). Taking at least the mean of the history's updates' own noise (a new R32F
+atlas, weighed as the history is), and that for the drift test's noise too, brought it to 0.12 with the lag targets
+unchanged (90 % in 2 frames told, 3 found).
+- Proof: `ProbeVolumeTest.aSmallBrightLampFlickersNoMoreWithTheAdaptiveTestThanWithout` (a floor lit by a bright square
+  through the volume: 47 times as much frame-to-frame change as by the history alone before, 2.5 times after); the dusk
+  film's frames and the probes' restarts read back per frame (cascade 0 restarted 17 probes a frame, median, with the
+  bulbs lit, 1 with them dark, 0 with the adaptive test off) (true-sim/engine, dusk flicker).
+- Tried and dropped: the spread of the updates about the history (their mean square less the history's square) counts
+  a history's own convergence as noise; a floor for the drift test summing the texels' deviations (as if they erred
+  together) left the unannounced change unfound for 25 frames instead of 3; holding the test off for a history's first
+  2 to 8 updates made the told lag 4 frames instead of 2.
+- Rule: a test deciding that a Monte Carlo estimate changed weighs it against the noise its estimator showed over time,
+  not that one sample's; check it with a small bright source that some samples miss, and check the lag targets with it.
+
 **A radiance cascade's interval was continued by probes whose own intervals start across a wall.** Merging, a
 direction whose ray met nothing within its interval took the next cascade's light around the probe (eight probes,
 trilinear), as in 2D. Those probes' intervals start where this one's ends only along the same line from the same

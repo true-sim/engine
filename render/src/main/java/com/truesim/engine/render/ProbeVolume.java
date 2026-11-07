@@ -164,7 +164,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
      * A small bright source in the environment (a sun in the sky) then reaches every update by its share, not by
      * whether a ray happened to meet it that frame (every probe turns its rays the same way, so every probe met
      * it in the same frames: the volume's light jumped for those frames). 2 by default: a sun 10 degrees across
-     * changed a floor's light from frame to frame by up to 0.3 %, 9 % at 1 and 450 to 660 % along the rays alone
+     * changed a floor's light from frame to frame by up to 0.3 %, 9 % at 1 and 380 to 660 % along the rays alone
      * (0); its mean at 1, 2 and 4 within 3 % ({@code
      * ProbeVolumeTest.aSmallBrightSunInTheSkyLightsEveryFrameAlikeNotInJumps}, RX 9070 XT).
      */
@@ -178,6 +178,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
 
     static final Format IRRADIANCE_FORMAT = Format.R16G16B16A16_SFLOAT;
     static final Format DEPTH_FORMAT = Format.R16G16_SFLOAT;
+    private static final Format VARIANCE_FORMAT = Format.R32_SFLOAT;
     private static final Format RAY_FORMAT = Format.R16G16B16A16_SFLOAT;
     private static final int IRRADIANCE_TEXELS = 8;
     private static final int DEPTH_TEXELS = 16;
@@ -282,6 +283,9 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             across * across * IRRADIANCE_TEXELS, up * cascades * IRRADIANCE_TEXELS));
         Image depth = g.persistent("probe distances", ImageDesc.of(DEPTH_FORMAT, across * across * DEPTH_TEXELS,
             up * cascades * DEPTH_TEXELS));
+        // Per irradiance texel, the mean variance of its updates: the noise the adaptive test allows
+        Image variances = g.persistent("probe irradiance variances", ImageDesc.of(VARIANCE_FORMAT,
+            across * across * IRRADIANCE_TEXELS, up * cascades * IRRADIANCE_TEXELS));
         Buffer states = g.persistentBuffer("probe states", (long) STATE_BYTES * count);
         Buffer data = g.createBuffer("probe volume", ProbeVolumeDataLayout.BYTES);
         Buffer table = g.createBuffer("probe volume indirect light", IndirectLightLayout.BYTES);
@@ -475,10 +479,10 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             pass(g, "probe blending" + again).read(data, BufferAccess.STORAGE_READ)
                 .read(rayImage, Access.STORAGE_READ)
                 .write(irradiance, Access.STORAGE_WRITE).write(depth, Access.STORAGE_WRITE)
-                .write(states, BufferAccess.STORAGE_WRITE)
+                .write(variances, Access.STORAGE_WRITE).write(states, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> ctx.dispatch(blend, frame.probePush(blendPush, ctx, settings, camera, coarsest, data,
-                    null, null, null, rayImage, irradiance, depth), Math.min(count, 65535), (count + 65534) / 65535,
-                    1));
+                    null, null, null, rayImage, irradiance, depth).variances(ctx.storage(variances)),
+                    Math.min(count, 65535), (count + 65534) / 65535, 1));
         }
         return new Volume(data, states, irradiance, depth, camera, coarsest);
     }
