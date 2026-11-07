@@ -164,7 +164,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
      * A small bright source in the environment (a sun in the sky) then reaches every update by its share, not by
      * whether a ray happened to meet it that frame (every probe turns its rays the same way, so every probe met
      * it in the same frames: the volume's light jumped for those frames). 2 by default: a sun 10 degrees across
-     * changed a floor's light from frame to frame by up to 0.2 %, 9 % at 1 and 480 to 660 % along the rays alone
+     * changed a floor's light from frame to frame by up to 0.2 %, 9 % at 1 and 450 to 660 % along the rays alone
      * (0); its mean at 1, 2 and 4 within 3 % ({@code
      * ProbeVolumeTest.aSmallBrightSunInTheSkyLightsEveryFrameAlikeNotInJumps}, RX 9070 XT).
      */

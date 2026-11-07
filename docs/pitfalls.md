@@ -491,7 +491,7 @@ directions each ray stands for, twice (`render.gi.probes.skyFootprint`, 2), remo
 largest whole-frame second difference of the mean luma fell from 11.15 to 0.64 of 255, and over the film's first 120
 frames cascade 0's mean irradiance stood off its neighbours' by 0.008 at most, from 0.061.
 - Proof: `ProbeVolumeTest.aSmallBrightSunInTheSkyLightsEveryFrameAlikeNotInJumps` (a floor under a sun 10 degrees
-  across: a frame's light off its neighbours' by 480 to 660 % along the rays alone, at most 0.2 % through the
+  across: a frame's light off its neighbours' by 450 to 660 % along the rays alone, at most 0.2 % through the
   footprint); the film's frames and the volume's states and irradiance read back each frame, before and after
   (true-sim/engine, GI flash).
 - Observed in the same film, not traced further: 560 of cascade 0's 2,048 probes restarted their histories in every one
