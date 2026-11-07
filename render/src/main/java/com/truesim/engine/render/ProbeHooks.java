@@ -35,6 +35,7 @@ final class ProbeHooks {
     private final Camera camera;
     private final double coarsest;
     private final Specialization every;
+    private final float growth;
 
     /**
      * The own block of a volume whose data is {@code data}, its origin {@code camera} snapped to {@code coarsest},
@@ -54,7 +55,12 @@ final class ProbeHooks {
             all = all.with(i);
         }
         every = hooks.specialization(all);
-        g.request(new ShadingHookInputs(g.view())).probe(this);
+        growth = g.request(new ShadingHookInputs(g.view())).probe(this).growth();
+    }
+
+    /** The per-instance overrides of the anchor's scene, or null. */
+    private ShadingHookOverrides overrides() {
+        return anchor.renderer().scene().hookOverridesIfMade();
     }
 
     /** A hit pipeline's constants: its shader's own ({@code own}), and every hook's switch on. */
@@ -69,6 +75,8 @@ final class ProbeHooks {
 
     /** Points the volume's own table {@code table} at the block's copy for the frame. Allocates nothing. */
     void point(PassContext ctx, Buffer table) {
+        // Grown for the frame's overrides first, whichever of this and the block's pass records first
+        block.ensure(ShadingHookOverrides.blockBytes(hooks, overrides()), growth);
         try (var stack = stackPush()) {
             long address = stack.nmalloc(8, 8);
             memPutLong(address, block.address());
@@ -82,6 +90,8 @@ final class ProbeHooks {
      * anchor's camera. Allocates nothing.
      */
     void publish(PassContext ctx, ShadingHookInputs.Set view) {
+        ShadingHookOverrides overrides = overrides();
+        block.ensure(ShadingHookOverrides.blockBytes(hooks, overrides), growth);
         MemorySegment staging = block.staging();
         staging.copyFrom(hooks.defaultBlock());
         view.compose(ctx, staging);
@@ -92,6 +102,7 @@ final class ProbeHooks {
             anchor.position(2) - ProbeVolume.Volume.origin(camera.position(2), coarsest));
         long word = ShadingHooks.activeWord(hook);
         staging.set(U32, word, staging.get(U32, word) | 1 << (hook % 32));
+        view.composeOverrides(ctx, staging, block.address(), overrides); // over the volume's own record too
         for (int axis = 0; axis < 3; axis++) {
             double p = anchor.position(axis);
             float high = (float) p;

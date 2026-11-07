@@ -5,9 +5,8 @@
 //
 //   ISurfaceHook   static void surface(ShadingPoint p, X* params, inout Surface s)
 //       changes the surface before it is lit (wetness, snow, dust): in world terms, the same for every view; at
-//       rasterized pixels, the visibility buffer's, ray hits and probe hits alike; never its alpha. Materials and
-//       instances may opt out (MATERIAL_NO_SURFACE_HOOKS, INSTANCE_NO_SURFACE_HOOKS); a coat of its own (a water
-//       layer: s.clearcoat) only where the material allows it (p.flags & SHADING_COAT_ALLOWED).
+//       rasterized pixels, the visibility buffer's, ray hits and probe hits alike; never its alpha; a coat of its own
+//       (a water layer: s.clearcoat) only where the material allows it (p.flags & SHADING_COAT_ALLOWED).
 //   IIndirectHook  static void indirect(ShadingPoint p, X* params, AroundQuery q, inout AroundLight light)
 //       the light from all around the point, only what the query wants (AROUND_*): diffuse light (an irradiance
 //       volume, probes), specular radiance along q.direction at q.roughness, how much of the environment the point
@@ -22,7 +21,9 @@
 // [ShadingHookBefore]). Each hook runs under a bool specialization constant of its own (id 1024 + its index: compiled
 // out where a pipeline is made without it) and its bit of the view's hook block (ShadingHookBlock: on or off from
 // frame to frame without new pipelines). Its parameters are a record in that block, which the engine writes each frame
-// (engine-render's ShadingHooks).
+// (engine-render's ShadingHooks). Any hook, of any point, can be refused per material (MATERIAL_REFUSES_HOOKS: words of
+// refused hooks after its feature table) and switched off or on per instance by an override entry (hookRuns); a
+// material's refusal wins.
 module hooks;
 
 import bindless;
@@ -69,14 +70,14 @@ public static const uint SHADING_SKY = 4;
 /** The material lets surface hooks put a coat of their own on it (s.clearcoat: a water layer). */
 public static const uint SHADING_COAT_ALLOWED = 1;
 
-// Opting out of surface hooks, and into their coats (engine-render's Material.surfaceHooks, Material.hookCoat; the
-// instance's flag from its renderable).
-/** A material's header bit: surface hooks leave it alone. */
-public static const uint MATERIAL_NO_SURFACE_HOOKS = 1u << 11;
+// Refusing hooks, and allowing their coats (engine-render's Material.refuseHooks, Material.hookCoat).
+/**
+ * A material's header bit: it refuses some hooks, a bit each in words (a uint per 32 hooks of the listing) after its
+ * block's feature table (a uint per feature it shows).
+ */
+public static const uint MATERIAL_REFUSES_HOOKS = 1u << 11;
 /** A material's header bit: surface hooks may put a coat of their own on it (SHADING_COAT_ALLOWED). */
 public static const uint MATERIAL_HOOK_COAT = 1u << 12;
-/** An instance's mesh word bit (meshlets/common.slang's INSTANCE_*): surface hooks leave it alone. */
-public static const uint INSTANCE_NO_SURFACE_HOOKS = 1u << 26;
 
 /** A ShadingPoint.pixel off the screen (ray and probe hits). */
 public static const uint2 NO_PIXEL = uint2(0xffffffffu, 0xffffffffu);
@@ -235,8 +236,13 @@ public interface IMediaHook
 /**
  * A view's hook block (engine-render's ShadingHooks, ShadingHookBlock in Java): this header, a uint of active bits
  * per 32 hooks (a hook runs where its bit is set), a uint per hook with the byte offset of its parameters from the
- * block's start, then the records, every hook's (its defaults where the view does not run it). Written by the CPU
- * each frame, a copy per frame slot; read a field at a time (pitfalls.md: no loads of whole structs through pointers).
+ * block's start, as many words of zeros as active bits (what refuses no hook), then the records, every hook's (its
+ * defaults where the view does not run it); then the override section (engine-render's ShadingHookOverrides:
+ * per-instance switches and values layered over the view's): per override entry e (1 to overrideEntries) a row of
+ * words of hooks it switches off, words of hooks it switches on, and a uint per hook, the byte offset of the entry's
+ * record for it (0: the view's); then those records. Written by the CPU each frame, a copy per frame slot; read a field
+ * at a time (pitfalls.md: no loads of whole structs through pointers). Every address in it is valid memory
+ * (pitfalls.md: no null loads, even guarded).
  */
 [HostLayout]
 public struct ShadingHookBlock
@@ -244,11 +250,14 @@ public struct ShadingHookBlock
     public float3 camera;          // the view's camera's world position, high part
     public uint hooks;             // how many hooks the block has room for: the listing's
     public float3 cameraLow;       // and the rest
-    public uint pad;
+    public uint overrideEntries;   // the override entries of the section
+    public uint64_t instanceEntries; // a uint per instance id: its override entry (0: none); never null
+    public uint instances;         // the ids it has room for (0: it points at a word holding 0)
+    public uint overrideTable;     // the section's byte offset from the block's start
 };
 
 /** The bytes of a block's header, before its active bits. */
-public static const uint SHADING_HOOK_HEADER = 32;
+public static const uint SHADING_HOOK_HEADER = 48;
 
 /** Whether hook `index` runs in the view of `block` this frame. */
 public bool hookActive(ShadingHookBlock* block, uint index)
@@ -257,11 +266,65 @@ public bool hookActive(ShadingHookBlock* block, uint index)
     return (words[index / 32] & (1u << (index % 32))) != 0;
 }
 
-/** The address of hook `index`'s parameters in `block`, of a listing of `count` hooks. */
-public uint64_t hookRecord(ShadingHookBlock* block, uint index, uint count)
+/** The words of a hook block's listing of `count` hooks: a uint per 32. */
+public uint hookWords(uint count)
 {
-    uint* offsets = (uint*) ((uint64_t) block + SHADING_HOOK_HEADER + 4 * ((count + 31) / 32));
-    return (uint64_t) block + offsets[index];
+    return (count + 31) / 32;
+}
+
+/** Where words refusing no hook lie in `block` (of a listing of `count` hooks): a site's refusals by default. */
+public uint* noHooksRefused(ShadingHookBlock* block, uint count)
+{
+    return (uint*) ((uint64_t) block + SHADING_HOOK_HEADER + 4 * (hookWords(count) + count));
+}
+
+/** Override entry `entry`'s row in `block` (any row, in the block, where it has none: read, never used). */
+uint* overrideRow(ShadingHookBlock* block, uint entry, uint count)
+{
+    uint entries = block[0].overrideEntries;
+    uint* table = (uint*) ((uint64_t) block + block[0].overrideTable); // with no entries, the active bits: in the block
+    return table + (clamp(entry, 1u, max(entries, 1u)) - 1) * (2 * hookWords(count) + count);
+}
+
+/**
+ * Whether hook `index` of a listing of `count` hooks runs at a point of the view of `block` shaded by override entry
+ * `entry`, its material refusing the hooks of `refused` (words, a bit per hook): not where refused; else where the
+ * entry switches it off or on, so; else by the view's bit.
+ */
+public bool hookRuns(ShadingHookBlock* block, uint index, uint count, uint entry, uint* refused)
+{
+    uint word = index / 32;
+    uint bit = 1u << (index % 32);
+    bool runs = hookActive(block, index);
+    uint* row = overrideRow(block, entry, count);
+    uint off = row[word];
+    uint on = row[hookWords(count) + word];
+    if (entry != 0 && entry <= block[0].overrideEntries)
+    {
+        runs = (off & bit) != 0 ? false : (on & bit) != 0 ? true : runs;
+    }
+    return runs && (refused[word] & bit) == 0;
+}
+
+/** The override entry of instance `instance` in the view of `block`: 0 for none (the view's records). */
+public uint hookEntry(ShadingHookBlock* block, uint instance)
+{
+    uint count = block[0].instances;
+    uint* entries = (uint*) block[0].instanceEntries;
+    uint entry = entries[min(instance, max(count, 1u) - 1)]; // in bounds whatever the instance: never a wild load
+    return instance < count ? entry : 0;
+}
+
+/**
+ * The address of hook `index`'s parameters in `block`, of a listing of `count` hooks, for override entry `entry` (0:
+ * the view's record; an entry not overriding the hook, the view's too).
+ */
+public uint64_t hookRecord(ShadingHookBlock* block, uint index, uint count, uint entry)
+{
+    uint* offsets = (uint*) ((uint64_t) block + SHADING_HOOK_HEADER + 4 * hookWords(count));
+    uint at = offsets[index];
+    uint own = overrideRow(block, entry, count)[2 * hookWords(count) + index];
+    return (uint64_t) block + (entry != 0 && entry <= block[0].overrideEntries && own != 0 ? own : at);
 }
 
 /** The point `position` etc. of the view of `block`, shaded by `path` (SHADING_*), as hooks see it. */

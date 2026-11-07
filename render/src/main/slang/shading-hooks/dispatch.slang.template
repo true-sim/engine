@@ -15,20 +15,24 @@ public bool anyShadingHooks()
     return {any};
 }
 
-/** The surface hooks' change of `s` at `p`, for the view of `block`. */
-public void surfaceHooks(ShadingHookBlock* block, ShadingPoint p, inout Surface s)
+/**
+ * The surface hooks' change of `s` at `p`, for the view of `block`, by override entry `entry` (0: none), but those
+ * `refused` refuses (words, a bit per hook: the material's).
+ */
+public void surfaceHooks(ShadingHookBlock* block, uint entry, uint* refused, ShadingPoint p, inout Surface s)
 {
 {calls:surface}
 }
 
-/** The indirect hooks' light around `p`, as `q` asks it, for the view of `block`. */
-public void indirectHooks(ShadingHookBlock* block, ShadingPoint p, AroundQuery q, inout AroundLight light)
+/** The indirect hooks' light around `p`, as `q` asks it, for the view of `block`, by override entry `entry`. */
+public void indirectHooks(ShadingHookBlock* block, uint entry, uint* refused, ShadingPoint p, AroundQuery q,
+    inout AroundLight light)
 {
 {calls:indirect}
 }
 
-/** The media hooks' change of `ray` between the camera and `p`, for the view of `block`. */
-public void mediaHooks(ShadingHookBlock* block, ShadingPoint p, inout ViewRay ray)
+/** The media hooks' change of `ray` between the camera and `p`, for the view of `block`, by override entry `entry`. */
+public void mediaHooks(ShadingHookBlock* block, uint entry, uint* refused, ShadingPoint p, inout ViewRay ray)
 {
 {calls:media}
 }

@@ -219,7 +219,7 @@ class ProbeVolumeTest {
         Material walls = new Material(MR.withBaseColor(new Color(rho, rho, rho, 1))
             .withEmissive(new Color(glow, glow, glow, 1))).feature(LAMBERT);
         int furnace = materials.add(walls);
-        int optedOut = materials.add(walls.surfaceHooks(false));
+        int optedOut = materials.add(walls.refuseHooks("test.tint"));
         box(furnace);
         lights.setCount(0);
         ShadingHookValues values = ShadingHookValues.of(device);
@@ -232,6 +232,44 @@ class ProbeVolumeTest {
             box(optedOut);
             double plain = glow / (1 - rho);
             assertThat(mean(frames(60), 0)).as("opted out").isCloseTo(plain, within(plain * 0.03));
+        } finally {
+            values.remove("test.tint");
+        }
+    }
+
+    /**
+     * Probe rays' hits take their instance's override entry as the screen does: the furnace untinted by the view's
+     * values (tint 1), its six walls given an entry halving their albedo, is E / (1 - rho / 2) (tinted on screen alone,
+     * E + rho / 2 E / (1 - rho), 12 % brighter); the walls' entry taken away again, E / (1 - rho).
+     */
+    @Test
+    void probeHitsTakeTheirInstancesOverrides() {
+        float rho = 0.5f;
+        float glow = 0.25f;
+        int furnace = materials.add(new Material(MR.withBaseColor(new Color(rho, rho, rho, 1))
+            .withEmissive(new Color(glow, glow, glow, 1))).feature(LAMBERT));
+        box(furnace);
+        lights.setCount(0);
+        ShadingHookValues values = ShadingHookValues.of(device);
+        values.set("test.tint", com.truesim.engine.render.materials.TestTintParameters.DEFAULTS, true);
+        ShadingHookOverrides overrides = scene.hookOverrides();
+        int half = overrides.add();
+        overrides.set(half, "test.tint", new com.truesim.engine.render.materials.TestTintParameters(
+            new com.truesim.common.math.Vec3(0.5, 0.5, 0.5), 0));
+        try {
+            lit("main", Environment.uniform("black", 0, 0, 0));
+            double plain = glow / (1 - rho);
+            assertThat(mean(frames(60), 0)).as("no instance overridden").isCloseTo(plain, within(plain * 0.03));
+            for (int wall = 0; wall < 6; wall++) {
+                overrides.assign(wall, half);
+            }
+            double tinted = glow / (1 - rho / 2);
+            assertThat(mean(frames(60), 0)).as("tinted by the walls' entry at hits and on screen")
+                .isCloseTo(tinted, within(tinted * 0.03));
+            for (int wall = 0; wall < 6; wall++) {
+                overrides.assign(wall, 0);
+            }
+            assertThat(mean(frames(60), 0)).as("the entry taken away").isCloseTo(plain, within(plain * 0.03));
         } finally {
             values.remove("test.tint");
         }

@@ -63,13 +63,14 @@ public final class GpuScene implements AutoCloseable {
     /** Instance flags above the mesh id, as meshlets/common.slang has them. */
     private static final int LIVE = CommonConstants.INSTANCE_LIVE;
     private static final int CASTS_SHADOWS = CommonConstants.INSTANCE_CASTS_SHADOWS;
-    private static final int NO_SURFACE_HOOKS = com.truesim.engine.render.layout.HooksConstants.INSTANCE_NO_SURFACE_HOOKS;
     private static final int MESH_BITS = (1 << 24) - 1;
     /** Layer 0: where instances are unless set otherwise. */
     private static final int DEFAULT_LAYERS = 1;
 
+    private final VulkanDevice device;
     private final GeometryPool pool;
     private int capacity;
+    private volatile ShadingHookOverrides hookOverrides; // made at need
     private final RecordBuffer instances; // the GPU's, device-local, uploading at the start of each frame
     // Per id, its mesh word as last written (mesh, live, casts shadows), 0 for a hole or an id the GPU writes: what
     // ray tracing reads to leave out of its top level what has nothing to trace.
@@ -117,6 +118,7 @@ public final class GpuScene implements AutoCloseable {
         if (capacity < 1) {
             throw new IllegalArgumentException("Room for instances: " + capacity);
         }
+        this.device = Objects.requireNonNull(device, "device");
         this.pool = Objects.requireNonNull(pool, "pool");
         this.capacity = capacity;
         this.slots = Objects.requireNonNull(slots, "slots");
@@ -177,7 +179,6 @@ public final class GpuScene implements AutoCloseable {
         private int material;
         private int layers = DEFAULT_LAYERS;
         private boolean castsShadows = true;
-        private boolean surfaceHooks = true;
         private double x;
         private double y;
         private double z;
@@ -211,15 +212,6 @@ public final class GpuScene implements AutoCloseable {
         /** Whether it casts shadows: shadow views and shadow rays leave out those that do not. */
         public Instance castsShadows(boolean castsShadows) {
             this.castsShadows = castsShadows;
-            return this;
-        }
-
-        /**
-         * Whether the views' surface hooks (hooks.slang: wetness, snow) change its surfaces; on by default. Its
-         * materials may opt out too ({@link Material#surfaceHooks}).
-         */
-        public Instance surfaceHooks(boolean surfaceHooks) {
-            this.surfaceHooks = surfaceHooks;
             return this;
         }
 
@@ -280,7 +272,7 @@ public final class GpuScene implements AutoCloseable {
     /** Writes the instance of entry {@code entry} ({@link #claim}) as {@code instance} describes. */
     public void write(int entry, Instance instance) {
         write(entry, instance.mesh, instance.material, instance.layers,
-            (instance.castsShadows ? CASTS_SHADOWS : 0) | (instance.surfaceHooks ? 0 : NO_SURFACE_HOOKS), instance.x,
+            instance.castsShadows ? CASTS_SHADOWS : 0, instance.x,
             instance.y, instance.z, instance.qx, instance.qy, instance.qz, instance.qw, instance.sx, instance.sy,
             instance.sz);
     }
@@ -313,6 +305,28 @@ public final class GpuScene implements AutoCloseable {
         for (Runnable follower : growth) {
             follower.run();
         }
+    }
+
+    /**
+     * The scene's shading hook values per instance ({@link ShadingHookOverrides}): entries layered over each view's
+     * values, an entry per instance. Made the first time it is asked for.
+     */
+    public ShadingHookOverrides hookOverrides() {
+        ShadingHookOverrides o = hookOverrides;
+        return o != null ? o : makeHookOverrides();
+    }
+
+    @AllowAllocation("made once, at need")
+    private synchronized ShadingHookOverrides makeHookOverrides() {
+        if (hookOverrides == null) {
+            hookOverrides = new ShadingHookOverrides(device, this);
+        }
+        return hookOverrides;
+    }
+
+    /** Its {@link #hookOverrides()} where made, else null. Allocates nothing. */
+    ShadingHookOverrides hookOverridesIfMade() {
+        return hookOverrides;
     }
 
     /** Runs {@code follower} whenever the table grows (a renderer growing its views' per-instance buffers). */
@@ -490,7 +504,7 @@ public final class GpuScene implements AutoCloseable {
     }
 
     /** {@link #write(int, int, int, int, boolean, double, double, double, float, float, float, float, float, float,
-     * float)} with the mesh word's flags {@code flags} (CASTS_SHADOWS, NO_SURFACE_HOOKS). */
+     * float)} with the mesh word's flags {@code flags} (CASTS_SHADOWS). */
     private void write(int entry, int mesh, int material, int layers, int flags, double x, double y,
         double z, float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
         long o = instances.offset(entry);
@@ -537,6 +551,10 @@ public final class GpuScene implements AutoCloseable {
         }
         instances.clear(id); // a hole
         meshWords[id] = 0;
+        ShadingHookOverrides overrides = hookOverrides;
+        if (overrides != null) {
+            overrides.forget(id);
+        }
         mobility[id] = UNKNOWN; // the removal is a change of its own: no hint change listed
         version++;
         used[id >>> 6] &= ~(1L << id);
@@ -566,6 +584,9 @@ public final class GpuScene implements AutoCloseable {
             }
             used[id >>> 6] &= ~(1L << id);
             mobility[id] = UNKNOWN;
+            if (hookOverrides != null) {
+                hookOverrides.forget(id);
+            }
             clearing[removedNow++] = id;
             lowestWord = Math.min(lowestWord, id >>> 6);
         }
@@ -908,6 +929,9 @@ public final class GpuScene implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
+            if (hookOverrides != null) {
+                hookOverrides.close();
+            }
             instances.close();
             motion.close();
             defaultMaterials.close();

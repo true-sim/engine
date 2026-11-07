@@ -34,15 +34,13 @@ public struct ShadePush
     uint diffuse;              // and the diffuse weight
 };
 
-/** Where pixel `pixel` of instance `instance` is shaded, for the view's hooks: its block, a rasterized pixel. */
+/**
+ * Where pixel `pixel` of instance `instance` is shaded, for the view's hooks: its block, a rasterized pixel, the
+ * instance's override entry.
+ */
 HookSite resolveSite(uint instance, uint2 pixel)
 {
-    HookSite site = HookSite.at(push.view[0].hooks, pixel, SHADING_RASTER);
-    if (anyShadingHooks() && (push.scene[0].instances[instance].mesh & INSTANCE_NO_SURFACE_HOOKS) != 0)
-    {
-        site.flags |= SITE_NO_SURFACE_HOOKS;
-    }
-    return site;
+    return HookSite.ofInstance(push.view[0].hooks, pixel, SHADING_RASTER, instance);
 }
 
 /** The features a variant of a shading pass shows (FEATURE_*): set when its pipeline is made. */

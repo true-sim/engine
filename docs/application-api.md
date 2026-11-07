@@ -539,7 +539,9 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   alone; what else lights a point, and what changes its surface or the light on its way to the camera, are **shading
   hooks**, `[ShadingHook]` structs merged by the build into one dispatch, each under a specialization constant of its
   own and its bit of the view's hook block (`Keys.SHADING_HOOKS`), its parameters a typed record of any size; the
-  scene's values run a hook without Java, a library's technique merges them with the frame's. The core's shading
+  scene's values run a hook without Java, a library's technique merges them with the frame's; nodes switch hooks and
+  override their values for their subtrees, per instance (`ShadingHookOverride`, `ShadingHookOverrides`), and materials
+  refuse hooks by name (`Material.refuseHooks`), a refusal winning. The core's shading
   knows no probe format. README, "Writing a shading hook".) `Environment`
   is an app object (a panorama or a color; intensity and rotation applied at lookup, so changing them costs nothing);
   `EnvironmentMaps` filters it into graph-persistent cubes (radiance with a mip chain, GGX levels by roughness, Charlie

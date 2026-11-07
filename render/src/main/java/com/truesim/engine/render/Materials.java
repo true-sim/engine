@@ -1044,7 +1044,8 @@ public final class Materials implements AutoCloseable {
             bytes += align(feature.bytes());
         }
         long featureTable = bytes;
-        bytes += align(4L * material.features().size());
+        int[] refused = refusedWords(material); // the hooks it refuses, a bit each, after the feature table
+        bytes += align(4L * material.features().size() + 4L * refused.length);
         int units = (int) (bytes / ALIGNMENT);
         long unit = heapUnit[id];
         if (unit < 0 || heapUnits[id] != units) {
@@ -1074,6 +1075,10 @@ public final class Materials implements AutoCloseable {
             entry += 4;
             o += align(feature.bytes());
         }
+        for (int word : refused) {
+            scratch.set(java.lang.foreign.ValueLayout.JAVA_INT_UNALIGNED, entry, word);
+            entry += 4;
+        }
         table.put(block, scratch, 0, bytes);
         table.putInt(slot + MaterialLayout.HEADER, material.header(typeId));
         table.putInt(slot + MaterialLayout.PARAMETERS, (int) block);
@@ -1090,6 +1095,25 @@ public final class Materials implements AutoCloseable {
         name(id, material);
         nameBuffers(id, material);
         version++;
+    }
+
+    /**
+     * The words of shading hooks {@code material} refuses, a bit per hook of the device's listing (hooks.slang's
+     * MATERIAL_REFUSES_HOOKS): none where it refuses none; names the shaders were built without are left out.
+     */
+    private int[] refusedWords(Material material) {
+        if (material.refusedHooks().isEmpty()) {
+            return new int[0];
+        }
+        ShadingHooks hooks = ShadingHooks.of(device);
+        int[] words = new int[(hooks.count() + 31) / 32];
+        for (String hook : material.refusedHooks()) {
+            int index = hooks.index(hook);
+            if (index >= 0) {
+                words[index / 32] |= 1 << (index % 32);
+            }
+        }
+        return words;
     }
 
     /**

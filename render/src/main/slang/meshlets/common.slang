@@ -720,6 +720,21 @@ public SurfaceInput surfaceInput(View view, VertexOut in, MaterialRef ref, float
 }
 
 /**
+ * The words of the shading hooks material `m` refuses (a bit per hook of the listing, after its feature table:
+ * MATERIAL_REFUSES_HOOKS), or null where it refuses none.
+ */
+public uint* materialRefusedHooks(MaterialRef m)
+{
+    Material s = m.slot();
+    if ((s.header & MATERIAL_REFUSES_HOOKS) == 0)
+    {
+        return nullptr;
+    }
+    uint64_t block = (uint64_t)m.table + s.parameters;
+    return (uint*)(block + s.featureTable + 4 * countbits(s.features));
+}
+
+/**
  * Whether the point of `in` exists on its material's surface, by type M's keep() (GEOMETRY_KEEP), with texture
  * coordinate gradients `dx`, `dy` and the material's own features: every pass drawing a type with the hook asks it.
  */
@@ -840,7 +855,8 @@ public float4 shadeMaterialSurface<M : IMaterial>(View view, VertexOut in,
     {
         s.albedo = meshletColor(in.meshlet) * in.color.rgb;
     }
-    // The view's surface hooks (wetness, snow), before it is lit
+    // The view's surface hooks (wetness, snow), before it is lit; every hook point here skips those it refuses
+    site = site.refusing(materialRefusedHooks(ref));
     surfaceHooksAt(site, s, in.world, input.normal, toViewer, ref.slot().header);
     // Light from all around: the view's indirect-light table (an environment, later GI), or the constant sky
     float3 reflectance;

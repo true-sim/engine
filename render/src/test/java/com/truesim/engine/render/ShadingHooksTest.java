@@ -17,6 +17,7 @@ import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.render.materials.TestFogParameters;
 import com.truesim.engine.render.materials.TestGlowLight;
 import com.truesim.engine.render.materials.TestGlowParameters;
+import com.truesim.engine.render.materials.TestSnowParameters;
 import com.truesim.engine.render.materials.TestTintParameters;
 import com.truesim.engine.render.materials.TransmissionParameters;
 import com.truesim.engine.render.testing.TestMeshes;
@@ -41,8 +42,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 /**
- * Shading hooks from another project's shaders, as a library's are: the test sources' hooks (test/hooks/testFog.slang, a
- * media hook; testGlow.slang, an indirect one; testTint.slang, a surface one) are merged with the engine's into
+ * Shading hooks from another project's shaders, as a library's are: the test sources' hooks (test/hooks/testFog.slang,
+ * a media hook; testGlow.slang, an indirect one; testTint.slang, a surface one) are merged with the engine's into
  * TestEngineShadingHooks, which the device takes as the listing holding every other on the classpath, its variants in
  * place of the engine's shading. Each way of shading runs them (forward, the visibility buffer, both blended
  * transparencies, on every geometry path); a hook the view does not run is left out of its pipelines, or skipped by its
@@ -90,9 +91,10 @@ class ShadingHooksTest {
     void theListingHoldingEveryOtherIsFoundOnTheClasspathWithItsVariants() {
         ShadingHooks hooks = ShadingHooks.of(device);
         assertThat(hooks.name()).isEqualTo("TestEngineShadingHooks");
-        // The library's first; then the project's by file (fog, glow, tint), test.tint ordered before test.fog by its
-        // attribute
-        assertThat(hooks.hooks()).containsExactly(ProbeVolume.HOOK, "test.glow", "test.tint", "test.fog");
+        // The library's first; then the project's by file (fog, glow, snow, tint), test.tint ordered before test.fog by
+        // its attribute
+        assertThat(hooks.hooks()).containsExactly(ProbeVolume.HOOK, "test.glow", "test.snow", "test.tint",
+            "test.fog");
         assertThat(device.shaderVariants().resolve("shaders/material-types/metallicRoughnessForward.spv"))
             .isEqualTo("shaders/shading-hooks/TestEngineShadingHooks/material-types/metallicRoughnessForward.spv");
         assertThat(device.shaderVariants().resolve("shaders/ao/ao.spv")).endsWith("ao/ao.hooks.spv");
@@ -347,13 +349,13 @@ class ShadingHooksTest {
 
     @ParameterizedTest
     @EnumSource(Shading.class)
-    void aSurfaceHookChangesSurfacesBeforeTheyAreLitButNotTheirAlphaNorTheOptedOut(Shading shading) {
+    void aSurfaceHookChangesSurfacesBeforeTheyAreLitButNotTheirAlphaNorWhereRefusedOrSwitchedOff(Shading shading) {
         assumeShading(shading);
         boolean blended = shading == Shading.WEIGHTED_BLENDED || shading == Shading.SORTED;
         Material white = new Material(MR.withBaseColor(new Color(1, 1, 1, blended ? 0.5f : 1)).withRoughness(1)
             .withMetallic(0)).doubleSided(true);
         int plain = materials.add(blended ? white.alphaBlend() : white);
-        int optedOut = materials.add((blended ? white.alphaBlend() : white).surfaceHooks(false));
+        int optedOut = materials.add((blended ? white.alphaBlend() : white).refuseHooks("test.tint"));
         SceneView main = view(shading, plain);
         rig.frames(3);
         int[] without = rig.target().rgba(SIZE / 2, SIZE / 2);
@@ -369,13 +371,18 @@ class ShadingHooksTest {
             }
             rig.scene().set(0, quad, optedOut, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
             rig.frames(3);
-            assertThat(rig.target().rgba(SIZE / 2, SIZE / 2)[0]).as("a material opting out")
+            assertThat(rig.target().rgba(SIZE / 2, SIZE / 2)[0]).as("a material refusing it")
                 .isCloseTo(without[0], within(2));
-            rig.scene().set(0, new GpuScene.Instance().mesh(quad).material(plain).position(0, 0, -2)
-                .surfaceHooks(false));
+            rig.scene().set(0, quad, plain, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            ShadingHookOverrides overrides = rig.scene().hookOverrides();
+            int off = overrides.add();
+            overrides.turn(off, "test.tint", false);
+            overrides.assign(0, off);
             rig.frames(3);
-            assertThat(rig.target().rgba(SIZE / 2, SIZE / 2)[0]).as("an instance opting out")
+            assertThat(rig.target().rgba(SIZE / 2, SIZE / 2)[0]).as("an instance's entry switching it off")
                 .isCloseTo(without[0], within(2));
+            overrides.assign(0, 0);
+            overrides.remove(off);
         } finally {
             values.remove("test.tint");
         }
@@ -400,6 +407,189 @@ class ShadingHooksTest {
         } finally {
             values.remove("test.tint");
         }
+    }
+
+    /**
+     * Two quads side by side, each given an override entry setting one field of the fog the scene's values run: the
+     * left's light (its transmittance stays the view's 0), the right's transmittance (its light stays the view's).
+     * Each shows its own; an instance whose entry is taken away shows the view's again; nothing rebuilds.
+     */
+    @ParameterizedTest
+    @EnumSource(value = Shading.class, names = {"FORWARD", "VISIBILITY_BUFFER", "SORTED"})
+    void instancesTakeTheirOverrideEntriesFieldByField(Shading shading) {
+        assumeShading(shading);
+        int material = materials.add(new Material(MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(1)
+            .withMetallic(0)).doubleSided(true));
+        view(shading, material);
+        sideBySide(material);
+        ShadingHookValues values = ShadingHookValues.of(device);
+        values.set("test.fog", new Values(Map.of("transmittance", new float[] {0, 0, 0},
+            "light", new float[] {FOG[0], FOG[1], FOG[2]})), true);
+        ShadingHookOverrides overrides = rig.scene().hookOverrides();
+        int left = overrides.add();
+        int right = overrides.add();
+        try {
+            rig.frames(3);
+            for (int x : new int[] {LEFT, RIGHT}) {
+                assertThat((double) rig.target().rgba(x, SIZE / 2)[1]).as("%s: the view's fog at %d", shading, x)
+                    .isCloseTo(255 * FOG[1], within(2.0));
+            }
+            int builds = rig.graph().builds();
+            overrides.set(left, "test.fog", new Values(Map.of("light", new float[] {0.8f, 0.8f, 0.8f})));
+            overrides.set(right, "test.fog", new Values(Map.of("transmittance", new float[] {1, 1, 1})));
+            assertThat(overrides.overrides(left, "test.fog")).isTrue();
+            overrides.assign(0, left);
+            overrides.assign(1, right);
+            rig.frames(3);
+            assertThat((double) rig.target().rgba(LEFT, SIZE / 2)[1]).as("%s: the left's light, the view's "
+                + "transmittance", shading).isCloseTo(255 * 0.8, within(2.0));
+            assertThat(rig.target().rgba(RIGHT, SIZE / 2)[1]).as("%s: the right's surface seen, the view's light added",
+                shading).isGreaterThan((int) (255 * FOG[1]) + 40);
+            overrides.assign(0, 0);
+            rig.frames(3);
+            assertThat((double) rig.target().rgba(LEFT, SIZE / 2)[1]).as("%s: the view's fog again", shading)
+                .isCloseTo(255 * FOG[1], within(2.0));
+            overrides.clear(right, "test.fog");
+            rig.frames(3);
+            assertThat((double) rig.target().rgba(RIGHT, SIZE / 2)[1]).as("%s: an entry overriding nothing", shading)
+                .isCloseTo(255 * FOG[1], within(2.0));
+            assertThat(rig.graph().builds()).as("overrides rebuild nothing").isEqualTo(builds);
+        } finally {
+            overrides.assign(1, 0);
+            overrides.remove(left);
+            overrides.remove(right);
+            values.remove("test.fog");
+        }
+    }
+
+    /**
+     * A fog a technique adds, turned off for one quad by an entry (transmittance 1, no light): that quad shows exactly
+     * what it shows without the fog, the other is fogged; with many entries (one per instance), the same. A technique's
+     * source sees each entry's record ({@link ShadingHookSource#override}).
+     */
+    @ParameterizedTest
+    @EnumSource(value = Shading.class, names = {"FORWARD", "VISIBILITY_BUFFER", "SORTED"})
+    void anOverrideTurningTheFogOffLeavesItsInstanceUnfogged(Shading shading) {
+        assumeShading(shading);
+        boolean blended = shading == Shading.SORTED;
+        Material surface = new Material(MR.withBaseColor(new Color(0.8f, 0.5f, 0.3f, 0.6f)).withRoughness(0.5f))
+            .doubleSided(true);
+        int material = materials.add(blended ? surface.alphaBlend() : surface);
+        SceneView main = view(shading, material);
+        sideBySide(material);
+        rig.frames(3);
+        BufferedImage without = rig.target().shot();
+        java.util.Set<Integer> seen = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        Hooked fog = new Hooked("test.fog", new TestFogParameters(new Vec3(0.5, 0.5, 0.5), new Vec3(0.2, 0.2, 0.2)));
+        fog.entries = seen;
+        main.port().add(fog);
+        ShadingHookOverrides overrides = rig.scene().hookOverrides();
+        int off = overrides.add();
+        overrides.set(off, "test.fog", new TestFogParameters(new Vec3(1, 1, 1), new Vec3(0, 0, 0)));
+        overrides.assign(0, off);
+        try {
+            rig.frames(3);
+            BufferedImage fogged = rig.target().shot();
+            assertThat(fogged.getRGB(LEFT, SIZE / 2)).as("%s: the quad under the entry unfogged", shading)
+                .isEqualTo(without.getRGB(LEFT, SIZE / 2));
+            assertThat(fogged.getRGB(RIGHT, SIZE / 2)).as("%s: the other fogged", shading)
+                .isNotEqualTo(without.getRGB(RIGHT, SIZE / 2));
+            assertThat(seen).as("the technique saw the entry's record").contains(off);
+            // Many entries, most on no instance: the block grows; the same image
+            int[] more = new int[40];
+            for (int i = 0; i < more.length; i++) {
+                more[i] = overrides.add();
+                overrides.set(more[i], "test.fog", new Values(Map.of("light", new float[] {1, 0, 0})));
+            }
+            overrides.assign(0, more[more.length - 1]);
+            overrides.set(more[more.length - 1], "test.fog", new TestFogParameters(new Vec3(1, 1, 1),
+                new Vec3(0, 0, 0)));
+            rig.frames(3);
+            assertSame(fogged, rig.target().shot(), shading + ", with 41 entries");
+            overrides.assign(0, 0);
+            for (int entry : more) {
+                overrides.remove(entry);
+            }
+        } finally {
+            overrides.assign(0, 0);
+            overrides.remove(off);
+        }
+    }
+
+    /**
+     * Two surface hooks on (snow whitening, then a tint quartering red): a material refusing snow keeps its own grey
+     * under the tint; one refusing the tint is snow-white; an entry switching only the snow off does what the refusal
+     * does; an entry switching snow on cannot override a material's refusal, and switches it on for its instance where
+     * the view runs it not.
+     */
+    @ParameterizedTest
+    @EnumSource(value = Shading.class, names = {"FORWARD", "VISIBILITY_BUFFER"})
+    void aMaterialRefusesOneHookWhileAnotherStillAppliesAndEntriesSwitchHooks(Shading shading) {
+        assumeShading(shading);
+        Material grey = new Material(MR.withBaseColor(new Color(0.3f, 0.3f, 0.3f, 1)).withRoughness(1).withMetallic(0))
+            .doubleSided(true);
+        int plain = materials.add(grey);
+        int noSnow = materials.add(grey.refuseHooks("test.snow"));
+        int noTint = materials.add(grey.refuseHooks("test.tint", "no.such.hook"));
+        view(shading, plain);
+        rig.frames(3);
+        int[] bare = rig.target().rgba(SIZE / 2, SIZE / 2);
+        ShadingHookValues values = ShadingHookValues.of(device);
+        values.set("test.snow", new TestSnowParameters(1), true);
+        values.set("test.tint", new TestTintParameters(new Vec3(0.25, 1, 1), 0), true);
+        ShadingHookOverrides overrides = rig.scene().hookOverrides();
+        int entry = overrides.add();
+        try {
+            rig.frames(3);
+            int[] both = rig.target().rgba(SIZE / 2, SIZE / 2);
+            assertThat(both[1]).as("%s: snow-white green", shading).isGreaterThan(bare[1] + 60);
+            assertThat(both[0]).as("tinted red").isLessThan(both[1] - 60);
+            rig.scene().set(0, quad, noSnow, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            rig.frames(3);
+            int[] refusedSnow = rig.target().rgba(SIZE / 2, SIZE / 2);
+            assertThat(refusedSnow[1]).as("snow refused: its own green").isCloseTo(bare[1], within(2));
+            assertThat(refusedSnow[0]).as("the tint still applies").isLessThan(bare[0] - 20);
+            rig.scene().set(0, quad, noTint, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            rig.frames(3);
+            int[] refusedTint = rig.target().rgba(SIZE / 2, SIZE / 2);
+            assertThat(refusedTint[0]).as("tint refused, snow-white").isCloseTo(both[1], within(2));
+            // An entry switching only the snow off: as the refusal
+            rig.scene().set(0, quad, plain, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            overrides.turn(entry, "test.snow", false);
+            overrides.assign(0, entry);
+            rig.frames(3);
+            assertThat(rig.target().rgba(SIZE / 2, SIZE / 2)).as("snow switched off for the instance")
+                .containsExactly(refusedSnow);
+            // Switched on by the entry where the material refuses it: refused
+            overrides.turn(entry, "test.snow", true);
+            rig.scene().set(0, quad, noSnow, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            rig.frames(3);
+            assertThat(rig.target().rgba(SIZE / 2, SIZE / 2)).as("the refusal wins").containsExactly(refusedSnow);
+            // The view's snow off, the entry's on: snow on the instance
+            values.on("test.snow", false);
+            rig.scene().set(0, quad, plain, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            rig.frames(3);
+            assertThat(rig.target().rgba(SIZE / 2, SIZE / 2)).as("switched on for the instance").containsExactly(both);
+            overrides.assign(0, 0);
+            rig.frames(3);
+            assertThat(rig.target().rgba(SIZE / 2, SIZE / 2)).as("off as the view has it")
+                .containsExactly(refusedSnow);
+        } finally {
+            overrides.assign(0, 0);
+            overrides.remove(entry);
+            values.remove("test.snow");
+            values.remove("test.tint");
+        }
+    }
+
+    /** Pixel columns of the left and right quads of {@link #sideBySide}. */
+    private static final int LEFT = 12;
+    private static final int RIGHT = 20;
+
+    /** Instance 0 the left half of the quad's place, 1 the right, in {@code material}. */
+    private void sideBySide(int material) {
+        rig.scene().set(0, quad, material, -0.5, 0, -2, 0, 0, 0, 1, 0.5f, 0.5f, 0.5f);
+        rig.scene().set(1, quad, material, 0.5, 0, -2, 0, 0, 0, 1, 0.5f, 0.5f, 0.5f);
     }
 
     private static void assertSame(BufferedImage expected, BufferedImage actual, String what) {
@@ -513,6 +703,7 @@ class ShadingHooksTest {
         private final String hook;
         private volatile ShadingHookParameters parameters;
         private volatile boolean active = true;
+        private volatile java.util.Set<Integer> entries; // where set, the override entries its source was handed
 
         Hooked(String hook, ShadingHookParameters parameters) {
             this.hook = hook;
@@ -545,6 +736,14 @@ class ShadingHooksTest {
                 @Override
                 public void write(PassContext ctx, ShadingHookParameters authored, MemorySegment into, long offset) {
                     parameters.write(into, offset);
+                }
+
+                @Override
+                public void override(PassContext ctx, int entry, MemorySegment into, long offset) {
+                    java.util.Set<Integer> seen = entries;
+                    if (seen != null) {
+                        seen.add(entry);
+                    }
                 }
             });
         }

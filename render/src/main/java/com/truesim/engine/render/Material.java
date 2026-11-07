@@ -34,12 +34,13 @@ import java.util.Objects;
  * @param doubleSided whether back faces show too, lit as the front
  * @param alphaCutoff below 0: opaque; else the alpha below which nothing is drawn
  * @param blended     whether it is drawn over what is behind it, by its alpha ({@link Transparency})
- * @param surfaceHooks whether the views' surface hooks (hooks.slang: wetness, snow) change its surfaces
+ * @param refusedHooks the shading hooks it refuses by name (hooks.slang: snow on an indoor floor, fog on a sky dome), of
+ *                     any hook point; none run at its points, whatever overrides switch on
  * @param hookCoat    whether surface hooks may put a coat of their own on it (a water layer: a clear coat)
  */
 @AllowAllocation("materials are made when they change")
 public record Material(MaterialType type, MaterialParameters parameters, List<MaterialFeature> features,
-    boolean doubleSided, float alphaCutoff, boolean blended, boolean surfaceHooks, boolean hookCoat) {
+    boolean doubleSided, float alphaCutoff, boolean blended, List<String> refusedHooks, boolean hookCoat) {
 
     /** A clear coat: a glossy dielectric layer over the base, as car paint or varnish. */
     public static final int FEATURE_CLEARCOAT = MaterialsConstants.FEATURE_CLEARCOAT;
@@ -96,6 +97,7 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
     public Material {
         Objects.requireNonNull(parameters, "parameters");
         features = List.copyOf(features);
+        refusedHooks = List.copyOf(new java.util.LinkedHashSet<>(refusedHooks));
         int seen = 0;
         for (MaterialFeature feature : features) {
             if (Integer.bitCount(feature.feature()) != 1 || (feature.feature() & ~FEATURES) != 0) {
@@ -118,11 +120,11 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
         }
     }
 
-    /** Surface hooks on, no coat of theirs: as {@link #Material(MaterialType, MaterialParameters, List, boolean, float,
-     * boolean, boolean, boolean)}. */
+    /** No hook refused, no coat of theirs: as {@link #Material(MaterialType, MaterialParameters, List, boolean, float,
+     * boolean, List, boolean)}. */
     public Material(MaterialType type, MaterialParameters parameters, List<MaterialFeature> features,
         boolean doubleSided, float alphaCutoff, boolean blended) {
-        this(type, parameters, features, doubleSided, alphaCutoff, blended, true, false);
+        this(type, parameters, features, doubleSided, alphaCutoff, blended, List.of(), false);
     }
 
     /** Opaque or masked: as {@link #Material(MaterialType, MaterialParameters, List, boolean, float, boolean)}. */
@@ -143,7 +145,7 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
 
     /** This with {@code parameters} instead. */
     public Material parameters(MaterialParameters parameters) {
-        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, surfaceHooks, hookCoat);
+        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat);
     }
 
     /** This showing {@code feature}, instead of any parameters it had for it. */
@@ -156,19 +158,19 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
         }
         with.add(feature);
         with.sort((a, b) -> Integer.compare(a.feature(), b.feature()));
-        return new Material(type, parameters, with, doubleSided, alphaCutoff, blended, surfaceHooks, hookCoat);
+        return new Material(type, parameters, with, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat);
     }
 
     /** This without feature {@code feature} (a {@code FEATURE_*} bit). */
     public Material withoutFeature(int feature) {
         List<MaterialFeature> without = new ArrayList<>(features);
         without.removeIf(f -> f.feature() == feature);
-        return new Material(type, parameters, without, doubleSided, alphaCutoff, blended, surfaceHooks, hookCoat);
+        return new Material(type, parameters, without, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat);
     }
 
     /** Whether back faces show too, lit as the front: leaves, cloth, thin walls. */
     public Material doubleSided(boolean twoSided) {
-        return new Material(type, parameters, features, twoSided, alphaCutoff, blended, surfaceHooks, hookCoat);
+        return new Material(type, parameters, features, twoSided, alphaCutoff, blended, refusedHooks, hookCoat);
     }
 
     /**
@@ -179,12 +181,12 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
         if (!(cutoff >= 0 && cutoff <= 1)) {
             throw new IllegalArgumentException("A cutoff of 0 to 1: " + cutoff);
         }
-        return new Material(type, parameters, features, doubleSided, cutoff, false, surfaceHooks, hookCoat);
+        return new Material(type, parameters, features, doubleSided, cutoff, false, refusedHooks, hookCoat);
     }
 
     /** Opaque again: alpha is neither compared nor blended. */
     public Material opaque() {
-        return new Material(type, parameters, features, doubleSided, -1, false, surfaceHooks, hookCoat);
+        return new Material(type, parameters, features, doubleSided, -1, false, refusedHooks, hookCoat);
     }
 
     /**
@@ -192,7 +194,7 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
      * color's), after the opaque surfaces, as {@link Transparency#MODE} says; glass, smoke, fades.
      */
     public Material alphaBlend() {
-        return new Material(type, parameters, features, doubleSided, -1, true, surfaceHooks, hookCoat);
+        return new Material(type, parameters, features, doubleSided, -1, true, refusedHooks, hookCoat);
     }
 
     public boolean masked() {
@@ -212,14 +214,30 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
         return blended || shows(FEATURE_TRANSMISSION);
     }
 
-    /** This with the views' surface hooks changing its surfaces, or leaving them alone ({@code false}). */
-    public Material surfaceHooks(boolean on) {
-        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, on, hookCoat);
+    /**
+     * This refusing the shading hooks {@code hooks} (by name, as their {@code [ShadingHook("name")]}; of any point:
+     * surface, indirect, media) besides those it refuses already: they never run at its points, whatever an override
+     * switches on. Names the shaders were built without are ignored.
+     */
+    public Material refuseHooks(String... hooks) {
+        List<String> more = new ArrayList<>(refusedHooks);
+        more.addAll(List.of(hooks));
+        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, more, hookCoat);
+    }
+
+    /** This refusing no shading hook. */
+    public Material acceptHooks() {
+        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, List.of(), hookCoat);
+    }
+
+    /** Whether it refuses shading hook {@code hook}. */
+    public boolean refuses(String hook) {
+        return refusedHooks.contains(hook);
     }
 
     /** This letting surface hooks put a coat of their own on it (a water layer), or not. */
     public Material hookCoat(boolean on) {
-        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, surfaceHooks, on);
+        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, refusedHooks, on);
     }
 
     /** The features it shows, {@code FEATURE_*} bits. */
@@ -233,11 +251,12 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
 
     /**
      * The header word shaders read, for type id {@code typeId}: type in bits 0-7, double-sided bit 8, masked bit 9,
-     * blended bit 10, no surface hooks bit 11, hook coat bit 12 (hooks.slang), cutoff 16-31.
+     * blended bit 10, refuses hooks bit 11 (their words after its feature table), hook coat bit 12 (hooks.slang),
+     * cutoff 16-31.
      */
     int header(int typeId) {
         int header = typeId | (doubleSided ? 1 << 8 : 0) | (blended ? 1 << 10 : 0)
-            | (surfaceHooks ? 0 : HooksConstants.MATERIAL_NO_SURFACE_HOOKS)
+            | (refusedHooks.isEmpty() ? 0 : HooksConstants.MATERIAL_REFUSES_HOOKS)
             | (hookCoat ? HooksConstants.MATERIAL_HOOK_COAT : 0);
         if (alphaCutoff >= 0) {
             header |= 1 << 9 | Math.round(alphaCutoff * 65_535) << 16;

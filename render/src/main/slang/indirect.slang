@@ -36,20 +36,20 @@ public static const uint INDIRECT_ENVIRONMENT = 1;
 // module.
 #include "shading-hooks/dispatch.slang"
 
-// HookSite.flags.
-/** Surface hooks leave the point alone: its instance opted out (INSTANCE_NO_SURFACE_HOOKS). */
-public static const uint SITE_NO_SURFACE_HOOKS = 1;
-
 /**
  * Where a point is shaded, as its hooks need it beyond the point itself: the view's hook block (never null in a
- * pipeline running hooks), the pixel (NO_PIXEL off the screen), the way it is shaded (SHADING_*) and SITE_* flags.
+ * pipeline running hooks), the pixel (NO_PIXEL off the screen), the way it is shaded (SHADING_*), the override entry
+ * its hooks' switches and records come from (0: the view's; an instance's, hookEntry: its node's switches and values
+ * layered over the view's, engine-render's ShadingHookOverrides) and the hooks its material refuses (words, a bit per
+ * hook; refusing none by default). Every hook point follows the entry and the refusals, media too; the sky has none.
  */
 public struct HookSite
 {
     public ShadingHookBlock* block;
     public uint2 pixel;
     public uint path;
-    public uint flags;
+    public uint entry;
+    public uint* refused;
 
     public static HookSite at(ShadingHookBlock* block, uint2 pixel, uint path)
     {
@@ -57,7 +57,30 @@ public struct HookSite
         site.block = block;
         site.pixel = pixel;
         site.path = path;
-        site.flags = 0;
+        site.entry = 0;
+        site.refused = noHooksRefused(block, SHADING_HOOK_COUNT);
+        return site;
+    }
+
+    /** The site of a point of instance `instance` (an id of the scene's instances): its override entry. */
+    public static HookSite ofInstance(ShadingHookBlock* block, uint2 pixel, uint path, uint instance)
+    {
+        HookSite site = at(block, pixel, path);
+        if (anyShadingHooks())
+        {
+            site.entry = hookEntry(block, instance);
+        }
+        return site;
+    }
+
+    /** This site, its material refusing the hooks of `words` (MATERIAL_REFUSES_HOOKS), or none (null: as it was). */
+    public HookSite refusing(uint* words)
+    {
+        HookSite site = this;
+        if (words != nullptr)
+        {
+            site.refused = words;
+        }
         return site;
     }
 };
@@ -71,18 +94,18 @@ public ShadingPoint hookPoint(HookSite site, float3 position, float3 n, float3 g
 
 /**
  * Surface `s` at `position` (relative to the view's camera) as the view's surface hooks change it before it is lit,
- * `geometric` its normal before normal maps, `materialHeader` its material's (MATERIAL_NO_SURFACE_HOOKS,
- * MATERIAL_HOOK_COAT). Its alpha stays.
+ * `geometric` its normal before normal maps, `materialHeader` its material's (MATERIAL_HOOK_COAT); the hooks its
+ * material refuses (the site's) leave it alone. Its alpha stays.
  */
 public void surfaceHooksAt(HookSite site, inout Surface s, float3 position, float3 geometric, float3 toViewer,
     uint materialHeader)
 {
-    if (anyShadingHooks() && (site.flags & SITE_NO_SURFACE_HOOKS) == 0
-        && (materialHeader & MATERIAL_NO_SURFACE_HOOKS) == 0)
+    if (anyShadingHooks())
     {
         float alpha = s.alpha;
         uint flags = (materialHeader & MATERIAL_HOOK_COAT) != 0 ? SHADING_COAT_ALLOWED : 0;
-        surfaceHooks(site.block, hookPoint(site, position, s.normal, geometric, toViewer, flags), s);
+        surfaceHooks(site.block, site.entry, site.refused, hookPoint(site, position, s.normal, geometric, toViewer,
+            flags), s);
         s.alpha = alpha;
     }
 }
@@ -125,7 +148,7 @@ public AroundLight aroundLight(HookSite site, float3 position, float3 n, float3 
     AroundLight light = AroundLight.none();
     if (anyShadingHooks())
     {
-        indirectHooks(site.block, hookPoint(site, position, n, geometric, toViewer, 0), q, light);
+        indirectHooks(site.block, site.entry, site.refused, hookPoint(site, position, n, geometric, toViewer, 0), q, light);
     }
     return light;
 }
@@ -169,14 +192,14 @@ public ViewRay alongViewRay(HookSite site, float3 radiance, float3 position, flo
     ray.transmittance = 1;
     if (anyShadingHooks())
     {
-        mediaHooks(site.block, hookPoint(site, position, n, n, normalize(-position), 0), ray);
+        mediaHooks(site.block, site.entry, site.refused, hookPoint(site, position, n, n, normalize(-position), 0), ray);
     }
     return ray;
 }
 
 /**
  * The sky's `radiance` seen along `direction` (unit, world axes) through the view's media hooks: a point at infinity
- * (SHADING_SKY; its position is `direction` itself).
+ * (SHADING_SKY; its position is `direction` itself), by the view's records (no instance: no override entry).
  */
 public float3 skyThroughMedia(HookSite site, float3 radiance, float3 direction)
 {
@@ -186,7 +209,8 @@ public float3 skyThroughMedia(HookSite site, float3 radiance, float3 direction)
         ray.radiance = radiance;
         ray.transmittance = 1;
         site.path = SHADING_SKY;
-        mediaHooks(site.block, hookPoint(site, direction, -direction, -direction, -direction, 0), ray);
+        mediaHooks(site.block, 0, noHooksRefused(site.block, SHADING_HOOK_COUNT),
+            hookPoint(site, direction, -direction, -direction, -direction, 0), ray);
         return ray.radiance;
     }
     return radiance;

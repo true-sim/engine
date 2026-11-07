@@ -33,6 +33,14 @@ public interface ShadingHookSource {
      */
     void write(PassContext ctx, ShadingHookParameters authored, MemorySegment into, long offset);
 
+    /**
+     * Adjusts override entry {@code entry}'s record for the frame ({@link ShadingHookOverrides}), at {@code offset} of
+     * {@code into}: as {@link #write} wrote the view's, the entry's fields in place of its own. Points of instances
+     * given the entry read it. Nothing to do by default: the entry's fields over the frame's own are the record.
+     */
+    default void override(PassContext ctx, int entry, MemorySegment into, long offset) {
+    }
+
     /** The scene's values as they are ({@code authored}), on while {@code active} says so. */
     @com.truesim.annotations.AllowAllocation("made when the graph builds")
     static ShadingHookSource authored(int bytes, BooleanSupplier active) {

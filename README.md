@@ -1207,9 +1207,11 @@ public struct AcmeFog : IMediaHook
 
 - **The points.** `ISurfaceHook.surface(p, params, inout Surface s)` changes a surface before it is lit, in world
   terms (`p.world()`, `p.camera` and `p.cameraLow`: the same for every view), at rasterized pixels, the visibility
-  buffer's, ray hits and probe hits alike; never its alpha (the dispatch keeps it). A material opts out with
-  `Material.surfaceHooks(false)`, an instance with `GpuScene.Instance.surfaceHooks(false)`; a hook puts a coat of its own
-  (a water layer, `s.clearcoat`) only where `p.flags & SHADING_COAT_ALLOWED`, which `Material.hookCoat(true)` sets.
+  buffer's, ray hits and probe hits alike; never its alpha (the dispatch keeps it). A hook puts a coat of its own (a
+  water layer, `s.clearcoat`) only where `p.flags & SHADING_COAT_ALLOWED`, which `Material.hookCoat(true)` sets.
+  Opting out is per hook, of any point: a material refuses hooks by name (`Material.refuseHooks("weather.snow")`: a
+  bit per hook after its feature table, tested in the dispatch before each hook; names the shaders lack are ignored),
+  and an override entry switches hooks off or on for instances (below); a material's refusal wins.
   `IIndirectHook.indirect(p, params, q, inout AroundLight light)` gives the light from all around, asked once per point
   for what it uses (`q.wants`, `AROUND_*`): diffuse light and how much of it the hooks cover, specular radiance along
   `q.direction` at `q.roughness` and its coverage, the environment's visibility around the direction and the coat's,
@@ -1252,20 +1254,58 @@ public struct AcmeFog : IMediaHook
       }).read(volume);                                                      // shading reads it
   }
   ```
+- **Per-instance overrides.** Switches and values can differ per instance, layered over the view's: fog thinner in
+  a house, snow off under a roof. `GpuScene.hookOverrides()` (`ShadingHookOverrides`) holds numbered entries, each
+  with, per hook, whether it runs (`turn(entry, hook, false / true / null)`: off, on, or as the view) and the fields it
+  sets (by field name, or a whole record), and gives each instance one entry or none. Wherever a point of an instance
+  is shaded (rasterized, the visibility buffer, ray and probe hits, the media between it and the camera) every hook
+  runs as the entry switches it (a material refusing it wins; switched on, it runs where the view's pipelines have it)
+  and reads the view's record with the entry's fields in place; only the sky, which has no instance, keeps the view's.
+  In content, engine-scene's `ShadingHookOverride` component (a hook, the fields it sets, and on/off/null;
+  `ShadingHookOverride.off("weather.snow")`) on a node counts for its subtree, the
+  nearest overriding node at or above a renderable giving its entry (`ShadingHookOverrideSync`, after the scene sync each
+  frame); a library drawing a node itself asks `entryOf(node)` (effects-particles gives each emitter its node's). Each
+  view's block carries the entries' merged records (composed each frame, a technique's source adjusting each in
+  `ShadingHookSource.override`), growing as they do (`render.shadingHooks.blockGrowth`, no cap); the instances' entries
+  are a host-visible uint per instance id, growing with the scene. Change them between frames, from the scene's thread:
+
+  ```java
+  ShadingHookOverrides overrides = gpuScene.hookOverrides();
+  int inside = overrides.add();
+  overrides.set(inside, "acme.fog", values);   // MaterialValues: the fields held override the view's
+  overrides.turn(inside, "acme.snow", false);  // no snow inside (null: as the view again)
+  overrides.assign(houseInstance, inside);     // 0: none again; removed instances drop theirs
+  ```
 - **Compiled in, switched by bits.** A view's pipelines are made with the hooks it runs (`render.shadingHooks.specialize`
   `VIEW`, the default) or with every hook any view of the device has run (`UNION`: one set of pipelines for all views;
   `ShadingHooksBenchmark` measures what a view pays for hooks it runs not). Either way a hook turns on and off from frame
   to frame by its bit (`ShadingHookSource.active`, `ShadingHookValues.on`), with no new pipelines or graph; a hook added
   or removed rebuilds the graph, and pipelines made ahead are made for every set in use. On an RX 9070 XT (30,000
-  rocks, 1920 x 1080, GPU per frame, ranges of 5 rounds' medians; 2026-11-07, without JaCoCo):
+  rocks, 1920 x 1080, GPU per frame and the CPU recording it, ranges of 5 rounds' medians; 2026-11-07, without JaCoCo;
+  the override rows give every 10th rock an entry of the fog, one shared or one each):
 
-  | shading | no hooks | fog, per view | fog, union of 4 | none on, union of 4 |
-  |---|---|---|---|---|
-  | forward | 1.226-1.259 ms | 1.241-1.271 ms | 1.256-1.295 ms | 1.249-1.301 ms |
-  | visibility buffer | 0.934-0.954 ms | 0.936-0.958 ms | 0.942-0.960 ms | 0.942-0.957 ms |
+  | shading | configuration | GPU per frame | CPU recording |
+  |---|---|---|---|
+  | forward | no hooks | 1.251-1.276 ms | 0.043-0.061 ms |
+  | forward | fog, per view | 1.271-1.304 ms | 0.046-0.050 ms |
+  | forward | fog, union of 5 | 1.334-1.367 ms | 0.045-0.050 ms |
+  | forward | none on, union of 5 | 1.326-1.351 ms | 0.045-0.049 ms |
+  | forward | fog, 3,000 rocks overridden, 1 entry | 1.284-1.306 ms | 0.045-0.050 ms |
+  | forward | fog, 3,000 rocks overridden, 3,000 entries | 1.316-1.320 ms | 0.113-0.139 ms |
+  | visibility buffer | no hooks | 0.944-0.949 ms | 0.044-0.047 ms |
+  | visibility buffer | fog, per view | 0.958-0.960 ms | 0.046-0.048 ms |
+  | visibility buffer | fog, union of 5 | 0.983-0.989 ms | 0.047-0.066 ms |
+  | visibility buffer | none on, union of 5 | 0.983-0.994 ms | 0.046-0.050 ms |
+  | visibility buffer | fog, 3,000 rocks overridden, 1 entry | 0.949-0.959 ms | 0.046-0.066 ms |
+  | visibility buffer | fog, 3,000 rocks overridden, 3,000 entries | 0.953-0.960 ms | 0.102-0.137 ms |
 
-  Hooks compiled in but off cost forward shading about 0.02-0.03 ms (2 %) and the visibility buffer nothing
-  measurable: `VIEW` stays the default, `UNION` trades that for one set of pipelines across views.
+  Hooks compiled in but off (the union: the test listing's probe volume, an indirect and two surface hooks) cost a
+  view about 0.03-0.06 ms (2-5 %): `VIEW` stays the default, `UNION` trades that for one set of pipelines across views.
+  Override entries cost the shading nothing measurable against the fog alone (an entry looked up per point); the CPU
+  composes every entry's records into each view's block each frame, about 0.02-0.03 us an entry (0.07-0.09 ms for
+  3,000). Testing each hook against the material's refusals and the entry's switches (none set here) left the fog's
+  frame where it was before them (forward 1.269-1.298 ms, visibility buffer 0.962-0.966 ms in the run before, the
+  same day).
 - **Glass and the sky.** The scene seen through a transmissive surface came through the media already: shading takes
   the media once for it, less the light they add in front of the glass (`(own) * T + L + through * (1 - F) * (behind -
   L)`). The sky background takes the media as a point at infinity.
@@ -1279,8 +1319,14 @@ public struct AcmeFog : IMediaHook
 draws through a media, an indirect and a surface hook on every way of shading and geometry path; checks that a hook
 compiled in but off, or made in only by the union, leaves the image the same, pixel for pixel, and turns on and off
 without a rebuild; runs a hook from the scene's values alone and merged by a technique; fogs glass once and the sky;
-leaves alpha, opted-out materials and instances alone and coats only where allowed. `ProbeVolumeTest` checks a surface
-hook at the probes' hits (the white furnace with its walls tinted).
+leaves alpha alone and coats only where allowed; leaves a material refusing a surface hook (and an instance whose
+entry switches it off) unchanged while a second surface hook still changes it, a refusal winning over an entry
+switching the hook on, an entry switching on a hook the view has off; gives instances side by side
+override entries setting one field each (the other the view's), takes one away, turns a technique's fog off for one
+instance (bit for bit as without fog) with 41 entries in the block. `ProbeVolumeTest` checks a surface hook at the
+probes' hits (the white furnace with its walls tinted) and an override entry there (tinted only with the entry).
+engine-scene's `ShadingHookOverrideSyncTest` follows override components through nesting, reparenting, replacing and
+removal.
 
 ### Transparency
 

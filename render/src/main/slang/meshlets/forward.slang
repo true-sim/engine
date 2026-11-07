@@ -145,15 +145,13 @@ public VertexOut lean(LeanVertex in, uint primitive, float3 bary)
 
 // ---------------------------------------------------------------- a material type's fragment stages
 
-/** Where pixel `pixel` of instance `instance` is shaded, for the view's hooks: its block, a rasterized pixel. */
+/**
+ * Where pixel `pixel` of instance `instance` is shaded, for the view's hooks: its block, a rasterized pixel, the
+ * instance's override entry.
+ */
 public HookSite rasterSite(uint instance, uint2 pixel)
 {
-    HookSite site = HookSite.at(push.view[0].hooks, pixel, SHADING_RASTER);
-    if (anyShadingHooks() && (push.scene[0].instances[instance].mesh & INSTANCE_NO_SURFACE_HOOKS) != 0)
-    {
-        site.flags |= SITE_NO_SURFACE_HOOKS;
-    }
-    return site;
+    return HookSite.ofInstance(push.view[0].hooks, pixel, SHADING_RASTER, instance);
 }
 
 /** Surface `s` at `pixel` shaded with material type M and the variant's FEATURES; its holes (GEOMETRY_KEEP) left out. */

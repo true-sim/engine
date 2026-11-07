@@ -46,9 +46,12 @@ import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
  * What a view's shading hooks cost by how its pipelines are made ({@link ShadingHookInputs#SPECIALIZE}): 30,000 rocks
  * on the terrain at 1920 x 1080, shaded forward and by the visibility buffer, a fog hook on. Per view (VIEW) its
  * pipelines hold the fog alone; with the union of every view's hooks (UNION) they also hold the probe volume's, an
- * indirect hook and a surface hook, off in this view by their bits: what one set of pipelines for all views costs a
+ * indirect hook and two surface hooks, off in this view by their bits: what one set of pipelines for all views costs a
  * view running fewer hooks. The frames are timed whole on the GPU (timestamps around a batch of frames), configurations
- * taking turns round after round, four uncounted rounds first (pitfalls.md). Run with {@code TRUESIM_BENCHMARK=true
+ * taking turns round after round, four uncounted rounds first (pitfalls.md). Per-instance overrides of the fog
+ * ({@link ShadingHookOverrides}) on every 10th rock, one entry for them all or one each, against none: what the
+ * entries cost the shading (an entry looked up per point) and the CPU recording (each view's block composing every
+ * entry's record each frame). Run with {@code TRUESIM_BENCHMARK=true
  * ./gradlew :engine-render:test --tests '*ShadingHooksBenchmark'}.
  */
 @EnabledIfEnvironmentVariable(named = "TRUESIM_BENCHMARK", matches = "true")
@@ -60,15 +63,20 @@ class ShadingHooksBenchmark {
     private static final int BATCHES = 16;
     private static final int BATCH = 8;
 
-    /** A configuration: a name, whether the fog runs, the hooks made in besides, and how pipelines are made. */
-    private record Configuration(String name, boolean fog, boolean union) {
+    /**
+     * A configuration: a name, whether the fog runs, the hooks made in besides, how pipelines are made, and override
+     * entries on every 10th rock (0: none; 1: one entry shared; more: an entry per rock).
+     */
+    private record Configuration(String name, boolean fog, boolean union, int entries) {
     }
 
     private static final Configuration[] CONFIGURATIONS = {
-        new Configuration("no hooks", false, false),
-        new Configuration("fog, per view", true, false),
-        new Configuration("fog, union of 4", true, true),
-        new Configuration("no hook on, union of 4", false, true),
+        new Configuration("no hooks", false, false, 0),
+        new Configuration("fog, per view", true, false, 0),
+        new Configuration("fog, union of 5", true, true, 0),
+        new Configuration("no hook on, union of 5", false, true, 0),
+        new Configuration("fog, per view, every 10th rock 1 entry", true, false, 1),
+        new Configuration("fog, per view, every 10th rock its own entry (3,000)", true, false, 3_000),
     };
 
     @Test
@@ -116,29 +124,33 @@ class ShadingHooksBenchmark {
                 System.out.printf(Locale.ROOT, "Shading hooks on %s, %d x %d, 30,000 rocks; listing %s:%n",
                     device.gpu().name(), WIDTH, HEIGHT, hooks);
                 double[][][] gpuMs = new double[shadings.length][CONFIGURATIONS.length][ROUNDS];
+                double[][][] cpuMs = new double[shadings.length][CONFIGURATIONS.length][ROUNDS];
                 for (int round = -4; round < ROUNDS; round++) {
                     for (int s = 0; s < shadings.length; s++) {
                         if (s == 1 && !device.primitiveIds()) {
                             continue;
                         }
                         for (int c = 0; c < CONFIGURATIONS.length; c++) {
-                            double ms = measure(device, renderer, view, camera, target, environment, s == 1,
+                            double[] ms = measure(device, renderer, view, camera, target, environment, s == 1,
                                 CONFIGURATIONS[c], queries, period);
                             if (round >= 0) {
-                                gpuMs[s][c][round] = ms;
+                                gpuMs[s][c][round] = ms[0];
+                                cpuMs[s][c][round] = ms[1];
                             }
-                            System.out.printf(Locale.ROOT, "  round %d, %s, %s: frame %.3f ms GPU%n", round,
-                                shadings[s], CONFIGURATIONS[c].name(), ms);
+                            System.out.printf(Locale.ROOT, "  round %d, %s, %s: frame %.3f ms GPU, recorded in %.3f ms "
+                                + "CPU%n", round, shadings[s], CONFIGURATIONS[c].name(), ms[0], ms[1]);
                         }
                     }
                 }
-                System.out.println("Ranges over the rounds (each round's median frame):");
+                System.out.println("Ranges over the rounds (each round's median frame), GPU and CPU recording:");
                 for (int s = 0; s < shadings.length; s++) {
                     for (int c = 0; c < CONFIGURATIONS.length; c++) {
                         double[] all = gpuMs[s][c].clone();
                         Arrays.sort(all);
-                        System.out.printf(Locale.ROOT, "  | %s | %s | %.3f-%.3f |%n", shadings[s],
-                            CONFIGURATIONS[c].name(), all[0], all[all.length - 1]);
+                        double[] cpu = cpuMs[s][c].clone();
+                        Arrays.sort(cpu);
+                        System.out.printf(Locale.ROOT, "  | %s | %s | %.3f-%.3f | %.3f-%.3f |%n", shadings[s],
+                            CONFIGURATIONS[c].name(), all[0], all[all.length - 1], cpu[0], cpu[cpu.length - 1]);
                     }
                 }
             } finally {
@@ -148,8 +160,10 @@ class ShadingHooksBenchmark {
         }
     }
 
-    /** The median GPU time of a frame of {@code configuration}, in milliseconds. */
-    private static double measure(VulkanDevice device, MeshletRenderer renderer, RenderView view, Camera camera,
+    /**
+     * The median GPU time of a frame of {@code configuration} and the median CPU time recording one, in milliseconds.
+     */
+    private static double[] measure(VulkanDevice device, MeshletRenderer renderer, RenderView view, Camera camera,
         ExternalImage target, Environment environment, boolean visibilityBuffer, Configuration configuration,
         long queries, double period) {
         try (FrameGraph graph = new FrameGraph(device, 2)) {
@@ -165,19 +179,34 @@ class ShadingHooksBenchmark {
             if (configuration.fog()) {
                 main.port().add(new Fog(device));
             }
+            ShadingHookOverrides overrides = renderer.scene().hookOverrides();
+            int[] entries = new int[configuration.entries()];
+            for (int e = 0; e < entries.length; e++) {
+                entries[e] = overrides.add();
+                overrides.set(entries[e], "test.fog", new TestFogParameters(new Vec3(0.9, 0.9, 0.9),
+                    new Vec3(0.02 + e * 1e-5, 0.02, 0.03)));
+            }
+            for (int id = 1, n = 0; entries.length > 0 && id <= 30_000; id += 10, n++) {
+                overrides.assign(id, entries[n % entries.length]);
+            }
             for (int i = 0; i < 10; i++) {
                 device.submitAndWait(device.graphics(), graph::record);
             }
             double[] gpu = new double[BATCHES];
+            double[] cpu = new double[BATCHES];
             for (int batch = 0; batch < BATCHES; batch++) {
+                long[] recorded = new long[1];
                 device.submitAndWait(device.graphics(), commands -> {
                     vkCmdResetQueryPool(commands, queries, 0, 2);
                     vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 0);
+                    long start = System.nanoTime();
                     for (int i = 0; i < BATCH; i++) {
                         graph.record(commands);
                     }
+                    recorded[0] = System.nanoTime() - start;
                     vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 1);
                 });
+                cpu[batch] = recorded[0] / 1e6 / BATCH;
                 try (MemoryStack stack = stackPush()) {
                     LongBuffer stamps = stack.mallocLong(2);
                     vkGetQueryPoolResults(device.handle(), queries, 0, 2, stamps, 8,
@@ -186,7 +215,14 @@ class ShadingHooksBenchmark {
                 }
             }
             Arrays.sort(gpu);
-            return gpu[BATCHES / 2];
+            Arrays.sort(cpu);
+            for (int id = 1; entries.length > 0 && id <= 30_000; id += 10) {
+                overrides.assign(id, 0);
+            }
+            for (int entry : entries) {
+                overrides.remove(entry);
+            }
+            return new double[] {gpu[BATCHES / 2], cpu[BATCHES / 2]};
         }
     }
 

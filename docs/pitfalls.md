@@ -526,7 +526,8 @@ with a 3 MiB host-visible buffer allocated before the harness and never used, ch
 cascade images (2,556 to 2,843 of 3,840 floats, up to 100 %) and mover 1's probe and cascade images; mover 1's
 real-time images hold NaNs in both designs (150 and 175 pixels). Some pass reads memory it never wrote, or stale
 memory, in those scenes; which one was not found.
-- Proof: the dumps of both designs and the padded run (true-sim/engine, shading hook records PR).
+- Proof: the dumps of both designs and the padded run (true-sim/engine, shading hook records PR); followed up in
+  [#442](https://github.com/true-sim/engine/issues/442).
 - Rule: an image comparison across a change that allocates differently is checked against the base itself with an
   unrelated allocation before a difference is put down to the change.
 

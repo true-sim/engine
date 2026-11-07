@@ -55,10 +55,17 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
         Specialize.VIEW, "Shading hooks compiled into a view's pipelines: VIEW, the hooks it runs; UNION, every hook "
             + "any view has run (one set of pipelines; the others skipped by a branch)");
 
+    /**
+     * How much a view's hook block grows when the override section outgrows it ({@link ShadingHookOverrides}): the new
+     * size as a multiple of the old (or what the section needs, if more).
+     */
+    public static final Setting<Float> GROWTH = Setting.decimal("render.shadingHooks.blockGrowth", 2, 1, 64,
+        "How much a view's shading hook block grows when per-instance overrides outgrow it: a multiple of its size");
+
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Set build(GraphBuilder g) {
-        return new Set(g.setting(SPECIALIZE));
+        return new Set(g.setting(SPECIALIZE), g.setting(GROWTH));
     }
 
     /**
@@ -77,6 +84,7 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
         private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED;
 
         private final Specialize specialize;
+        private final float growth;
         private final List<Image> images = new ArrayList<>();
         private final List<Buffer> buffers = new ArrayList<>();
         private final List<RenderView> views = new ArrayList<>();
@@ -89,8 +97,9 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
         private Buffer token;
         private RenderView[] written = new RenderView[0];
 
-        Set(Specialize specialize) {
+        Set(Specialize specialize, float growth) {
             this.specialize = specialize;
+            this.growth = growth;
         }
 
         /**
@@ -234,6 +243,11 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
             return written.length;
         }
 
+        /** How much blocks grow ({@link #GROWTH}). */
+        float growth() {
+            return growth;
+        }
+
         /**
          * Writes the frame's bits and records into {@code block} (a block's bytes, its header aside): each hook a
          * technique added as its source has it, each the scene alone holds values for as they are, the others at their
@@ -267,6 +281,15 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
             }
         }
 
+        /**
+         * Writes override entries' section of {@code block} (composed by {@link #compose} first) and the header fields
+         * it goes with, from {@code overrides} (null: none): the block's copy for the frame is at {@code address}.
+         * Allocates nothing.
+         */
+        void composeOverrides(PassContext ctx, MemorySegment block, long address, ShadingHookOverrides overrides) {
+            ShadingHookOverrides.compose(values.hooks(), overrides, ctx, block, address, sources);
+        }
+
         /** The view's blocks for the frame recording in {@code ctx}: composed, handed over, pointed at. */
         void publish(PassContext ctx) {
             if (values == null) {
@@ -274,7 +297,11 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
             }
             for (RenderView view : written) {
                 ShadingHookBlock block = view.hooks();
-                compose(ctx, block.staging());
+                ShadingHookOverrides overrides = view.renderer().scene().hookOverridesIfMade();
+                block.ensure(ShadingHookOverrides.blockBytes(values.hooks(), overrides), growth);
+                MemorySegment staging = block.staging();
+                compose(ctx, staging);
+                composeOverrides(ctx, staging, block.address(), overrides);
                 block.publish();
                 view.writeHooksAddress();
             }

@@ -60,7 +60,8 @@ public final class ShadingHooks {
         this.replaced = replaced;
         int n = hooks.size();
         offsets = new int[n];
-        long at = HooksConstants.SHADING_HOOK_HEADER + 4L * words(n) + 4L * n;
+        // the header, the active bits, the offsets, words refusing no hook (zeros), then the records
+        long at = HooksConstants.SHADING_HOOK_HEADER + 4L * words(n) + 4L * n + 4L * words(n);
         for (int i = 0; i < n; i++) {
             at = (at + 15) / 16 * 16; // records 16-aligned, as their float4s may be
             offsets[i] = Math.toIntExact(at);
@@ -314,7 +315,10 @@ public final class ShadingHooks {
 
     // ---------------------------------------------------------------- a view's block
 
-    /** The bytes of a view's hook block: the header, the active bits, the offsets, every hook's record. */
+    /**
+     * The bytes of a view's hook block: the header, the active bits, the offsets, every hook's record; the override
+     * section follows ({@link ShadingHookOverrides}).
+     */
     public long blockBytes() {
         return blockBytes;
     }
@@ -322,6 +326,11 @@ public final class ShadingHooks {
     /** Where in a view's block hook {@code index}'s record lies. */
     public int recordOffset(int index) {
         return offsets[index];
+    }
+
+    /** Where in a block the records' offsets lie: a uint per hook. */
+    long offsetTable() {
+        return HooksConstants.SHADING_HOOK_HEADER + 4L * words(count());
     }
 
     /** Where in a block the word holding hook {@code index}'s active bit lies. */
@@ -336,7 +345,9 @@ public final class ShadingHooks {
             MemorySegment block = Arena.ofAuto().allocate(blockBytes, 16);
             int n = count();
             block.set(U32, ShadingHookBlockLayout.HOOKS, n);
-            long table = HooksConstants.SHADING_HOOK_HEADER + 4L * words(n);
+            long table = offsetTable();
+            // no entries: the override table at the active bits, offsets and zeros, in the block (hooks.slang's hookRuns)
+            block.set(U32, ShadingHookBlockLayout.OVERRIDE_TABLE, (int) HooksConstants.SHADING_HOOK_HEADER);
             for (int i = 0; i < n; i++) {
                 block.set(U32, table + 4L * i, offsets[i]);
                 defaults(i).write(block, offsets[i]);

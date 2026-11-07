@@ -88,7 +88,7 @@ public final class ShadingHookSync {
 
     /** Content's values by field name as a generated record reads them, nested by path ({@code a.b}). */
     @AllowAllocation("values change rarely")
-    private record Values(MaterialData.Values values, String prefix) implements MaterialValues {
+    record Values(MaterialData.Values values, String prefix) implements MaterialValues {
 
         @Override
         public float f32(String name, float fallback) {
