@@ -87,7 +87,6 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
         private ShadingHookValues values;
         private ShadingHooks.Set compiled;
         private Buffer token;
-        private boolean defaultsWritten; // in the views' staging: hooks this build does not run at their defaults
         private RenderView[] written = new RenderView[0];
 
         Set(Specialize specialize) {
@@ -113,6 +112,7 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
                 for (ProbeHooks probe : probes) {
                     pass.read(probe.data(), BufferAccess.STORAGE_READ);
                 }
+                probeArray = probes.toArray(new ProbeHooks[0]);
                 pass.sideEffects().record(this::publish);
             }
             return this;
@@ -157,12 +157,18 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
             return this;
         }
 
-        /** {@code shaded}'s block is written for the view (its View points shaders at it). */
+        /**
+         * {@code shaded}'s block is written for the view (its View points shaders at it): its records, as of this build,
+         * at their defaults until the hooks write theirs.
+         */
         public Set view(RenderView shaded) {
             Objects.requireNonNull(shaded, "shaded");
             if (!views.contains(shaded)) {
                 views.add(shaded);
                 written = views.toArray(new RenderView[0]);
+                MemorySegment defaults = ShadingHookValues.of(shaded.renderer().device()).hooks().defaultBlock();
+                long header = HooksConstants.SHADING_HOOK_HEADER;
+                shaded.hooks().staging().asSlice(header).copyFrom(defaults.asSlice(header));
             }
             if (values == null) {
                 values = ShadingHookValues.of(shaded.renderer().device());
@@ -220,12 +226,6 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
             return added.has(index);
         }
 
-        /** The version of its device's hook values ({@link ShadingHookValues#version}), 0 before a view shades. */
-        long valuesVersion() {
-            ShadingHookValues v = values;
-            return v == null ? 0 : v.version();
-        }
-
         /** How many views' blocks it writes. */
         int views() {
             return written.length;
@@ -271,18 +271,9 @@ public record ShadingHookInputs(ViewPort view) implements Request<ShadingHookInp
             }
             for (RenderView view : written) {
                 ShadingHookBlock block = view.hooks();
-                if (!defaultsWritten) {
-                    MemorySegment defaults = values.hooks().defaultBlock();
-                    long header = HooksConstants.SHADING_HOOK_HEADER;
-                    block.staging().asSlice(header).copyFrom(defaults.asSlice(header));
-                }
                 compose(ctx, block.staging());
                 block.publish();
                 view.writeHooksAddress();
-            }
-            defaultsWritten = true;
-            if (probeArray.length != probes.size()) {
-                probeArray = probes.toArray(new ProbeHooks[0]);
             }
             for (ProbeHooks probe : probeArray) {
                 probe.publish(ctx, this);

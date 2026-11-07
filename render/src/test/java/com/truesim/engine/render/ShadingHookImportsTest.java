@@ -25,7 +25,7 @@ class ShadingHookImportsTest {
     /** The engine modules a hook may import. */
     static final Set<String> ALLOWED = Set.of("hooks", "bindless", "shading", "lights");
 
-    private static final Pattern IMPORT = Pattern.compile("^\s*(?:__exported\s+)?import\s+([\w.]+)\s*;",
+    private static final Pattern IMPORT = Pattern.compile("^\\s*(?:__exported\\s+)?import\\s+([\\w.]+)\\s*;",
         Pattern.MULTILINE);
 
     @Test
@@ -39,7 +39,7 @@ class ShadingHookImportsTest {
                         continue;
                     }
                     Path dir = root.relativize(file).getParent();
-                    String own = dir == null ? "" : dir.toString().replace('\', '.').replace('/', '.') + ".";
+                    String own = dir == null ? "" : dir.toString().replace('\\', '.').replace('/', '.') + ".";
                     Matcher m = IMPORT.matcher(source);
                     while (m.find()) {
                         String module = m.group(1);

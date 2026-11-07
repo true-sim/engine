@@ -14,11 +14,9 @@ import java.util.List;
  * view's shading; its pass writes each shading render view's block ({@link ShadingHookInputs.Set#publish}: the bits and
  * records, composed in plain memory, handed over at once) and points the view's shaders at the frame's copy. The key's
  * buffer is a token the pass writes and shading reads, which orders them. The graph rebuilds when the hooks the scene
- * holds values for change ({@link ShadingHookValues#version}).
+ * holds values for change ({@link ShadingHookValues#versions}).
  */
 public final class ViewShadingHooks implements Technique {
-
-    private volatile ShadingHookInputs.Set last; // the last build's: its device's values, for buildVersion
 
     @Override
     public List<Key<?>> provides() {
@@ -28,8 +26,6 @@ public final class ViewShadingHooks implements Technique {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        ShadingHookInputs.Set set = g.request(new ShadingHookInputs(g.view()));
-        last = set;
         Buffer token = g.createBuffer("shading hooks", 16);
         g.pass("shading hooks token").write(token, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(token, 0));
         g.provide(Keys.SHADING_HOOKS, token);
@@ -37,7 +33,6 @@ public final class ViewShadingHooks implements Technique {
 
     @Override
     public long buildVersion() {
-        ShadingHookInputs.Set set = last;
-        return set == null ? 0 : set.valuesVersion();
+        return ShadingHookValues.versions();
     }
 }

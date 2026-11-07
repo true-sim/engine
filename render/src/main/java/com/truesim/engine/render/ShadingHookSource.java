@@ -34,6 +34,7 @@ public interface ShadingHookSource {
     void write(PassContext ctx, ShadingHookParameters authored, MemorySegment into, long offset);
 
     /** The scene's values as they are ({@code authored}), on while {@code active} says so. */
+    @com.truesim.annotations.AllowAllocation("made when the graph builds")
     static ShadingHookSource authored(int bytes, BooleanSupplier active) {
         Objects.requireNonNull(active, "active");
         return new ShadingHookSource() {
@@ -58,6 +59,7 @@ public interface ShadingHookSource {
      * The parameters {@code current} gives (read each frame: a technique's record, replaced when its values change),
      * as a source of {@code bytes} bytes; the scene's values are not read.
      */
+    @com.truesim.annotations.AllowAllocation("made when the graph builds")
     static ShadingHookSource of(int bytes, Supplier<? extends ShadingHookParameters> current) {
         Objects.requireNonNull(current, "current");
         return new ShadingHookSource() {
@@ -74,6 +76,7 @@ public interface ShadingHookSource {
     }
 
     /** Fixed parameters {@code parameters}. */
+    @com.truesim.annotations.AllowAllocation("made when the graph builds")
     static ShadingHookSource of(ShadingHookParameters parameters) {
         Objects.requireNonNull(parameters, "parameters");
         return of(parameters.bytes(), () -> parameters);

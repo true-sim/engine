@@ -26,6 +26,7 @@ public final class ShadingHookValues {
     private volatile boolean[] enabled;
     private volatile ShadingHooks.Set present = ShadingHooks.Set.NONE;
     private volatile long version;
+    private static final java.util.concurrent.atomic.AtomicLong VERSIONS = new java.util.concurrent.atomic.AtomicLong();
     private ShadingHooks.Set union = ShadingHooks.Set.NONE; // every hook a view was made with (UNION)
 
     private ShadingHookValues(ShadingHooks hooks) {
@@ -95,6 +96,7 @@ public final class ShadingHookValues {
         if (!present.has(index)) {
             present = present.with(index);
             version++;
+            VERSIONS.incrementAndGet();
         }
         return this;
     }
@@ -129,6 +131,7 @@ public final class ShadingHookValues {
         }
         present = left;
         version++;
+        VERSIONS.incrementAndGet();
         return this;
     }
 
@@ -162,8 +165,14 @@ public final class ShadingHookValues {
         if (!union.containsAll(runs)) {
             union = union.union(runs);
             version++;
+            VERSIONS.incrementAndGet();
         }
         return union;
+    }
+
+    /** The sum of every device's {@link #version}s: what a graph's hooks rebuild by. Allocates nothing. */
+    public static long versions() {
+        return VERSIONS.get();
     }
 
     /** Changes whenever the hooks it holds values for do (graphs rebuild): not with their values. */

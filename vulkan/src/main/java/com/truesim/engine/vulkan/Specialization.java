@@ -98,6 +98,9 @@ public final class Specialization {
      * {@code entry} would otherwise run without what those constants switch on.
      */
     void check(ShaderModule module, String entry) {
+        if (module == null) {
+            return; // the pipeline fails on it itself
+        }
         for (int id : module.constantIds()) {
             if (id >= REQUIRED_FROM && !has(id)) {
                 throw new IllegalArgumentException("The pipeline of " + entry + " of " + module.name()
