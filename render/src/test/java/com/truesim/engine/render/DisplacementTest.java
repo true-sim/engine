@@ -15,12 +15,15 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+import static org.lwjgl.vulkan.VK10.vkCmdCopyBuffer;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.common.math.Vec3;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.render.materials.Grass;
+import com.truesim.engine.render.materials.GrassParameters;
 import com.truesim.engine.render.materials.TestWindParameters;
 import com.truesim.engine.render.materials.Wave;
 import com.truesim.engine.render.materials.WaveParameters;
@@ -36,12 +39,15 @@ import com.truesim.scene.assets.mesh.VertexFormat;
 import com.truesim.scene.core.ShadowSpec;
 import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkBufferCopy;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 
 /**
@@ -50,7 +56,9 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
  * {@code test.wind}, in {@link GpuScene#geometryHooks}). Both modes: in the vertex stages of every pass
  * ({@link Displacement#RASTER}) and once a frame into a copy ({@link Displacement#COMPUTE}). A 2 x 2 quad floats 2 units
  * over a 20 x 20 floor (as {@link ShadowsTest}), displaced 1.5 along x: its shadow by maps, the surface the camera sees,
- * culling with grown bounds; motion vectors of a swinging quad; ray-traced shadows and path-traced hits of a copy.
+ * culling with grown bounds; motion vectors of a swinging quad; ray-traced shadows and path-traced hits of a copy. And
+ * the test grass (test/grass.slang) read back from a copy: in calm air each blade at a rest posture of its own, in wind
+ * bent downwind along arcs that keep its length.
  */
 class DisplacementTest {
 
@@ -87,7 +95,7 @@ class DisplacementTest {
         }
         assumeThat(instance.gpus()).as("no Vulkan 1.3 GPU").isNotEmpty();
         device = VulkanDevice.createHeadless(instance.bestGpu());
-        pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 12, 64, 8));
+        pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 14, 256, 8));
         quadMesh = MeshletRendererTest.grid(1, 2, false, VertexFormat.POSITIONS_ONLY);
         quad = pool.add(quadMesh);
         scene = new GpuScene(device, pool, 16);
@@ -476,5 +484,225 @@ class DisplacementTest {
         assertThat((double) image[4 * seen + 1]).as("the copy's hit where displaced: its glow").isGreaterThan(0.5);
         assertThat((double) image[4 * was + 1]).as("where it was: the sky through it")
             .isLessThan(image[4 * seen + 1] * 0.5);
+    }
+
+    // ---------------------------------------------------------------- grass: rest postures, length kept
+
+    /** 16 x 16 blades of the benchmark's patch, over 1.5 x 1.5. */
+    private static final int SIDE = 16;
+
+    /** A patch of grass blades (test/grass.slang) and its vertices as made, before the builder reordered them. */
+    private record Blades(MeshData mesh, float[] made) {
+
+        static Blades of(long seed) {
+            float[] made = new float[3 * 10 * SIDE * SIDE];
+            return new Blades(DisplacementBenchmark.patch(seed, SIDE, 1.5f, made), made);
+        }
+
+        /** Blade {@code b}'s root along {@code axis} (0: x, 2: z), at the middle of its bottom edge. */
+        double root(int b, int axis) {
+            return (made[3 * (10 * b) + axis] + made[3 * (10 * b + 1) + axis]) / 2;
+        }
+
+        /** Blade {@code b}'s height. */
+        double height(int b) {
+            return made[3 * (10 * b + 8) + 1];
+        }
+
+        /**
+         * The middle of each blade's 5 rows (root to tip) as {@code displaced} (x, y, z a vertex, in the mesh's order)
+         * places them: blade by blade, row by row, x, y, z. The builder reorders vertices: each is matched to the
+         * vertex made nearest where it stands at rest.
+         */
+        double[] rows(float[] displaced) {
+            int made = this.made.length / 3;
+            double[] sums = new double[3 * made / 2];
+            int[] counts = new int[made / 2];
+            double[] at = new double[3];
+            for (int v = 0; v < mesh.vertexCount(); v++) {
+                mesh.position(v, at);
+                int nearest = 0;
+                double best = Double.MAX_VALUE;
+                for (int m = 0; m < made; m++) {
+                    double dx = at[0] - this.made[3 * m];
+                    double dy = at[1] - this.made[3 * m + 1];
+                    double dz = at[2] - this.made[3 * m + 2];
+                    double d = dx * dx + dy * dy + dz * dz;
+                    if (d < best) {
+                        best = d;
+                        nearest = m;
+                    }
+                }
+                int slot = nearest / 2; // blade 10 b + 2 row + edge
+                counts[slot]++;
+                for (int axis = 0; axis < 3; axis++) {
+                    sums[3 * slot + axis] += displaced[3 * v + axis] / 2;
+                }
+            }
+            for (int count : counts) {
+                assertThat(count).as("each made vertex found once: two a row").isEqualTo(2);
+            }
+            return sums;
+        }
+    }
+
+    /**
+     * The blades of {@code grass} displaced into a copy under {@code wind} (null: the hook off), read back after 3
+     * frames: x, y, z a vertex, in the mesh's space and order.
+     */
+    private float[] displaced(Blades grass, TestWindParameters wind) {
+        if (!materials.displacingTypes().contains(Grass.TYPE)) {
+            materials.register(Grass.TYPE);
+        }
+        int source = pool.add(grass.mesh());
+        int copy = pool.addDeformed(source);
+        pool.deformation().displace(copy);
+        int material = materials.add(DisplacementBenchmark.grass(GrassParameters.DEFAULTS));
+        scene.set(0, copy, material, 0, -1, -3, 0, 0, 0, 1, 1, 1, 1);
+        camera.set(0, -0.3, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        if (wind == null) {
+            scene.geometryHooks().turn("test.wind", false);
+        } else {
+            scene.geometryHooks().set("test.wind", wind);
+        }
+        SceneView main = newGraph();
+        main.port().add(forward(SceneGeometry.meshlets(renderer)).apply(main))
+            .output(Keys.SCENE_COLOR, target(VK_FORMAT_R8G8B8A8_UNORM, Format.R8G8B8A8_UNORM, 4));
+        frames(3);
+        device.waitIdle();
+        int vertices = pool.vertexCountOf(copy);
+        long base = (long) pool.vertexBase(copy) * 8;
+        float[] out = new float[3 * vertices];
+        try (GpuBuffer back = GpuBuffer.hostVisible(device, 8L * vertices, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            device.submitAndWait(device.graphics(), commands -> {
+                try (MemoryStack stack = stackPush()) {
+                    vkCmdCopyBuffer(commands, pool.positions().handle(), back.handle(),
+                        VkBufferCopy.calloc(1, stack).srcOffset(base).size(8L * vertices));
+                }
+            });
+            Deformation deformation = pool.deformation();
+            for (int v = 0; v < vertices; v++) {
+                int low = back.memory().getAtIndex(ValueLayout.JAVA_INT, 2L * v);
+                int high = back.memory().getAtIndex(ValueLayout.JAVA_INT, 2L * v + 1);
+                int[] q = {low & 0xffff, low >>> 16, high & 0xffff};
+                for (int axis = 0; axis < 3; axis++) {
+                    out[3 * v + axis] = deformation.boxMin(copy, axis)
+                        + q[axis] / 65535f * deformation.boxExtent(copy, axis);
+                }
+            }
+        }
+        return out;
+    }
+
+    @Test
+    void inCalmAirEachBladeStandsAtItsOwnRestPosture() {
+        Blades grass = Blades.of(11);
+        double[] rows = grass.rows(displaced(grass, TestWindParameters.DEFAULTS.withStrength(0).withTime(3.7f)));
+        int count = SIDE * SIDE;
+        double meanX = 0;
+        double meanZ = 0;
+        double squares = 0;
+        double upright = 0;
+        Set<Long> distinct = new HashSet<>();
+        double[] offsets = new double[2 * count];
+        for (int b = 0; b < count; b++) {
+            int tip = 3 * (5 * b + 4);
+            double x = rows[tip] - grass.root(b, 0);
+            double z = rows[tip + 2] - grass.root(b, 2);
+            offsets[2 * b] = x;
+            offsets[2 * b + 1] = z;
+            meanX += x / count;
+            meanZ += z / count;
+            squares += (x * x + z * z) / count;
+            upright += rows[tip + 1] / grass.height(b) / count;
+            distinct.add(Math.round(x * 1000) * 100_000 + Math.round(z * 1000));
+        }
+        double rms = Math.sqrt(squares);
+        double spread = Math.sqrt(squares - meanX * meanX - meanZ * meanZ);
+        assertThat(rms).as("tips off their roots: a rest bend").isGreaterThan(0.02);
+        assertThat(Math.hypot(meanX, meanZ)).as("no lean every blade shares: the mean tip offset, against %.4f rms",
+            rms).isLessThan(0.25 * rms);
+        assertThat(spread).as("tips varying from blade to blade").isGreaterThan(0.9 * rms);
+        assertThat(distinct.size()).as("blades with tips of their own, to the millimetre")
+            .isGreaterThan(count * 9 / 10);
+        assertThat(upright).as("mostly upright: the tips' mean height over the blades'").isGreaterThan(0.9);
+        // The hook off: the same rest postures, which need no wind
+        double[] off = grass.rows(displaced(grass, null));
+        for (int b = 0; b < count; b++) {
+            int tip = 3 * (5 * b + 4);
+            assertThat(off[tip] - grass.root(b, 0)).as("no wind hook: blade %d's posture", b)
+                .isCloseTo(offsets[2 * b], within(2e-3));
+            assertThat(off[tip + 2] - grass.root(b, 2)).as("no wind hook: blade %d's posture", b)
+                .isCloseTo(offsets[2 * b + 1], within(2e-3));
+        }
+    }
+
+    @Test
+    void windBendsTheBladesDownwindOnArcsThatKeepTheirLength() {
+        Blades grass = Blades.of(11);
+        Vec3 direction = new Vec3(0.8, 0, 0.6);
+        double[] rows = grass.rows(displaced(grass, TestWindParameters.DEFAULTS.withDirection(direction)
+            .withStrength(1.6f).withTime(2.3f)));
+        int count = SIDE * SIDE;
+        double downwind = 0;
+        double worst = 0;
+        for (int b = 0; b < count; b++) {
+            double length = 0;
+            for (int row = 1; row <= 4; row++) {
+                int a = 3 * (5 * b + row - 1);
+                int c = 3 * (5 * b + row);
+                length += Math.sqrt(Math.pow(rows[c] - rows[a], 2) + Math.pow(rows[c + 1] - rows[a + 1], 2)
+                    + Math.pow(rows[c + 2] - rows[a + 2], 2));
+            }
+            double height = grass.height(b);
+            worst = Math.max(worst, Math.abs(length / height - 1));
+            int tip = 3 * (5 * b + 4);
+            downwind += ((rows[tip] - grass.root(b, 0)) * direction.x()
+                + (rows[tip + 2] - grass.root(b, 2)) * direction.z()) / height / count;
+        }
+        // An arc's 4 chords are within 0.8 % of its length for bends up to 1.5 radians; sheared instead, a tip moved
+        // half the blade's height sideways would make it 12 % longer
+        assertThat(worst).as("the largest change of a blade's length (its middle line), of its height")
+            .isLessThan(0.015);
+        assertThat(downwind).as("tips moved downwind, of the blades' heights").isGreaterThan(0.3);
+    }
+
+    @Test
+    void grassDrawnDisplacedHasMotionVectorsOfTheWindsTime() {
+        assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
+        Blades grass = Blades.of(13);
+        materials.register(Grass.TYPE);
+        int blades = pool.add(grass.mesh());
+        int material = materials.add(DisplacementBenchmark.grass(GrassParameters.DEFAULTS));
+        // The patch displaced where drawn (RASTER), filling the view from 0.8 above it
+        scene.set(0, blades, material, 0, -0.8, -1.2, 0, 0, 0, 1, 1, 1, 1);
+        camera.set(0, -0.8, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.05);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        GeometryHooks hooks = scene.geometryHooks();
+        TestWindParameters wind = TestWindParameters.DEFAULTS.withStrength(1.4f).withFrequency(0.4f);
+        hooks.set("test.wind", wind.withTime(1));
+        SceneView main = newGraph();
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        main.port().add(visibility(geometry).apply(main)).add(new MotionVectors(geometry, view, main,
+            VK_FORMAT_D32_SFLOAT)).output(Keys.MOTION, target(VK_FORMAT_R16G16_SFLOAT, Format.R16G16_SFLOAT, 4));
+        frames(3);
+        // The wind's time standing: the frame before's evaluation is this one's, the blades still
+        frames(1);
+        double still = largestMotion();
+        assertThat(still).as("the wind's time stood: no motion (pixels)").isLessThan(0.05);
+        // A frame later in the wind: the blades moved since the frame before
+        hooks.set("test.wind", wind.withTime(1 + 1 / 30f));
+        frames(1);
+        assertThat(largestMotion()).as("a frame of wind: the blades moved (pixels)").isGreaterThan(0.3);
+    }
+
+    private double largestMotion() {
+        float[] motion = motion();
+        double largest = 0;
+        for (int i = 0; i < SIZE * SIZE; i++) {
+            largest = Math.max(largest, Math.hypot(motion[2 * i], motion[2 * i + 1]));
+        }
+        return largest;
     }
 }

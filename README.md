@@ -1187,31 +1187,42 @@ gpuScene.geometryHooks().set("weather.wind", wind.withTime(t));     // each fram
   forward and visibility buffer shading and is seen where displaced; an instance whose undisplaced bounds are out of view
   is drawn through its grown bounds; motion vectors of a wind-driven swing on the visibility buffer, forward shading and
   a copy (moving, standing, back, the hook off); a copy casts its displaced shadow by rays and maps, the same quad
-  displaced in the stages casts it undisplaced by rays; path-traced hits meet the copy where displaced. engine-scene's
+  displaced in the stages casts it undisplaced by rays; path-traced hits meet the copy where displaced; the test grass
+  read back from a copy: in calm air (and with the hook off) each blade at a rest posture of its own (the mean tip
+  offset about 0, tips differing blade to blade, mostly upright), in wind bent downwind along arcs that keep each
+  blade's length within 1.5 %. engine-scene's
   `SceneSyncDisplacementTest` follows `DisplacementMode` and the type's mode into copies.
 
 - **What it costs** (`DisplacementBenchmark`, RX 9070 XT, 1920 x 1080, 2026-11-08, without JaCoCo): a grass field of
-  576 patches (24 x 24, 2 m each) of 1,024 blades (8 triangles each: 4.7 M triangles; test/grass.slang bent by the test
-  wind hook, its time moving every frame) over a ground plane, the sun shadowed by 4 cascades of 2048 or by rays, shaded
-  by the visibility buffer; GPU time of whole frames (timestamps around batches of 8), 6 configurations taking turns for
-  5 rounds after 3 uncounted ones, ranges of the rounds' medians; the main pass costs from the graph's pass timings:
+  576 patches (24 x 24, 2 m each) of 1,024 blades (8 triangles each: 4.7 M triangles; test/grass.slang: each blade's
+  own rest posture, bent on an arc by the test wind hook's steady lean, travelling gusts, sway and flutter, its time
+  moving every frame) over a ground plane, the sun shadowed by 4 cascades of 2048 or by rays, shaded by the visibility
+  buffer; GPU time of whole frames (timestamps around batches of 8), 6 configurations taking turns for 5 rounds after 3
+  uncounted ones, ranges of the rounds' medians; the main pass costs from the graph's pass timings (medians). Measured
+  while other renders shared the GPU, so the frame ranges are wide; against the previous test grass (a shear along the
+  wind) in the same session, the passes' medians show what the realistic grass costs: RASTER +0.19 ms in the shadow
+  atlas, +0.17 ms in shading (the visibility buffer rebuilds each triangle displaced), +0.04 ms in IDs; COMPUTE +0.15 ms
+  in the deformation:
 
   | Configuration | GPU per frame | Where the difference goes | Memory of its own |
   |---|---|---|---|
-  | still grass (metallic-roughness, no displacement), maps | 0.892-0.913 ms | IDs 0.57 ms, shading 0.20 ms | - |
-  | RASTER, maps | 2.611-2.620 ms | shadow atlas 1.55 ms: the displaced casters' cascade tiles drawn again every frame; IDs 0.70 ms | none |
-  | COMPUTE, maps | 4.991-5.006 ms | deformation 2.04 ms (5.9 M vertices displaced into the copies, their spheres), shadow atlas 1.76 ms | copies 96.6 MiB |
-  | still grass, rays | 1.004-1.049 ms | traced shadows 0.13 ms | - |
-  | RASTER, rays | 1.238-1.243 ms | IDs 0.70 ms, traced shadows 0.20 ms: rays meet the blades undisplaced | none |
-  | COMPUTE, rays | 6.014-6.385 ms | deformation 2.04 ms, 576 bottom level refits 1.71 ms, traced shadows 0.44 ms | copies 96.6 MiB, bottom levels 822 MiB |
+  | still grass (metallic-roughness, no displacement), maps | 0.947-1.143 ms | IDs 0.55 ms, shading 0.27 ms | - |
+  | RASTER, maps | 3.094-3.713 ms | shadow atlas 1.75 ms: the displaced casters' cascade tiles drawn again every frame; IDs 0.74 ms, shading 0.44 ms | none |
+  | COMPUTE, maps | 5.726-6.323 ms | deformation 2.19 ms (5.9 M vertices displaced into the copies, their spheres), shadow atlas 1.73 ms | copies 96.6 MiB |
+  | still grass, rays | 1.028-1.045 ms | traced shadows 0.13 ms | - |
+  | RASTER, rays | 1.498-2.083 ms | IDs 0.75 ms, shading 0.36 ms, traced shadows 0.22 ms: rays meet the blades undisplaced | none |
+  | COMPUTE, rays | 6.335-6.583 ms | deformation 2.18 ms, 576 bottom level refits 1.72 ms, traced shadows 0.37 ms | copies 96.6 MiB, bottom levels 822 MiB |
 
-  A copy is the patch's 10,240 vertices, their attributes and 166 meshlet records (0.17 MiB); the owners table 40 KiB a
-  source. RASTER pays in every pass drawing the field (IDs +0.13 ms here) and in shadow caches, which cannot keep
-  animated casters; COMPUTE pays once per frame for all views but per vertex of every copy, seen or not, and with ray
-  tracing a refittable bottom level per copy and its refit. RASTER is the default; COMPUTE is for what rays must see.
-  Checked in films (scratchpad, not in the repository): the field flown through, the same 60 frames with the blades'
-  bounds grown to 10 instead of 0.31 drew the same image to the pixel (nothing culled that displacement brought into
-  view); swinging boards' ray-traced shadows stand still in RASTER and swing in COMPUTE.
+  A copy is the patch's 10,240 vertices, their attributes and 167 meshlet records (0.17 MiB); the owners table 40 KiB a
+  source. RASTER pays in every pass drawing the field (IDs +0.19 ms, shading +0.17 ms here) and in shadow caches, which
+  cannot keep animated casters; COMPUTE pays once per frame for all views but per vertex of every copy, seen or not, and
+  with ray tracing a refittable bottom level per copy and its refit. RASTER is the default; COMPUTE is for what rays
+  must see. Checked in films (scratchpad, not in the repository): the field flown through, the same 60 frames with the
+  blades' bounds grown to 10 instead of 0.51 drew the same image but for one frame (3 and 312 pixels in two runs; the
+  bounds-grown frames themselves differ there from run to run, the frames of the declared bounds do not: not culling,
+  cause not found), so nothing culled that displacement brought into view; the field through calm, a breeze, strong
+  gusts and calm again, the camera low in it; swinging boards' ray-traced shadows stand still in RASTER and swing in
+  COMPUTE.
 
 **Pipelines made ahead.** A renderer keeps the pipelines of material types in one store (`ShadingPipelines`, through
 the device's pipeline cache), and has those a material will draw with made on a thread of its own when the material
