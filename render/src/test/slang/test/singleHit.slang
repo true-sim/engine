@@ -14,7 +14,7 @@ import test.dissolve;
 void singleHitMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint index = pathIndex(group, thread);
-    if (index >= push.counts[push.bounce])
+    if (index >= push.counts[pushBounce()])
     {
         return;
     }

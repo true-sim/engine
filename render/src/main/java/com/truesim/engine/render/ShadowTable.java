@@ -70,6 +70,21 @@ public final class ShadowTable implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Every light casts no shadows in this view until a technique names its entries again: as the graph builds, by the
+     * light list reading the table ({@link ClusteredLights}), so ranges a shadow technique named stay only while it is
+     * in the graph (its setup names them again every frame). A shadow technique removed from the view never cleared
+     * its ranges: its lights went on through entries nothing wrote any more (true-sim/engine#442). Allocates nothing.
+     */
+    void unnameAll() {
+        for (int light = 0; light < lights; light++) {
+            if (shadows.getInt(range(light)) != -1) {
+                shadows.putInt(range(light), -1);
+                shadows.putInt(range(light) + 4, 0);
+            }
+        }
+    }
+
     /** In this view, light {@code light} casts no shadows (until named again). Allocates nothing. */
     public ShadowTable noShadows(int light) {
         Objects.checkIndex(light, lights);

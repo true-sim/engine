@@ -538,9 +538,41 @@ lamps' bulbs dark, 1.00 to 0.24, 0.04 on the ground.
   change alone removed them; the NaNs' own cause was not traced), and the still dusk scene's numbers and restart counts
   read back per frame, before and after (true-sim/engine, GI pulse).
 - Observed, not fixed: with the bulbs lit the ground by them still varies (1.70; 0.37 with their emission a quarter):
-  probe rays meet small emissive surfaces by chance only, and a history of 30 updates carries what a few met.
+  probe rays meet small emissive surfaces by chance only, and a history of 30 updates carries what a few met. Fixed
+  since by light samples of the emitters (below).
 - Rule: a state machine driven by the same rays it changes (relocation, classification) is checked in a still scene
   for states that alternate; read the probes' states back per frame, not only the image.
+
+**Probe rays found small emissive surfaces by chance only.** A lamp's bulb (a box 13 cm across in effects-particles'
+dusk film, at a quarter of its emission) reached a probe in the updates whose turned rays happened to meet it, and a
+history of 30 updates carried what a few had met: with the scene held still (300 frames) the house's 40 px regions
+wandered about their trend by 0.45 luma and the ground by the left lamps by 0.37, against 0.08 and 0.00 without GI.
+Each probe update now also takes light samples of the frame's emitters (next-event estimation: an emitter chosen, a
+direction in its bounding sphere's cone, only that emitter's emission counted), and the emission its turned rays meet
+is weighed against the samples by the balance heuristic, so nothing is counted twice: 0.14 in the house, 0.05 on the
+ground, the scene's mean light the same within 0.2 luma. In the moving film the frames' region noise (noise.py, 240
+frames) fell from p99 0.26 to 0.21 (cascades 0.19). The 93 one-frame flashes of an earlier rendering of the film
+(`particle-shots-dusk2`) were already gone on v0.192.0: 0 there, 0 after.
+- Proof: `ProbeVolumeTest.aSmallLampLightsTheFloorThroughLightSamplesEveryUpdateNotByChance` (a floor lit through
+  the volume by an emissive square 26 cm across: frame to frame 0.0155 of its light by the rays alone, 0.0032 with
+  the samples, the mean within 1 %); the dusk film and its still scene on v0.192.0, with
+  `render.gi.probes.emitterSamples` 0 and with the samples, in one session, measured with the scripts of the earlier
+  dusk entries (true-sim/engine, GI emissive).
+- Rule: a probe's or a gather's estimate of small bright emitters samples them directly and weighs what its own rays
+  meet against those samples (multiple importance sampling); check it against the rays alone with the history's
+  restarts off, where both must agree.
+
+**The adaptive test's restarts bias a probe's light where its updates are skewed.** In the GI scene `bulbs` (a dark
+room lit by two 10 cm bulbs) the probe volume's image against 4,096 path-traced samples: with
+`render.gi.probes.adaptive` off, the rays alone and the light samples agree (bias +3.8 % and +3.9 %); with it on,
++14.2 % with the samples and -31.4 % (another run, its frames numbered otherwise: -2.0 %) by the rays alone. A
+`sensitivity` of 16 instead of 4 leaves +6.2 % with the samples; the drift test off (+11.7 %) and one update a frame
+(+12.3 %) change little. A restart keeps the update that triggered it, so restarts chosen by an update's value select
+updates; which updates trip it here (noise taken for a change, or neighbours' restarts changing the bounce) was not
+traced. The dusk scene's light is not moved by it (the same means with the test on and off).
+- Proof: `GiEvaluation -PgiScenes=bulbs` with those settings (true-sim/engine, GI emissive).
+- Rule: a test that restarts a Monte Carlo history is checked for bias, the mean with the test against the mean
+  without it, in a scene whose estimates are skewed (small bright sources).
 
 **A radiance cascade's interval was continued by probes whose own intervals start across a wall.** Merging, a
 direction whose ray met nothing within its interval took the next cascade's light around the probe (eight probes,
@@ -632,8 +664,33 @@ memory, in those scenes; which one was not found.
   [#442](https://github.com/true-sim/engine/issues/442).
 - Rule: an image comparison across a change that allocates differently is checked against the base itself with an
   unrelated allocation before a difference is put down to the change.
+- Found (#442): a view's shadow table kept the light ranges of a shadow technique removed from the view. Each frame the
+  `Shadows` owner's setup names the entries its lights cast through (`ShadowTable.light`); nothing cleared them when the
+  technique left the graph. The GI scenes before toggle and mover had the sun as light 0 with its shadows traced; those
+  scenes' point light is light 0 too, and the light list shaded it through the sun's old entries, which no technique of
+  the new graph wrote. The light list now clears its view's ranges as the graph builds (`ShadowTable.unnameAll`); the
+  techniques name theirs again as frames record. `GiDeterminismTest` (every scene and state without GI, with the probe
+  volume and with radiance cascades, in GiEvaluation's order, then again after a 3 MiB allocation of 0x7f bytes) on
+  lavapipe 26.2.6: without the fix toggle 0's three images differed in 2,754 to 2,877 of 3,840 floats (16 to 26 % of
+  their light), and at the default volume sizes mover 0's and 1's too (1 to 7 %; mover 1 differed between two plain
+  runs as well); with it none. No NaN in any image, with or without the fix, at either size, on lavapipe and on the RX
+  9070 XT: the NaNs seen in the hooks work did not show again.
+- Rule: per-view state that techniques write each frame (tables, ranges, flags) is reset by its reader when the graph
+  builds, so it holds only what the techniques of this graph write.
 
 ## Tests and measurements
+
+**Two runs on the RX 9070 XT render the Cornell box's corners differently.** `GiDeterminismTest` renders every GI scene
+twice before the padded run: on the RX 9070 XT the two plain runs differ in the Cornell box (one or two raster pixels'
+alpha by one unit in the last place, 1.0 against 0.99999994; probe and cascade images in 231 to 664 floats, about 1e-3
+of their light), from run to run, with no allocation between; on lavapipe they are the same bit for bit at the test's
+small volume sizes, and at the default sizes the Cornell box's cascades differ there too. The raster pixel
+(31, 0) looks exactly at the corner of the right wall and the ceiling (y = 2.0, x = 1.0): two instances' faces at the
+same depth there. What decides between them from run to run was not traced.
+- Proof: two plain runs of `renderAll` compared on the RX 9070 XT, four times (true-sim/engine, GI emissive and #442).
+- Rule: a test of bit-exact images first renders the same thing twice; a device whose two runs differ is held to their
+  spread, not to bit-exactness (`GiDeterminismTest`: within 1 % of each image's light there, where the stale-memory
+  fault moved 16 to 26 %).
 
 **A still scene's benchmark hides what motion costs.** 200 shadowed point lights over the rocks cost 0.98 ms against
 0.93 unshadowed with the camera flying, as every tile stayed; with 100 rocks moving through the lights nearly every

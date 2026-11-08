@@ -195,6 +195,8 @@ public final class ClusteredLights implements Technique {
             }
         }
         float cutoff = g.setting(CUTOFF); // given numbers or not: a light's reach is not the clusters
+        // The view's shadow table as this graph's shadow techniques will name it: none of a graph before
+        lights.shadowTable(port).unnameAll();
         int across = tilesAcross();
         int down = tilesDown();
         Pipeline pipeline = g.computeProgram("shaders/lights/cluster.spv", "clusterMain", ClusterPush.BYTES);

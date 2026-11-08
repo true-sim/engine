@@ -2007,7 +2007,9 @@ the count. Neither wins outright, so both stay; lists are the default.
 every GI stage's tests and benchmarks: `sun-room` (a closed room lit by the sun and sky through one window: mostly
 bounced light), `leak-5cm`, `leak-25cm`, `leak-50cm` (a closed dark room beside a sunlit one, the wall between that
 thick: the reference is black, any light there is a leak), `bleeding` (strongly colored walls and floor under a
-ceiling light), `screens` (a dark room lit only by emissive panels), the dynamic `toggle` (a point light on, then off),
+ceiling light), `screens` (a dark room lit only by emissive panels), `bulbs` (a dark room lit only by two small bright
+emissive boxes, 10 cm bulbs as the dusk film's lamps: what probe rays meet by chance), the dynamic `toggle` (a point
+light on, then off),
 `door` (shut, then open to the sun) and `mover` (a red block beside a white wall, moved 2 m), and `cornell`. Boxes of
 plain materials (a cube with its faces' normals), the sun's shadows ray traced. `gi.GiHarness` renders a scene in a
 state path traced or in real time, `gi.GiError` compares an image with a reference (the mean relative luminance
@@ -2086,6 +2088,18 @@ mean square (14 x 14 and a border), so a shaded point ignores probes that cannot
   ray stands for: a sun in the sky reaches every update by its share, not only the frames a ray meets it), and the
   volume's own light of the frame before at the hit (infinite bounces). Back
   faces mark probes inside geometry: they move out (`relocate`) or are turned off (`classify`).
+- **Light samples of emitters** (next-event estimation of emissive surfaces): beside its rays, each probe update takes
+  `emitterSamples` (8) samples of the frame's emitters (`pathtracing/emitters.slang`): the instances whose
+  metallic-roughness materials give off light, listed in id order each frame by two passes (each instance's power: its
+  brightest emissive factor's luminance over its bounding sphere's cross section; then one group listing them with
+  running sums, at most `emitters`, 1024: a frame finding more samples none and takes what rays meet). A sample chooses
+  an emitter (`emitterSelection`: `NEARBY`, the default, by its power times the solid angle its sphere covers from the
+  probe, every emitter weighed; or `POWER`, a search of the running sums) and a direction in its sphere's cone, traced
+  as a probe path that counts only the emission of the instance it chose. The emission the turned rays meet and the
+  samples' are weighed by the balance heuristic over their densities (Veach 1997), so nothing is counted twice: a
+  small bright emitter lights the probes in every update by its share, instead of in the updates whose rays happened to
+  meet it. Other material types' emission, and emission met behind holes, the rays find as before. Radiance cascades
+  keep their fixed directions and no history (no flicker to remove; see below).
 - **Shading everywhere:** the volume's diffuse light replaces the environment's spherical harmonics through the probe
   volume's shading hook (`probes/hook.slang`, `ProbeVolume.HOOK`; "Writing a shading hook": the core's shading knows no
   probe format) in every path running the view's hooks: opaque on both shading techniques, blended and transmissive surfaces, lit
@@ -2103,7 +2117,9 @@ mean square (14 x 14 and a border), so a shaded point ignores probes that cannot
 
 Tested against closed forms (`ProbeVolumeTest`): the white furnace through the probes (E / (1 - rho) within 3 %, which
 only infinite bounces reach), a light changing color inside a box (90 % in 2 frames told, 2 found, more by the history
-cap alone), two views one update, no allocation.
+cap alone), two views one update, no allocation; a floor lit only through the probes by an emissive square 26 cm across
+changes from frame to frame 4.8 times less with the light samples than by the rays alone (0.0032 against 0.0155 of its
+light, either choice), its mean light within 1 % of the rays' (`aSmallLampLightsTheFloorThroughLightSamplesEveryUpdateNotByChance`).
 
 **Against the path-traced references** (engine-scene's `GiEvaluation` and `GiSponza`, `TRUESIM_SCREENSHOTS=true`,
 `-PgiReferences=<GiReferences' directory>`; 640 x 400 against 4,096 samples, Sponza 960 x 540 against 2,048; RX 9070
@@ -2215,27 +2231,71 @@ light the hits). Tested (`RadianceCascadesTest`): the white furnace within 2.1 %
 color in 3 frames, two views one update, no allocation; ground past the reach takes exactly the environment's light,
 and ground lit beyond the first cascade changes as little moving 2 cm across a grid's step as elsewhere.
 
-Against the references (as above; RX 9070 XT, the probe volume's columns 2026-11-04 at its new default budget of one
-half, the cascades' 2026-11-07; toggle and mover run alone, `-PgiScenes=toggle,mover`: after the other scenes they
-start from a state left over, before this change as after):
+Against the references (as above; RX 9070 XT, 2026-11-08, every scene in one run: toggle and mover no longer start from
+the earlier scenes' shadow table, true-sim/engine#442; "no light samples" is the same run with
+`render.gi.probes.emitterSamples` 0, the probe volume before them; scenes without emitters come out the same either
+way, bit for bit; `bulbs` against 4,096 path-traced samples, which find its bulbs by chance too):
 
-| Scene | Probes | Probes + BITMASK | Cascades | Cascades + BITMASK |
-|---|---|---|---|---|
-| sun-room | 7.3 %, 29.0 %, +1.0 % | 6.7 %, 26.0 %, -0.4 % | 7.4 %, 33.0 %, +3.3 % | 6.9 %, 27.5 %, +2.3 % |
-| leak-5cm (absolute) | 0.0001 | 0.0001 | 0.0000 | 0.0000 |
-| leak-25cm, leak-50cm (absolute) | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
-| bleeding | 22.5 %, 96.0 %, +17.4 % | 20.5 %, 74.3 %, +15.8 % | 22.8 %, 142 %, +19.9 % | 21.2 %, 124 %, +17.2 % |
-| screens | 17.4 %, 68.6 %, -14.4 % | 16.2 %, 66.9 %, -13.7 % | 14.0 %, 70.3 %, -6.3 % | 12.7 %, 60.8 %, -6.2 % |
-| toggle (light on) | 8.2 %, 18.8 %, -6.8 % | 7.5 %, 17.7 %, -6.0 % | 6.7 %, 15.0 %, -5.9 % | 6.9 %, 15.3 %, -6.3 % |
-| door (shut, absolute) | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
-| door (open) | 8.1 %, 31.5 %, -1.5 % | 7.3 %, 27.5 %, -1.5 % | 6.5 %, 23.4 %, -2.8 % | 6.3 %, 21.3 %, -3.7 % |
-| mover (moved) | 5.6 %, 16.7 %, -4.5 % | 4.4 %, 12.9 %, -2.3 % | 4.9 %, 13.6 %, -0.3 % | 4.9 %, 13.7 %, -1.3 % |
-| cornell | 35.3 %, 200 %, +19.6 % | 22.7 %, 109 %, +4.2 % | 18.2 %, 82.1 %, -9.5 % | 17.5 %, 82.3 %, -11.8 % |
-| Sponza, view 1 | 18.0 %, 119 %, -2.0 % | 18.5 %, 87.6 %, -5.4 % | 17.4 %, 108 %, -2.8 % | 16.9 %, 90.5 %, -4.9 % |
-| Sponza, view 2 | 25.9 %, 145 %, -3.0 % | 26.2 %, 122 %, -6.3 % | 28.2 %, 236 %, +6.4 % | 27.0 %, 197 %, +4.9 % |
-| Sponza, view 3 | 79.5 %, 293 %, +32.5 % | 78.4 %, 224 %, +25.2 % | 66.3 %, 158 %, +6.1 % | 64.4 %, 138 %, -1.1 % |
+| Scene | Probes, no light samples | Probes | Probes + BITMASK | Cascades | Cascades + BITMASK |
+|---|---|---|---|---|---|
+| sun-room | 11.7 %, 44.3 %, +10.1 % | 11.7 %, 44.3 %, +10.1 % | 7.9 %, 30.4 %, +5.5 % | 7.4 %, 33.0 %, +3.3 % | 6.9 %, 27.5 %, +2.3 % |
+| leak-5cm (absolute) | 0.0002 | 0.0002 | 0.0001 | 0.0000 | 0.0000 |
+| leak-25cm, leak-50cm (absolute) | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| bleeding | 28.6 %, 110 %, +28.0 % | 25.4 %, 105 %, +24.3 % | 27.2 %, 104 %, +26.3 % | 22.8 %, 142 %, +19.9 % | 21.2 %, 124 %, +17.2 % |
+| screens | 14.8 %, 67.0 %, -11.3 % | 14.3 %, 66.1 %, -10.7 % | 13.7 %, 60.9 %, -11.0 % | 14.0 %, 70.3 %, -6.3 % | 12.7 %, 60.8 %, -6.2 % |
+| bulbs | 40.1 %, 78.4 %, -31.4 % | 23.6 %, 115 %, +14.2 % | 24.3 %, 119 %, +15.6 % | 47.4 %, 325 %, +36.5 % | 45.5 %, 311 %, +34.2 % |
+| toggle (light on) | 8.4 %, 19.0 %, -6.9 % | 8.4 %, 19.0 %, -6.9 % | 7.5 %, 17.7 %, -6.1 % | 6.7 %, 15.0 %, -5.9 % | 6.9 %, 15.3 %, -6.3 % |
+| door (shut, absolute) | 0.0000 | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| door (open) | 10.6 %, 44.3 %, +6.9 % | 10.6 %, 44.3 %, +6.9 % | 7.2 %, 28.7 %, +2.6 % | 6.5 %, 23.4 %, -2.8 % | 6.3 %, 21.3 %, -3.7 % |
+| mover (moved) | 5.6 %, 16.3 %, -4.9 % | 5.6 %, 16.3 %, -4.9 % | 4.3 %, 12.5 %, -1.8 % | 4.9 %, 13.6 %, -0.3 % | 4.9 %, 13.7 %, -1.3 % |
+| cornell | 22.6 %, 133 %, +6.1 % | 21.2 %, 123 %, +4.5 % | 17.9 %, 94.7 %, +2.2 % | 18.2 %, 82.1 %, -9.4 % | 17.5 %, 82.3 %, -11.8 % |
+| Sponza, view 1 | 17.9 %, 120 %, -1.7 % | 17.9 %, 120 %, -1.7 % | 16.9 %, 92.6 %, -4.3 % | 17.4 %, 108 %, -2.8 % | 16.9 %, 90.5 %, -4.9 % |
+| Sponza, view 2 | 24.6 %, 169 %, -1.0 % | 24.6 %, 169 %, -1.0 % | 24.0 %, 136 %, -2.5 % | 28.2 %, 236 %, +6.4 % | 27.0 %, 197 %, +4.9 % |
+| Sponza, view 3 | 70.5 %, 279 %, +26.9 % | 70.5 %, 279 %, +26.9 % | 63.4 %, 214 %, +12.2 % | 66.3 %, 158 %, +6.1 % | 64.4 %, 138 %, -1.1 % |
 
-Closer than the probe volume in most views and as close in the rest but Sponza's second (where the first grid's
+The probe volume's light samples bring it closer where emitters light a room (bulbs 40.1 % to 23.6 %, the Cornell box's
+lamp 22.6 % to 21.2 %, bleeding's ceiling light 28.6 % to 25.4 %, the screens 14.8 % to 14.3 %) and change nothing
+elsewhere. The bulbs' bias of +14.2 % is the adaptive test's: with `render.gi.probes.adaptive` off, the rays alone and
+the samples agree (+3.8 % and +3.9 %; with it on the rays alone drift between -31 % and -2 % from run to run), and a
+`sensitivity` of 16 leaves +6.2 %: restarts chosen by an update's value select updates (`docs/pitfalls.md`); not
+changed here. Radiance cascades miss the bulbs between their fixed directions (47.4 %, +36.5 %): a bias of where their
+64 first directions fall, which does not move from frame to frame (no flicker to remove). Light samples there would
+have to be split among the intervals their emitters lie in and merged with them; not done, the emitter list and its
+weights (`pathtracing/emitters.slang`) are shared code a cascade's pass could take.
+
+What the light samples cost and what they remove (engine-scene's `GiBenchmark.emitterSamplingCosts`,
+`TRUESIM_BENCHMARK=true`, RX 9070 XT, 2026-11-08, JaCoCo off): the `bulbs` scene at 1920 x 1080, every probe each frame
+(budget 1), alone and with 254 small dim bulbs more over its ceiling; the probe passes' GPU time, and the image's
+change from frame to frame (each pixel off the mean of the frames before and after, over the light), ranges of 3
+rounds:
+
+| Emitters | Light samples | Probe passes | Frame-to-frame change |
+|---|---|---|---|
+| 2 | none (rays alone) | 0.814-0.819 ms | 0.206-0.249 |
+| 2 | 4, `NEARBY` | 0.821-0.823 ms | 0.0034-0.0039 |
+| 2 | 8, `NEARBY` (default) | 0.845-0.846 ms | 0.0024-0.0024 |
+| 2 | 16, `NEARBY` | 0.968-0.969 ms | 0.0015-0.0017 |
+| 2 | 8, `POWER` | 0.840-0.842 ms | 0.0034-0.0068 |
+| 256 | none (rays alone) | 0.810-0.816 ms | 0.031-0.034 |
+| 256 | 4, `NEARBY` | 1.153-1.156 ms | 0.0039-0.0053 |
+| 256 | 8, `NEARBY` (default) | 1.185-1.191 ms | 0.0027-0.0033 |
+| 256 | 16, `NEARBY` | 1.293-1.301 ms | 0.0020-0.0028 |
+| 256 | 8, `POWER` | 0.845-0.849 ms | 0.0053-0.0063 |
+
+`NEARBY` weighs every emitter for every sample: with 256 emitters it costs 0.37 ms more than the rays alone, `POWER`
+0.03 ms, for about twice the flicker (it spends samples on far emitters). A trade-off, so both stay; `NEARBY` is the
+default (scenes have few emitters; `emitters` bounds the cost). Sponza, which has no emitters, pays the list's two
+passes alone: the update 1.506-1.538 ms against 1.519-1.687 ms without samples at 1080p, 1.568-1.585 against
+1.577-1.586 ms at 4K (`GiBenchmark`, the same day): within the rounds' spread. Memory at the defaults (6,144 probes,
+128 rays, 8 samples): the path buffers grow by 8 of 128 rays' worth (+7.9 MB, transient), the ray image by 16 texels a
+probe (+0.8 MB), the bins' slot list +0.2 MB, the list 32 KiB plus 8 bytes an instance id.
+
+In effects-particles' dusk film (its `ParticleHookScreenshots`, the lamp posts' bulbs at a quarter of their emission),
+held still for 300 frames: the house's 40 px regions wander about their trend by 0.14 luma with the samples against
+0.45 without (0.46 on v0.192.0; 0.08 without GI), the ground by the left lamps 0.05 against 0.37 (0.00), the scene's
+mean light the same within 0.2 luma; the moving film's region noise p99 0.21 against 0.26 (cascades 0.19).
+
+Closer than the probe volume in most views (not the bulbs) and as close in the rest but Sponza's second (where the first grid's
 border probes had come closer, 22.6 %, by chance: the far end of the gallery took the light of probes near the camera;
 with the environment past the last cascade and no reach, views 2 and 3 were 119 % and 124 %), with a lag of the
 bounces alone (frames to 90 %: toggle 6, door 5, mover 3; no noise at all; the probe volume's below). It costs about

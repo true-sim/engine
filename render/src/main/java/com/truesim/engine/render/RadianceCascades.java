@@ -16,6 +16,7 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.layout.CascadePush;
 import com.truesim.engine.render.layout.IndirectConstants;
+import com.truesim.engine.render.layout.EmitterListLayout;
 import com.truesim.engine.render.layout.IndirectLightLayout;
 import com.truesim.engine.render.layout.PathPush;
 import com.truesim.engine.render.layout.ProbeVolumeDataLayout;
@@ -406,7 +407,10 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
         }
         Frame frame = new Frame(grid, spacing, coarsest, own, grid.inner());
 
+        // No emitters sampled: an empty list for the shaders' pointer (pathtracing/emitters.slang), never null
+        Buffer emitters = g.createBuffer("cascade emitters", EmitterListLayout.BYTES);
         pass(g, "cascade setup").write(data, BufferAccess.TRANSFER_DST).write(table, BufferAccess.TRANSFER_DST)
+            .write(emitters, BufferAccess.TRANSFER_DST)
             .write(levels, BufferAccess.TRANSFER_DST).write(counts, BufferAccess.TRANSFER_DST)
             .write(binTables, BufferAccess.TRANSFER_DST)
             .read(maps.sh(), BufferAccess.TRANSFER_SRC).read(maps.specular(), Access.SAMPLED_COMPUTE)
@@ -417,6 +421,7 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 frame.setup(ctx, settings, camera, data, levels, table, states, irradiance, depth, maps, brdf,
                     specularMips, sheenMips);
                 ctx.fill(counts, 0, countsBytes, 0);
+                ctx.fill(emitters, 0);
                 if (light != null) {
                     light.reset(ctx);
                 }
@@ -477,7 +482,7 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 .read(current, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
                 .write(counts, BufferAccess.STORAGE_WRITE).read(binTables, BufferAccess.INDIRECT)
                 .read(binTables, BufferAccess.STORAGE_READ).write(rayImage, Access.STORAGE_WRITE)
-                .read(table, BufferAccess.STORAGE_READ)
+                .read(table, BufferAccess.STORAGE_READ).read(emitters, BufferAccess.STORAGE_READ)
                 .read(data, BufferAccess.STORAGE_READ)
                 .read(states, BufferAccess.STORAGE_READ).read(irradiance, Access.SAMPLED_COMPUTE)
                 .read(depth, Access.SAMPLED_COMPUTE).read(maps.specular(), Access.SAMPLED_COMPUTE)
@@ -488,7 +493,7 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                     if (shade[bin] != null) {
                         ctx.dispatchIndirect(shade[bin], pathPush(shadePush, ctx, settings, rayImage, current, next,
                             binTables, counts, table, world, binTable, tablesBytes, bounce, bins, bin, layers)
-                            .lightRays(lightWords), binTables, binTable + 16L * bin);
+                            .lightRays(lightWords).emitters(ctx.address(emitters)), binTables, binTable + 16L * bin);
                     }
                 }
             });
@@ -573,8 +578,8 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
             .offset((float) cameraFromScene(0), (float) cameraFromScene(1), (float) cameraFromScene(2))
             .accumulation(rayImage == null ? 0 : ctx.storage(rayImage))
             .size(Float.floatToRawIntBits(interval))
-            .bounce(bounce).binCount(bins).bin(bin).sample((int) ctx.frame())
-            .limits(layers & 0xff | (255 << 8) | PATH_PROBES | PATH_INTERVALS)
+            .shading(bin | bins << 16).sample((int) ctx.frame())
+            .limits(layers & 0xff | (255 << 8) | PATH_PROBES | PATH_INTERVALS | bounce << 24)
             .list((int) ((tablesBytes - binTable) / 4));
     }
 
