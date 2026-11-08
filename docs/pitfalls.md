@@ -668,8 +668,11 @@ memory, in those scenes; which one was not found.
   `Shadows` owner's setup names the entries its lights cast through (`ShadowTable.light`); nothing cleared them when the
   technique left the graph. The GI scenes before toggle and mover had the sun as light 0 with its shadows traced; those
   scenes' point light is light 0 too, and the light list shaded it through the sun's old entries, which no technique of
-  the new graph wrote. The light list now clears its view's ranges as the graph builds (`ShadowTable.unnameAll`); the
-  techniques name theirs again as frames record. `GiDeterminismTest` (every scene and state without GI, with the probe
+  the new graph wrote. The light list now clears its view's ranges as the graph builds (`Lights.unnameShadows`); the
+  techniques name theirs again as frames record. A first version made the view's table there when it had none yet:
+  `ClusteredLightsTest.lightsFarFromTheOriginBinAsNearIt` then binned the far camera's lights into extra clusters on
+  lavapipe (CI and local, every run); clearing only a table that exists passes it. Why making it at build time changed
+  the binning was not traced. `GiDeterminismTest` (every scene and state without GI, with the probe
   volume and with radiance cascades, in GiEvaluation's order, then again after a 3 MiB allocation of 0x7f bytes) on
   lavapipe 26.2.6: without the fix toggle 0's three images differed in 2,754 to 2,877 of 3,840 floats (16 to 26 % of
   their light), and at the default volume sizes mover 0's and 1's too (1 to 7 %; mover 1 differed between two plain
@@ -683,8 +686,8 @@ memory, in those scenes; which one was not found.
 **Two runs on the RX 9070 XT render the Cornell box's corners differently.** `GiDeterminismTest` renders every GI scene
 twice before the padded run: on the RX 9070 XT the two plain runs differ in the Cornell box (one or two raster pixels'
 alpha by one unit in the last place, 1.0 against 0.99999994; probe and cascade images in 231 to 664 floats, about 1e-3
-of their light), from run to run, with no allocation between; on lavapipe they are the same bit for bit at the test's
-small volume sizes, and at the default sizes the Cornell box's cascades differ there too. The raster pixel
+of their light), from run to run, with no allocation between; on lavapipe the Cornell box's probe or cascade image
+differs between two runs in some runs too, and every other image matches bit for bit. The raster pixel
 (31, 0) looks exactly at the corner of the right wall and the ceiling (y = 2.0, x = 1.0): two instances' faces at the
 same depth there. What decides between them from run to run was not traced.
 - Proof: two plain runs of `renderAll` compared on the RX 9070 XT, four times (true-sim/engine, GI emissive and #442).

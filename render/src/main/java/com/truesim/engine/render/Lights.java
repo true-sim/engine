@@ -131,6 +131,18 @@ public final class Lights implements AutoCloseable {
         return table;
     }
 
+    /**
+     * Clears the light ranges of {@code view}'s shadow table, if it has one yet ({@link ShadowTable#unnameAll}): its
+     * light list does so as the graph builds. A table not made yet is not made here: it is made, its ranges empty, when
+     * first asked for as frames record. Allocates nothing.
+     */
+    void unnameShadows(ViewPort view) {
+        ShadowTable table = tables.get(view);
+        if (table != null) {
+            table.unnameAll();
+        }
+    }
+
     /** Lets {@code view}'s table go: freed once no frame in flight reads it (at once, the lights closed). */
     private void retire(ViewPort view) {
         ShadowTable table = tables.remove(view);
