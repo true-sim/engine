@@ -45,7 +45,7 @@ void generateMain(uint3 id : SV_DispatchThreadID)
 void traceMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint index = pathIndex(group, thread);
-    if (index >= push.counts[push.bounce])
+    if (index >= push.counts[pushBounce()])
     {
         return;
     }
@@ -71,7 +71,7 @@ void traceMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         return;
     }
     uint bin = materialShadingBin(push.scene[0].materials[triangleMaterial(rays, hit.instance, hit.primitive)]);
-    bin = bin < push.binCount ? bin : 0; // a bin made since the graph built: as metallic-roughness till it rebuilds
+    bin = bin < pushBinCount() ? bin : 0; // a bin made since the graph built: as metallic-roughness till it rebuilds
     path.instance = hit.instance;
     path.primitive = hit.primitive;
     path.bary = hit.bary;
@@ -87,15 +87,15 @@ void traceMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 void layoutMain()
 {
     uint offset = 0;
-    for (uint bin = 0; bin < push.binCount; bin++)
+    for (uint bin = 0; bin < pushBinCount(); bin++)
     {
         uint count = push.bins[4 * bin + 3];
         uint groups = (count + 63) / 64;
         push.bins[4 * bin] = min(groups, PATH_ROW);
         push.bins[4 * bin + 1] = (groups + PATH_ROW - 1) / PATH_ROW;
         push.bins[4 * bin + 2] = 1;
-        push.bins[4 * push.binCount + bin] = offset;
-        push.bins[5 * push.binCount + bin] = 0;
+        push.bins[4 * pushBinCount() + bin] = offset;
+        push.bins[5 * pushBinCount() + bin] = 0;
         offset += count;
     }
 }
@@ -106,7 +106,7 @@ void layoutMain()
 void scatterMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint index = pathIndex(group, thread);
-    if (index >= push.counts[push.bounce])
+    if (index >= push.counts[pushBounce()])
     {
         return;
     }
@@ -116,7 +116,7 @@ void scatterMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         return;
     }
     uint slot;
-    InterlockedAdd(push.bins[5 * push.binCount + bin], 1, slot);
+    InterlockedAdd(push.bins[5 * pushBinCount() + bin], 1, slot);
     push.bins[push.list + binOffset(bin) + slot] = index;
 }
 
@@ -132,5 +132,5 @@ void resolveMain(uint3 id : SV_DispatchThreadID)
         return;
     }
     float3 sum = images[push.accumulation][id.xy].rgb;
-    images[push.bin][id.xy] = float4(sum / float(max(push.sample, 1u)), 1);
+    images[push.list][id.xy] = float4(sum / float(max(push.sample, 1u)), 1);
 }

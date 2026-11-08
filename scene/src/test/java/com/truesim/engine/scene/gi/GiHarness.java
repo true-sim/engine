@@ -197,6 +197,11 @@ public final class GiHarness implements AutoCloseable {
         return read();
     }
 
+    /** What scenes are built into: to add to a scene once built (a benchmark's extra instances). */
+    GiScenes.Stage stage() {
+        return stage;
+    }
+
     /** The harness's frame graph (its settings). */
     public FrameGraph graph() {
         return graph;

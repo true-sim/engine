@@ -493,6 +493,63 @@ class ProbeVolumeTest {
     }
 
     /**
+     * A floor lit only through the volume by a small bright lamp over it (an emissive square 26 cm across, a black sky):
+     * by the probes' rays alone it is met in some updates and not in others, so the floor's light changes from frame to
+     * frame (the dusk film's bulbs). With light samples of the emitters (next-event estimation, weighed against the
+     * rays by the balance heuristic) every update takes its share: the flicker falls to a fraction, and the mean light
+     * stays that of the rays alone (both unbiased: nothing counted twice).
+     */
+    @Test
+    void aSmallLampLightsTheFloorThroughLightSamplesEveryUpdateNotByChance() {
+        int floor = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1))).feature(LAMBERT));
+        int lamp = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1))
+            .withEmissive(new Color(20, 20, 20, 1))).feature(LAMBERT));
+        wall(0, floor, 0, -1, 0, ReferencePathTracerTest.UP, 8);
+        wall(1, lamp, 0.4f, -0.35f, -1.2f, ReferencePathTracerTest.DOWN, 0.13f);
+        lights.setCount(0);
+        camera.set(0, -1, -0.6, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.01);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        Environment black = Environment.uniform("black", 0, 0, 0);
+        SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), view, camera);
+        main.port().add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_D32_SFLOAT)).add(new ClusteredLights(lights, main))
+            .add(new EnvironmentLighting(black, main, SMALL))
+            .add(new ProbeVolumeLighting(main, new ProbeVolume(rayTracing, renderer, lights, black, SMALL, main)))
+            .output(Keys.SCENE_COLOR, new ExternalImage("target", SIZE, SIZE, Format.R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT
+                    | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view()));
+        graph.settings().set(ProbeVolume.EMITTER_SAMPLES, 0);
+        double rays = flicker(60);
+        double raysMean = meanOver(120);
+        graph.settings().reset(ProbeVolume.EMITTER_SAMPLES);
+        double sampled = flicker(60);
+        double sampledMean = meanOver(120);
+        graph.settings().set(ProbeVolume.EMITTER_SELECTION, ProbeVolume.EmitterSelection.POWER);
+        double byPower = flicker(60);
+        double byPowerMean = meanOver(120);
+        System.out.printf("a pixel's light off its neighbouring frames', relative: %.4f by the rays alone, %.4f with"
+            + " light samples (%.4f chosen by power); mean red %.5f, %.5f, %.5f%n", rays, sampled, byPower, raysMean,
+            sampledMean, byPowerMean);
+        assertThat(raysMean).as("the lamp lights the floor").isGreaterThan(1.0e-3);
+        assertThat(sampled).as("with light samples against the rays alone (%s)", rays).isLessThan(rays / 3);
+        assertThat(byPower).as("chosen by power against the rays alone (%s)", rays).isLessThan(rays / 3);
+        assertThat(sampledMean).as("the mean light with light samples: the rays' (nothing counted twice)")
+            .isCloseTo(raysMean, within(raysMean * 0.05));
+        assertThat(byPowerMean).as("chosen by power").isCloseTo(raysMean, within(raysMean * 0.05));
+    }
+
+    /** The mean red over {@code count} frames, after 90 to settle. */
+    private double meanOver(int count) {
+        frames(90);
+        double sum = 0;
+        for (int f = 0; f < count; f++) {
+            sum += mean(frames(1), 0);
+        }
+        return sum / count;
+    }
+
+    /**
      * A floor 3 cm over a row of probes (they see its back: inside), lit through the volume by a small bright lamp
      * (an emissive square 26 cm across, a black sky; its light noisy, update to update): relocation moves those probes
      * up through it, and off it. Classified by the rays from where they had been, they were turned off as they moved

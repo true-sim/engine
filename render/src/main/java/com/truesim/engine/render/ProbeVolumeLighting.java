@@ -107,14 +107,20 @@ public final class ProbeVolumeLighting implements Technique {
             min = 0, max = 1024) int fresh,
         @Tunable(value = "global illumination's updates run on the async compute queue") boolean async,
         @Tunable(value = "how wide a lobe a probe ray meeting nothing takes the environment through, of the solid "
-            + "angle each ray stands for (0: its direction alone)", min = 0, max = 16) float skyFootprint)
+            + "angle each ray stands for (0: its direction alone)", min = 0, max = 16) float skyFootprint,
+        @Tunable(value = "light samples of emissive surfaces per probe update, weighed against the rays (0: rays "
+            + "alone)", min = 0, max = 32) int emitterSamples,
+        @Tunable(value = "the most emitters probes' light samples choose from (more found: none sampled that frame)",
+            min = 1, max = 1 << 20) int emitters,
+        @Tunable("how a probe's light sample chooses an emitter: by its power, or by its power times the solid angle "
+            + "it covers from the probe") ProbeVolume.EmitterSelection emitterSelection)
         implements TechniqueConfig {
     }
 
     /** The ray-traced probe volume (devices with ray tracing; elsewhere none). */
     public static final TechniqueKind<Probes, ProbeVolumeLighting, Technique> PROBES = TechniqueKind.of(SLOT, "probes",
         new Probes(3, 16, 8, 1f, 128, 32, 0.5f, 4, 0.25f, 0.25f, 0.2f, 1.5f, true, true, 30, true, 4f, 0.01f, true, 2f,
-            2, 3f, 8, false, 2f),
+            2, 3f, 8, false, 2f, 8, 1024, ProbeVolume.EmitterSelection.NEARBY),
         "the ray-traced probe volume", (lighting, config) -> lighting.new Engine(false));
 
     /**
