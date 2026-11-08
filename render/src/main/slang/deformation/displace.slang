@@ -96,8 +96,8 @@ public bool chunkItem(uint group, uint thread, out DisplacedCopy copy, out uint 
 }
 
 /**
- * Displaces vertex `v` of displaced copy `copy` in place with type M (table id push.type), where its submesh's material
- * is of that type and displaces: the copy's position (posed or copied from its source this frame) and normal moved by
+ * Displaces vertex `v` of displaced copy `copy` with type M (table id push.type), where its submesh's material is of that
+ * type and displaces: the copy's position (posed in place this frame, or its source's) and normal moved by
  * M's displace(), as the vertex stages of RASTER move them.
  */
 public void displaceCopyVertex<M : IMaterial>(DisplacedCopy copy, uint v)
@@ -112,7 +112,10 @@ public void displaceCopyVertex<M : IMaterial>(DisplacedCopy copy, uint v)
     }
     MeshEntry target = push.meshes[copy.target];
     uint vertex = target.vertexBase + v;
-    LocalVertex local = localVertex(target, vertex, push.positions, push.attributes);
+    // Posed in place by the skinning, or straight from the source (restMain left it)
+    MeshEntry source = push.meshes[copy.source];
+    LocalVertex local = copy.skinned != 0 ? localVertex(target, vertex, push.positions, push.attributes)
+        : localVertex(source, source.vertexBase + v, push.positions, push.attributes);
     LocalVertex moved = displacedVertex<M>(local, stored, copy.instance, ref, push.hooks);
     push.positions[vertex] = quantize(moved.position, copy.boxMin, copy.boxExtent);
     uint format = target.attributeFormat;
@@ -123,6 +126,6 @@ public void displaceCopyVertex<M : IMaterial>(DisplacedCopy copy, uint v)
     if ((format & 2) != 0 && dot(moved.tangent.xyz, moved.tangent.xyz) > 0)
     {
         uint at = attributeIndex(target, v, 1);
-        push.attributes[at] = encodeOctahedral(normalize(moved.tangent.xyz), push.attributes[at] & 1);
+        push.attributes[at] = encodeOctahedral(normalize(moved.tangent.xyz), moved.tangent.w < 0 ? 1u : 0u);
     }
 }

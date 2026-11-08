@@ -1190,7 +1190,28 @@ gpuScene.geometryHooks().set("weather.wind", wind.withTime(t));     // each fram
   displaced in the stages casts it undisplaced by rays; path-traced hits meet the copy where displaced. engine-scene's
   `SceneSyncDisplacementTest` follows `DisplacementMode` and the type's mode into copies.
 
-BENCHMARK_PLACEHOLDER
+- **What it costs** (`DisplacementBenchmark`, RX 9070 XT, 1920 x 1080, 2026-11-08, without JaCoCo): a grass field of
+  576 patches (24 x 24, 2 m each) of 1,024 blades (8 triangles each: 4.7 M triangles; test/grass.slang bent by the test
+  wind hook, its time moving every frame) over a ground plane, the sun shadowed by 4 cascades of 2048 or by rays, shaded
+  by the visibility buffer; GPU time of whole frames (timestamps around batches of 8), 6 configurations taking turns for
+  5 rounds after 3 uncounted ones, ranges of the rounds' medians; the main pass costs from the graph's pass timings:
+
+  | Configuration | GPU per frame | Where the difference goes | Memory of its own |
+  |---|---|---|---|
+  | still grass (metallic-roughness, no displacement), maps | 0.892-0.913 ms | IDs 0.57 ms, shading 0.20 ms | - |
+  | RASTER, maps | 2.611-2.620 ms | shadow atlas 1.55 ms: the displaced casters' cascade tiles drawn again every frame; IDs 0.70 ms | none |
+  | COMPUTE, maps | 4.991-5.006 ms | deformation 2.04 ms (5.9 M vertices displaced into the copies, their spheres), shadow atlas 1.76 ms | copies 96.6 MiB |
+  | still grass, rays | 1.004-1.049 ms | traced shadows 0.13 ms | - |
+  | RASTER, rays | 1.238-1.243 ms | IDs 0.70 ms, traced shadows 0.20 ms: rays meet the blades undisplaced | none |
+  | COMPUTE, rays | 6.014-6.385 ms | deformation 2.04 ms, 576 bottom level refits 1.71 ms, traced shadows 0.44 ms | copies 96.6 MiB, bottom levels 822 MiB |
+
+  A copy is the patch's 10,240 vertices, their attributes and 166 meshlet records (0.17 MiB); the owners table 40 KiB a
+  source. RASTER pays in every pass drawing the field (IDs +0.13 ms here) and in shadow caches, which cannot keep
+  animated casters; COMPUTE pays once per frame for all views but per vertex of every copy, seen or not, and with ray
+  tracing a refittable bottom level per copy and its refit. RASTER is the default; COMPUTE is for what rays must see.
+  Checked in films (scratchpad, not in the repository): the field flown through, the same 60 frames with the blades'
+  bounds grown to 10 instead of 0.31 drew the same image to the pixel (nothing culled that displacement brought into
+  view); swinging boards' ray-traced shadows stand still in RASTER and swing in COMPUTE.
 
 **Pipelines made ahead.** A renderer keeps the pipelines of material types in one store (`ShadingPipelines`, through
 the device's pipeline cache), and has those a material will draw with made on a thread of its own when the material

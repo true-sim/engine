@@ -26,6 +26,7 @@ void ownersMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 
 /**
  * The copies not skinned: their source's vertices (position, normal, tangent) copied in, quantized into the copy's box,
+ * but those of displacing materials, which their type's pass displaces straight from the source;
  * what the frame before drew kept first where motion vectors keep it; the first thread of a copy writes its mesh entry.
  */
 [shader("compute")]
@@ -55,6 +56,12 @@ void restMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     if (copy.skinned != 0)
     {
         return; // posed in place by the skinning
+    }
+    // Vertices of displacing materials: their type's pass reads them from the source and writes them displaced
+    Instance stored = push.instances[copy.instance];
+    if (materialDisplaces(push.materials[stored.materialBase + push.owners[copy.owners + v]]))
+    {
+        return;
     }
     float3 p = decodePosition(push.positions[source.vertexBase + v], source);
     push.positions[targetVertexBase + v] = quantize(p, copy.boxMin, copy.boxExtent);

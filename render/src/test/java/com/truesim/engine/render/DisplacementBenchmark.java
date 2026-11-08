@@ -26,6 +26,7 @@ import com.truesim.common.math.Vec3;
 import com.truesim.common.math.color.Color;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.graph.GpuTimings;
 import com.truesim.engine.render.materials.Grass;
 import com.truesim.engine.render.materials.GrassParameters;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
@@ -255,7 +256,7 @@ class DisplacementBenchmark {
     }
 
     /** The patches as a mode draws them: still (null), displaced where drawn, or each its own displaced copy. */
-    private static final class Field {
+    static final class Field {
         private final VulkanDevice device;
         private final GpuScene gpu;
         private final GeometryPool pool;
@@ -279,6 +280,7 @@ class DisplacementBenchmark {
             this.still = still;
         }
 
+        /** Draws the patches as {@code mode} says (null: still). */
         void as(Displacement mode) {
             if (mode == Displacement.COMPUTE && !copied) {
                 for (int i = 0; i < copies.length; i++) {
@@ -311,8 +313,8 @@ class DisplacementBenchmark {
         Lights lights, RayTracing rays, ExternalImage target, Configuration configuration, long queries,
         double period) {
         lights.shadow(0, configuration.rays() ? ShadowSpec.rayTraced() : ShadowSpec.cascades(4, 2048, 60));
-        try (FrameGraph graph = new FrameGraph(device, 2);
-             Shadows shadows = new Shadows(SceneGeometry.meshlets(renderer), lights).rayTracing(rays)) {
+        try (Shadows shadows = new Shadows(SceneGeometry.meshlets(renderer), lights).rayTracing(rays);
+             FrameGraph graph = new FrameGraph(device, 2)) { // the graph closes first, then the owner
             SceneView main = new SceneView(graph.addView("main").size(WIDTH, HEIGHT), view, camera);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             main.port().add(new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
@@ -341,6 +343,22 @@ class DisplacementBenchmark {
                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
                     gpu[batch] = (stamps.get(1) - stamps.get(0)) * period / 1e6 / BATCH;
                 }
+            }
+            if (System.getenv("TRUESIM_PASSES") != null) { // where the frame's time goes, pass by pass
+                graph.timings(true);
+                for (int i = 0; i < 8; i++) {
+                    hooks.set("test.wind", wind(time[0] += 1 / 60f));
+                    device.submitAndWait(device.graphics(), graph::record);
+                }
+                GpuTimings timings = graph.timings();
+                StringBuilder line = new StringBuilder("    passes of " + configuration.name() + ":");
+                for (int i = 0; i < timings.count(); i++) {
+                    if (timings.millis(i) >= 0.03) {
+                        line.append(String.format(Locale.ROOT, " %s %.3f;", timings.pass(i), timings.millis(i)));
+                    }
+                }
+                System.out.println(line);
+                graph.timings(false);
             }
             if (renderer.chunksOverflowed()) {
                 throw new IllegalStateException("Culling ran out of room: the frames drew less than the field");
