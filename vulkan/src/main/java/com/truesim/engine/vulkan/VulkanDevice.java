@@ -1,5 +1,7 @@
 package com.truesim.engine.vulkan;
 
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.util.vma.Vma.VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.util.vma.Vma.vmaCreateAllocator;
@@ -122,6 +124,8 @@ public final class VulkanDevice implements AutoCloseable {
     private final Queue transfer;
     private final long allocator;
     private final Bindless bindless;
+    /** {@link #absentAddress}'s buffer: zeros a shader may read through a pointer it was told is absent. */
+    private final GpuBuffer absent;
     private final PipelineCache pipelineCache;
     private final ShaderVariants shaderVariants = new ShaderVariants();
     private final DirectCalls direct;
@@ -383,6 +387,10 @@ public final class VulkanDevice implements AutoCloseable {
             this.bindless = made;
             this.pipelineCache = new PipelineCache(this);
             this.direct = new DirectCalls(handle);
+            this.absent = GpuBuffer.hostVisible(this, ABSENT_BYTES,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            absent.memory().fill((byte) 0);
+            untrack(absent); // the device's own, as the bindless set's: not among what callers made and must close
         } catch (RuntimeException | Error e) {
             if (made != null) {
                 made.close(); // made before what failed
@@ -832,6 +840,21 @@ public final class VulkanDevice implements AutoCloseable {
         return bindless;
     }
 
+    /** Bytes of zeros behind {@link #absentAddress()}: past any fixed offset a shader reads from a pointer. */
+    public static final int ABSENT_BYTES = 64 * 1024;
+    /** The bit of {@link #absentAddress()} that says "absent" (bindless.slang's {@code present}). */
+    public static final long ABSENT_BIT = 1;
+
+    /**
+     * The address to hand a shader for a pointer that names no data (a feature off, a buffer not made), in place of 0:
+     * {@link #ABSENT_BYTES} of zeros, tagged with {@link #ABSENT_BIT}, which bindless.slang's {@code present(p)} tests.
+     * Never 0, because lavapipe performs loads in branches no invocation takes and crashed on address 0 there
+     * (docs/pitfalls.md, true-sim/engine#456).
+     */
+    public long absentAddress() {
+        return absent.deviceAddress() | ABSENT_BIT;
+    }
+
     /** Whether swapchains can be created on this device. */
     public boolean canPresent() {
         return swapchains;
@@ -965,6 +988,7 @@ public final class VulkanDevice implements AutoCloseable {
             return;
         }
         waitIdle();
+        absent.close();
         if (children != null) {
             synchronized (children) {
                 if (!children.isEmpty()) {

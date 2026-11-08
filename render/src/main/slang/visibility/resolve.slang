@@ -17,8 +17,8 @@ public struct ShadePush
 {
     View* view;
     SceneTable* scene;         // the frame's scene buffers (common.slang's SceneTable)
-    LightListHeader* lights;   // the frame's light list; null: the sun
-    IndirectLight* indirect;   // the view's indirect-light table (indirect.slang); null: the constant sky
+    LightListHeader* lights;   // the frame's light list; absent: the sun
+    IndirectLight* indirect;   // the view's indirect-light table (indirect.slang); absent: the constant sky
     uint ids;                  // storage slot of the IDs (uint2)
     uint color;                // storage slot of the color
     uint size;                 // width in the low 16 bits, height in the high
@@ -26,7 +26,7 @@ public struct ShadePush
     float3 clear;              // the color behind everything
     uint bin;                  // shading: the bin this pass shades (a type and FEATURES); classification: the
                                // uints from one bin's list to the next (full-image tiles: the region may be smaller)
-    uint* classicIndices;      // the classic LOD path's indices, as the pool's triangles lie (null: no such path)
+    uint* classicIndices;      // the classic LOD path's indices, as the pool's triangles lie (absent: no such path)
     uint* tiles;               // classification: the first bin's tile list; shading: this pass's bin's
     uint normal;               // with SURFACES, storage slots of the surface outputs (surfaces.slang): the normal,
     uint material;             // F0 and roughness,

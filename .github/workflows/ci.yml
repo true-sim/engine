@@ -74,6 +74,7 @@ jobs:
           path: |
             */build/reports
             */build/test-results
+            */hs_err_pid*.log
 
   shard:
     needs: changes
@@ -129,8 +130,43 @@ jobs:
             */build/test-results
             */hs_err_pid*.log
 
+  # GPU-assisted validation (TRUESIM_GPU_ASSISTED_VALIDATION, README "Building"): the layer instruments the shaders
+  # and reports reads and writes through buffer device addresses outside every buffer, unaligned pointer loads and bad
+  # bindless indices, which plain validation cannot see. Several times slower: a subset, failing on any validation
+  # error. Left out until #458 explains them, as they crash the JVM under GPU-AV on lavapipe only (SIGSEGV in its JIT'd
+  # code; clean under GPU-AV on an RX 9070 XT): MeshletRendererTest and CameraViewGpuTest (run 42513422506), the
+  # ray-traced ShadowsTest cases (an invalid acceleration structure reference, then the crash; run 42512115646), and,
+  # not tried here yet, MotionVectorsTest, GpuPickingTest, SegmentTracingTest, ProbeVolumeTest, RadianceCascadesTest.
+  gpu-av:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-26.04
+    env:
+      TRUESIM_GPU_ASSISTED_VALIDATION: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: true-sim/build-logic/.github/actions/setup-vulkan@f4782de5833f480e29f60fe659d96b07e2f77f51 # main, Mesa 26.2.6
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 27
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Tests under GPU-assisted validation
+        run: |
+          ./gradlew --continue :engine-vulkan:test --tests '*VulkanTest' --tests '*SkippedLoadTest' \
+            :engine-render:test --tests '*ClusteredLightsTest' --tests '*DisplayTransformTest' \
+            :engine-scene:test --tests '*CustomPassTest' --tests '*CameraAndLightSyncTest'
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reports-gpu-av
+          path: |
+            */build/reports/tests
+            */build/test-results
+            */hs_err_pid*.log
+
   build:
-    needs: [changes, modules, shard]
+    needs: [changes, modules, shard, gpu-av]
     if: always()
     runs-on: ubuntu-26.04
     steps:
@@ -138,7 +174,7 @@ jobs:
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          echo "changes, modules, shards: $RESULTS"
+          echo "changes, modules, shards, gpu-av: $RESULTS"
           for result in $RESULTS; do
             if [ "$result" != success ] && [ "$result" != skipped ]; then
               exit 1

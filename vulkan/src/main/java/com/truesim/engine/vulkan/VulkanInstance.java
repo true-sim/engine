@@ -143,8 +143,11 @@ public final class VulkanInstance implements AutoCloseable {
             if (debug) {
                 extensions.add(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
             }
-            if (layer && builder.synchronization) {
-                extensions.add(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME); // the layer's own
+            boolean gpuAssisted = builder.gpuAssisted || "true".equals(System.getenv(GPU_ASSISTED_VARIABLE));
+            boolean synchronization = builder.synchronization
+                || "true".equals(System.getenv(SYNCHRONIZATION_VARIABLE));
+            if (layer && (synchronization || gpuAssisted)) {
+                extensions.add(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME); // the layer's own, for either feature
             }
             boolean portability = Platform.get() == Platform.MACOSX
                 && available.contains(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
@@ -174,9 +177,6 @@ public final class VulkanInstance implements AutoCloseable {
             if (debug) {
                 info.pNext(messengerInfo.address()); // also covers instance creation and destruction
             }
-            boolean gpuAssisted = builder.gpuAssisted || "true".equals(System.getenv(GPU_ASSISTED_VARIABLE));
-            boolean synchronization = builder.synchronization
-                || "true".equals(System.getenv(SYNCHRONIZATION_VARIABLE));
             if (layer && (synchronization || gpuAssisted)) {
                 IntBuffer enabled = stack.mallocInt(2);
                 if (synchronization) {

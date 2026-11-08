@@ -18,6 +18,7 @@ module paths;
 __exported import meshlets.common;
 __exported import raytracing;
 __exported import lights.world;
+__exported import pathtracing.emitters;
 import shadows.rays;
 
 /** One path between bounces: 80 bytes. Positions relative to the view's camera. */
@@ -68,6 +69,12 @@ public static const uint PATH_BOUNDED = 1u << 24;
  * every finer cascade's together), the light nearer to the probe than they reach.
  */
 public static const uint PATH_NEAR = 1u << 25;
+/**
+ * With PATH_PROBES: a probe's light sample of an emitter (pathtracing/emitters.slang), not one of its rays: its
+ * throughput's x holds the instance it chose (as a float's bits). It records, at its texel, the emission it met on that
+ * instance weighed as one sample of the probe's irradiance, and at the texel after it its direction; else nothing.
+ */
+public static const uint PATH_EMITTER = 1u << 26;
 
 /** Groups per row of the 2D dispatches over paths: (min(groups, this), rows). */
 public static const uint PATH_ROW = 1024;
@@ -81,18 +88,19 @@ public struct PathPush
     public View* view;
     public SceneTable* scene;
     public uint64_t rays;              // RayScene*: the top level and its triangles
-    public LightListHeader* lights;    // the view's light list; null: the sun
-    public IndirectLight* indirect;    // the view's indirect-light table (its environment); null: the constant sky
-    public WorldLightGrid* world;      // the lights by world grid (lights/world.slang); null: every light of the list
+    public LightListHeader* lights;    // the view's light list; absent: the sun
+    public IndirectLight* indirect;    // the view's indirect-light table (its environment); absent: the constant sky
+    public WorldLightGrid* world;      // the lights by world grid (lights/world.slang); absent: every light of the list
     public float3 offset;              // the camera's position less the top level's origin
     public uint accumulation;          // storage slot: the radiance added up (rgb)
     public uint size;                  // the region: width, height in the high 16 bits (PATH_INTERVALS: see there)
-    public uint bounce;
-    public uint binCount;              // shading bins: hits of a later one shade as bin 0
-    public uint bin;                   // shading: the bin shaded; resolve: the output's storage slot
+    public uint shading;               // shading: the bin shaded (bits 0-15); the shading bins (bits 16-31): hits of a
+                                       // later one shade as bin 0
+    public EmitterList* emitters;      // PATH_PROBES: the emitters light samples chose from (never null: an empty list)
     public uint sample;                // samples taken before this frame's (0: the accumulation starts anew)
-    public uint limits;                // the bounce limit (bits 0-7), Russian roulette's first bounce (bits 8-15)
-    public uint list;                  // words from the bin table to the slot list
+    public uint limits;                // the bounce limit (bits 0-7), Russian roulette's first bounce (bits 8-15), the
+                                       // modes (PATH_PROBES, PATH_INTERVALS), this pass's bounce (bits 24-31)
+    public uint list;                  // words from the bin table to the slot list; resolve: the output's storage slot
     public uint lightRays;             // words from counts to the light rays' trace record (shadows/rays.slang's
                                        // ShadowTrace, LightRays): shadow rays meeting a type with a geometry hook wait
                                        // there for its keep(); 0: none (no such type: they never do)
@@ -104,6 +112,24 @@ public ConstantBuffer<PathPush> push;
 /** The features a variant of a shading pass shows (FEATURE_*): set when its pipeline is made. */
 [vk::constant_id(0)]
 public const uint FEATURES = 0;
+
+/** This pass's bounce: the limits' bits 24-31. */
+public uint pushBounce()
+{
+    return push.limits >> 24;
+}
+
+/** The shading bins: hits of a later one shade as bin 0. */
+public uint pushBinCount()
+{
+    return push.shading >> 16;
+}
+
+/** The bin a shading pass shades. */
+public uint pushBin()
+{
+    return push.shading & 0xffff;
+}
 
 // ---------------------------------------------------------------- the bin table, per bounce
 //
@@ -117,7 +143,7 @@ public uint binCount(uint bin)
 
 public uint binOffset(uint bin)
 {
-    return push.bins[4 * push.binCount + bin];
+    return push.bins[4 * pushBinCount() + bin];
 }
 
 /** The thread's path index in a 2D dispatch over paths. */
@@ -258,7 +284,7 @@ float3 rotateByQuaternion(float4 q, float3 v)
 public float3 environment(float3 direction)
 {
     IndirectLight* t = push.indirect;
-    if (t == nullptr)
+    if (!given(t))
     {
         return SKY_IRRADIANCE / PI;
     }
@@ -491,12 +517,12 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
  */
 public float3 directLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uint rng)
 {
-    if (push.world != nullptr)
+    if (given(push.world))
     {
         return worldLight(s, p, ng, v, view, rng);
     }
     LightListHeader* list = push.lights;
-    if (list == nullptr)
+    if (!given(list))
     {
         Light sun;
         sun.type = DIRECTIONAL;
@@ -543,7 +569,7 @@ public void accumulate(uint pixel, float3 radiance)
 void continuePath(PathState path, float3 origin, float3 direction, float3 throughput, uint flags)
 {
     uint slot;
-    InterlockedAdd(push.counts[push.bounce + 1], 1, slot);
+    InterlockedAdd(push.counts[pushBounce() + 1], 1, slot);
     PathState next = path;
     next.origin = origin;
     next.direction = direction;
@@ -904,6 +930,11 @@ public float probeRayEnd(PathState path)
 /** Records probe ray `path` meeting nothing: the environment, or within a bounded interval no light. */
 public void recordProbeMiss(PathState path)
 {
+    if ((path.flags & PATH_EMITTER) != 0)
+    {
+        recordEmitterSample(path, 0);
+        return;
+    }
     bool bounded = (push.limits & PATH_INTERVALS) != 0 && (path.flags & PATH_BOUNDED) != 0;
     recordProbeRay(path.pixel, bounded ? float3(0) : probeEnvironment(path.direction), PROBE_MISSED);
 }
@@ -918,11 +949,22 @@ public void recordProbeMiss(PathState path)
 public float3 probeEnvironment(float3 direction)
 {
     IndirectLight* t = push.indirect;
-    if (t == nullptr || (t[0].flags & INDIRECT_ENVIRONMENT) == 0)
+    if (!given(t) || (t[0].flags & INDIRECT_ENVIRONMENT) == 0)
     {
         return environment(direction);
     }
     return specularLight(t, direction, t[0].missRoughness);
+}
+
+/**
+ * Writes light sample `path`'s part of the irradiance (the emission it met, weighed; 0: none) into its texel, and its
+ * direction into the texel after it: both always, so the blend reads nothing of another frame.
+ */
+public void recordEmitterSample(PathState path, float3 light)
+{
+    uint2 p = uint2(path.pixel & 0xffff, path.pixel >> 16);
+    images[push.accumulation][p] = float4(light, 0);
+    images[push.accumulation][p + uint2(1, 0)] = float4(path.direction, 0);
 }
 
 /** Writes a probe ray's light and distance (negative: a back face) into its texel of the ray image. */
@@ -964,9 +1006,15 @@ public void shadeProbeHit<M : IMaterial>(uint index, uint features)
     MaterialRef ref = { push.scene[0].materials, in.material };
     Material m = ref.slot();
     bool front = dot(ng, v) > 0;
+    bool lightSample = (flags & PATH_EMITTER) != 0; // a light sample: only the emission of the emitter it chose
     path.cone = coneWidth(path, view);
     if (!front && !materialDoubleSided(m))
     {
+        if (lightSample)
+        {
+            recordEmitterSample(path, 0);
+            return;
+        }
         recordProbeRay(path.pixel, 0, -0.2 * travelled);
         return;
     }
@@ -1003,6 +1051,12 @@ public void shadeProbeHit<M : IMaterial>(uint index, uint features)
     float3 side = front ? ng : -ng;
     surfaceHooksAt(site, s, p, side, v, m.header); // the view's surface hooks, as rasterizing sees them
     through = through || (materialBlended(m) && random01(rng) >= s.alpha);
+    if (through && lightSample)
+    {
+        // A light sample ends at the first surface: the rays' share of what lies behind holes is theirs whole
+        recordEmitterSample(path, 0);
+        return;
+    }
     if (through)
     {
         // A hole, or what a blended surface lets pass: the ray goes on, its distance kept
@@ -1028,6 +1082,22 @@ public void shadeProbeHit<M : IMaterial>(uint index, uint features)
     {
         unlit = materialFeature<UnlitParameters>(ref, FEATURE_UNLIT).amount;
     }
+    // Emission met first along a probe's ray from the probe itself: weighed against the light samples of listed
+    // emitters (the balance heuristic), which take the rest of it; met by a light sample on the emitter it chose: its
+    // part. Behind holes (a later bounce) and along radiance cascades' intervals, rays take it whole.
+    float3 emitted = emissive * (1 - unlit);
+    bool weighed = (push.limits & PATH_INTERVALS) == 0 && bounce == 0;
+    if (lightSample)
+    {
+        bool chosen = path.instance == asuint(path.throughput.x);
+        recordEmitterSample(path, chosen && any(emitted > 0)
+            ? emitted * sampleEmissionWeight(push.emitters, path.instance, path.origin) : float3(0));
+        return;
+    }
+    if (weighed && any(emitted > 0))
+    {
+        emitted *= rayEmissionWeight(push.emitters, path.instance, path.origin);
+    }
     // Its emission, its lights (shadow rays), and the light from all around it: the volume's of the frame before
     // (further bounces), the environment's reflections as far as the volume's probes see the sky
     float3 reflectance;
@@ -1035,7 +1105,7 @@ public void shadeProbeHit<M : IMaterial>(uint index, uint features)
     float3 around = indirectLightWeights(push.indirect, site, s, v, p, side, reflectance, diffuseWeight);
     lightWeight = 1 - unlit;
     lightPixel = path.pixel;
-    float3 radiance = emissive * (1 - unlit) + s.albedo * unlit
+    float3 radiance = emitted + s.albedo * unlit
         + (1 - unlit) * (directLight(s, p, side, v, view, rng) + around);
     recordProbeRay(path.pixel, radiance, travelled);
 }
@@ -1044,11 +1114,11 @@ public void shadeProbeHit<M : IMaterial>(uint index, uint features)
 public void shadeHits<M : IMaterial>(uint3 group, uint3 thread)
 {
     uint index = pathIndex(group, thread);
-    if (index >= binCount(push.bin))
+    if (index >= binCount(pushBin()))
     {
         return;
     }
-    uint path = push.bins[push.list + binOffset(push.bin) + index];
+    uint path = push.bins[push.list + binOffset(pushBin()) + index];
     if ((push.limits & PATH_PROBES) != 0)
     {
         shadeProbeHit<M>(path, FEATURES);

@@ -184,7 +184,7 @@ public final class MotionVectors implements Technique {
         push.view(this.ids.address()).scene(renderer.scene().tableAddress())
             .previous(ctx.address(previous)).deformed(deformation.previousTableAddress())
             .previousPositions(deformation.previousPositionsAddress())
-            .classicIndices(classic == null ? 0 : classic.indicesAddress())
+            .classicIndices(classic == null ? ctx.absent() : classic.indicesAddress())
             .ids(ctx.storage(ids.color())).motion(ctx.storage(image))
             .size(region).previousSize(previousSize).meshCount(deformation.previousTableMeshes())
             .tiles(ctx.address(tiles)).lists(lists).stride(stride).list(0);

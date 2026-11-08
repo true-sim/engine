@@ -833,7 +833,7 @@ public final class Deformation {
         if (displacement.size() > 0) {
             // Displaced copies: posed (or copied from their sources), then moved by their types, their spheres after
             displacement.record(ctx, buffers, scene, skinnedNow, keptAt, keeping, drawn,
-                previousPositions == null ? 0 : previousPositions.deviceAddress());
+                previousPositions == null ? device.absentAddress() : previousPositions.deviceAddress());
         }
         for (int i = 0; i < copyCount; i++) {
             int copy = copies[i];
@@ -865,7 +865,7 @@ public final class Deformation {
     private DeformPush set(DeformPush push, int copy, long matrixBase) {
         int b = 7 * copy;
         int source = pool.deformedFrom(copy);
-        push.morph(targetCount[copy] > 0 ? morphData.deviceAddress() + morphStart[source] : 0)
+        push.morph(targetCount[copy] > 0 ? morphData.deviceAddress() + morphStart[source] : device.absentAddress())
             .joints(jointCount[copy]).targets(targetCount[copy]);
         push.previous(matrixBase + 4L * MATRIX_FLOATS * (blended[copy] ? previousMatrix[copy] : firstMatrix[copy]))
             .blend(blended[copy] ? factor[copy] : -1);

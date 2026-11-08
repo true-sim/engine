@@ -145,7 +145,9 @@ public final class RenderView implements AutoCloseable {
         putLong(ViewLayout.LISTS_EXPAND_COMMAND, expandCommand.deviceAddress());
         putLong(ViewLayout.LISTS_DRAW_COMMAND, drawCommand.deviceAddress());
         putLong(ViewLayout.LISTS_VISIBLE_COUNT, drawCount.deviceAddress());
-        putLong(ViewLayout.VISIBILITY, visibility == null ? 0 : visibility.deviceAddress());
+        putLong(ViewLayout.VISIBILITY, visibility == null ? device.absentAddress() : visibility.deviceAddress());
+        putLong(ViewLayout.IDS, device.absentAddress()); // every instance; never 0, which lavapipe may load from
+        putLong(ViewLayout.HIGHLIGHTS, device.absentAddress());
         writeHooksAddress(); // a valid block from the start: shaders never load through null (pitfalls.md)
     }
 
@@ -413,14 +415,14 @@ public final class RenderView implements AutoCloseable {
      */
     public RenderView instances(long ids, int count) {
         checkOpen();
-        putLong(ViewLayout.IDS, ids);
+        putLong(ViewLayout.IDS, ids == 0 ? device.absentAddress() : ids); // never 0 (pitfalls.md)
         putInt(ViewLayout.ID_COUNT, ids == 0 ? 0 : count);
         return this;
     }
 
     private RenderView highlights(long flags, int count, int mode) {
         checkOpen();
-        putLong(ViewLayout.HIGHLIGHTS, flags);
+        putLong(ViewLayout.HIGHLIGHTS, flags == 0 ? device.absentAddress() : flags); // never 0 (pitfalls.md)
         putInt(ViewLayout.HIGHLIGHT_COUNT, flags == 0 ? 0 : count);
         highlightMode = flags != 0 ? mode : 0;
         putInt(ViewLayout.FLAGS, flags());

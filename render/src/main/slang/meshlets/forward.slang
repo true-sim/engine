@@ -16,8 +16,8 @@ public struct ForwardPush
 {
     public View* view;
     public SceneTable* scene;        // common.slang's SceneTable: the frame's scene buffers
-    public LightListHeader* lights;  // at 16: the light list, or null: the sun
-    public IndirectLight* indirect;  // at 24: the view's indirect-light table (indirect.slang), or null: the constant sky
+    public LightListHeader* lights;  // at 16: the light list, or absent: the sun
+    public IndirectLight* indirect;  // at 24: the view's indirect-light table (indirect.slang), or absent: the constant sky
     public VisibleMeshlet* visible;
     public uint* visibleCount;
     public uint bin;                 // the raster bin drawn

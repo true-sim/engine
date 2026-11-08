@@ -219,7 +219,7 @@ public final class VisibilityBufferShading implements Technique {
                 }
                 long list = tableBytes + listBytes * listOf[bin];
                 push(shadePush, ctx, ids, color, lights, size(ctx, ids), shade.length, bin, ctx.address(tiles) + list)
-                    .indirect(indirect == null ? 0 : ctx.address(indirect.table()));
+                    .indirect(indirect == null ? ctx.absent() : ctx.address(indirect.table()));
                 if (surfaces != null) {
                     shadePush.normal(ctx.storage(surfaces.normal())).material(ctx.storage(surfaces.material()))
                         .reflectance(ctx.storage(surfaces.reflectance())).diffuse(ctx.storage(surfaces.diffuse()));
@@ -256,14 +256,14 @@ public final class VisibilityBufferShading implements Technique {
         int bin, long tiles) {
         return push.view(view.view().address())
             .scene(renderer.scene().tableAddress())
-            .lights(lights == null ? 0 : ctx.address(lights))
+            .lights(ctx.addressOrAbsent(lights))
             .ids(ctx.storage(ids))
             .color(color == null ? 0 : ctx.storage(color))
             .size(size)
             .bins(bins)
             .clear(clear[0], clear[1], clear[2])
             .bin(bin)
-            .classicIndices(classic == null ? 0 : classic.indicesAddress())
+            .classicIndices(classic == null ? ctx.absent() : classic.indicesAddress())
             .tiles(tiles);
     }
 }

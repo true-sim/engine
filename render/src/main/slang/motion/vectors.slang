@@ -33,7 +33,7 @@ public struct MotionPush
     public Instance* previous;          // the instances as the frame before drew them (this frame's on the first)
     public DeformedBefore* deformed;    // per pool mesh; or null: no deformed copies kept
     public uint2* previousPositions;    // the skinned copies' previous vertices, quantized
-    public uint* classicIndices;        // the classic LOD path's indices (null: no such path)
+    public uint* classicIndices;        // the classic LOD path's indices (absent: no such path)
     public uint* tiles;                 // per type with geometry hooks a tile list (4 words, then tiles x | y << 16)
     public uint ids;                    // storage slot of the IDs (uint2)
     public uint motion;                 // storage slot of the motion (two floats)
@@ -67,7 +67,7 @@ float3 barycentrics(float3 direction, float3 a, float3 b, float3 c)
 /** Pool vertex `vertex` of `mesh` (number `meshIndex`) in its mesh's space as the frame before drew it. */
 float3 previousLocal(MeshEntry mesh, uint meshIndex, uint vertex)
 {
-    if (push.deformed != nullptr && meshIndex < push.meshCount)
+    if (given(push.deformed) && meshIndex < push.meshCount)
     {
         DeformedBefore* d = push.deformed + meshIndex;
         if (d[0].valid != 0)

@@ -376,10 +376,13 @@ public final class DisplayTransform implements OutputTransform {
             if (ui != null) {
                 pass.read(ui, Access.SAMPLED_COMPUTE);
             }
-            if (exposure != null) {
-                pass.read(exposure, BufferAccess.STORAGE_READ);
-            }
-            pass.record(ctx -> encode(ctx, pipeline, push, settings, scene, ui, exposure, encoded, modes, steps));
+            // Never a null address, even unread: lavapipe runs a load through a push constant's pointer in a branch
+            // the dispatch skips, after an early return, and crashed on 0 here (docs/pitfalls.md, #456). Without a
+            // technique's exposure, the shader gets a buffer of its own (zeroed, never read).
+            Buffer exposureAt = exposure != null ? exposure
+                : g.persistentBuffer("display exposure stand-in, " + name + encoding, 16);
+            pass.read(exposureAt, BufferAccess.STORAGE_READ);
+            pass.record(ctx -> encode(ctx, pipeline, push, settings, scene, ui, exposureAt, encoded, modes, steps));
             g.provide(target, encoded);
         }
 
@@ -390,7 +393,7 @@ public final class DisplayTransform implements OutputTransform {
             float whitePoint = curve == Curve.REINHARD_EXTENDED ? REINHARD_EXTENDED.config(settings).whitePoint() : 1;
             push.source(ctx.sampled(scene)).target(ctx.storage(encoded)).sourceWidth(ctx.regionWidth(scene))
                 .sourceHeight(ctx.regionHeight(scene)).modes(modes | curve.ordinal() << 4 | look << 8)
-                .exposure(settings.get(EXPOSURE)).exposureAt(exposure == null ? 0 : ctx.address(exposure))
+                .exposure(settings.get(EXPOSURE)).exposureAt(ctx.address(exposure))
                 .paperWhite(settings.get(PAPER_WHITE)).peak(settings.get(PEAK)).whitePoint(whitePoint)
                 .ditherSteps(settings.get(DITHER) ? steps : 0).frame((int) ctx.frame())
                 .ui(ui == null ? NO_UI : ctx.sampled(ui)).uiBrightness(settings.get(UI_BRIGHTNESS));

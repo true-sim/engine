@@ -90,6 +90,12 @@ subprojects {
     // LWJGL and mapped GPU memory use native access.
     tasks.withType<Test>().configureEach {
         jvmArgs("--enable-native-access=ALL-UNNAMED")
+        // What GPU and which checks the tests ran with are inputs: a run on another driver or with GPU-assisted
+        // validation is not up to date because one without passed (it was, and reported the old run's results).
+        for (variable in listOf("TRUESIM_GPU_ASSISTED_VALIDATION", "TRUESIM_SYNCHRONIZATION_VALIDATION", "TRUESIM_GPU",
+            "VK_DRIVER_FILES", "VK_ICD_FILENAMES")) {
+            inputs.property(variable, providers.environmentVariable(variable).orElse(""))
+        }
     }
     val part = parts[name]
     if (part != null) {

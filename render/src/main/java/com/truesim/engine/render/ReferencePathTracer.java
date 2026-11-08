@@ -10,6 +10,7 @@ import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.render.layout.EmitterListLayout;
 import com.truesim.engine.render.layout.PathPush;
 import com.truesim.engine.render.shadows.TopLevel;
 import com.truesim.engine.settings.EngineSettings;
@@ -233,8 +234,13 @@ public final class ReferencePathTracer implements Technique {
         for (int i = 0; i < push.length; i++) {
             push[i] = new PathPush();
         }
+        // No emitters sampled (camera paths find emission by chance, unbiased): an empty list for the hit shaders'
+        // pointer (pathtracing/emitters.slang), never null
+        Buffer emitters = g.createBuffer("reference emitters", EmitterListLayout.BYTES);
         g.pass("reference start").write(counts, BufferAccess.TRANSFER_DST).write(binTables, BufferAccess.TRANSFER_DST)
+            .write(emitters, BufferAccess.TRANSFER_DST)
             .record(ctx -> {
+                ctx.fill(emitters, 0);
                 if (light != null) {
                     light.reset(ctx); // every frame: no light rays waiting in one that takes no sample
                 }
@@ -297,7 +303,8 @@ public final class ReferencePathTracer implements Technique {
                 .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ)
                 .read(current, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
                 .write(counts, BufferAccess.STORAGE_WRITE).read(binTables, BufferAccess.INDIRECT)
-                .read(binTables, BufferAccess.STORAGE_READ).write(accumulation, Access.STORAGE_WRITE);
+                .read(binTables, BufferAccess.STORAGE_READ).write(accumulation, Access.STORAGE_WRITE)
+                .read(emitters, BufferAccess.STORAGE_READ);
             if (lights != null) {
                 shadePass.read(lights, BufferAccess.STORAGE_READ);
             }
@@ -315,7 +322,8 @@ public final class ReferencePathTracer implements Technique {
                 if (single != null) { // every hit by one shader
                     ctx.dispatch(single, push(shadePush, ctx, color, accumulation, current, next, binTables, counts,
                         lights, indirect, table, tablesBytes, bounce, bins, 0, settings)
-                        .world(world == null ? 0 : ctx.address(world.grid())).lightRays(lightWords), ROW,
+                        .world(world == null ? ctx.absent() : ctx.address(world.grid())).lightRays(lightWords)
+                        .emitters(ctx.address(emitters)), ROW,
                         groupRows(ctx, color), 1);
                     return;
                 }
@@ -323,7 +331,8 @@ public final class ReferencePathTracer implements Technique {
                     if (shade[bin] != null) {
                         ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, color, accumulation, current, next,
                             binTables, counts, lights, indirect, table, tablesBytes, bounce, bins, bin, settings)
-                            .world(world == null ? 0 : ctx.address(world.grid())).lightRays(lightWords), binTables,
+                            .world(world == null ? ctx.absent() : ctx.address(world.grid()))
+                            .lightRays(lightWords).emitters(ctx.address(emitters)), binTables,
                             table + 16L * bin);
                     }
                 }
@@ -337,7 +346,7 @@ public final class ReferencePathTracer implements Technique {
             .record(ctx -> {
                 int taken = samplesTaken(ctx, color, settings);
                 ctx.dispatch(resolve, push(resolvePush, ctx, color, accumulation, null, null, null, null, null,
-                    null, 0, tablesBytes, 0, bins, ctx.storage(color), settings).sample(taken),
+                    null, 0, tablesBytes, 0, bins, 0, settings).sample(taken).list(ctx.storage(color)),
                     (ctx.regionWidth(color) + 7) / 8, (ctx.regionHeight(color) + 7) / 8, 1);
             });
         g.provide(Keys.SCENE_COLOR, color);
@@ -414,20 +423,20 @@ public final class ReferencePathTracer implements Technique {
         int bounce, int bins, int bin, EngineSettings settings) {
         GpuScene scene = renderer.scene();
         int index = sampleIndex(ctx, color, settings);
-        return push.paths(paths == null ? 0 : ctx.address(paths)).next(next == null ? 0 : ctx.address(next))
-            .bins(binTables == null ? 0 : ctx.address(binTables) + table)
-            .counts(counts == null ? 0 : ctx.address(counts))
+        return push.paths(ctx.addressOrAbsent(paths)).next(ctx.addressOrAbsent(next))
+            .bins(ctx.addressOrAbsent(binTables) + table)
+            .counts(ctx.addressOrAbsent(counts))
             .view(view.view().address()).scene(scene.tableAddress())
             .rays(rayTracing.sceneAddress(scene))
-            .lights(lights == null ? 0 : ctx.address(lights))
-            .indirect(indirect == null ? 0 : ctx.address(indirect.table())).world(0)
+            .lights(ctx.addressOrAbsent(lights))
+            .indirect(indirect == null ? ctx.absent() : ctx.address(indirect.table())).world(ctx.absent())
             .offset((float) (view.view().position(0) - rayTracing.origin(0)),
                 (float) (view.view().position(1) - rayTracing.origin(1)),
                 (float) (view.view().position(2) - rayTracing.origin(2)))
             .accumulation(accumulation == null ? 0 : ctx.storage(accumulation))
             .size(ctx.regionWidth(color) | ctx.regionHeight(color) << 16)
-            .bounce(bounce).binCount(bins).bin(bin).sample(Math.max(index, 0))
-            .limits(settings.get(BOUNCES) & 0xff | (settings.get(ROULETTE) & 0xff) << 8)
+            .shading(bin | bins << 16).sample(Math.max(index, 0))
+            .limits(settings.get(BOUNCES) & 0xff | (settings.get(ROULETTE) & 0xff) << 8 | bounce << 24)
             .list((int) ((tablesBytes - table) / 4)); // the slot list follows every bounce's table
     }
 

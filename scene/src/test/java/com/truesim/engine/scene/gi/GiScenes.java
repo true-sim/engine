@@ -34,6 +34,8 @@ import java.util.function.Consumer;
  *   looking at the wall and its corners: the reference is black, any light is a leak;
  *   <li>{@code bleeding}: a closed room of strongly colored walls and floor lit by a ceiling light;
  *   <li>{@code screens}: a dark closed room lit only by emissive panels (a blue screen, a warm strip);
+ *   <li>{@code bulbs}: a dark closed room lit only by two small bright emissive boxes (bulbs 10 cm across, as the
+ *   dusk film's lamps), which rays meet by chance;
  *   <li>{@code toggle}: a closed room lit by a point light, on in state 0 and off in 1;
  *   <li>{@code door}: a closed room, sunlight outside its door, the door shut in state 0 and open in 1;
  *   <li>{@code mover}: a room lit through a window, a red block beside a white wall, moved 2 m in state 1;
@@ -240,6 +242,15 @@ public final class GiScenes {
             s.box(s.matte(0, 0, 0, 3.0f, 1.6f, 0.6f), 2.92, 0.1, -4.5, 2.98, 0.25, -1.5);  // a warm strip
             s.box(s.matte(0.4f, 0.3f, 0.25f), -1.2, 0, -3.2, 1.2, 0.5, -2.4);              // a couch
             s.look(-1.8, 1.3, -0.5, 0.45, -0.15, -1, 70);
+        });
+        all.put("bulbs", (s, state) -> {
+            int white = s.matte(0.8f, 0.8f, 0.8f);
+            int floor = s.matte(0.55f, 0.5f, 0.45f);
+            s.room(-3, 0, -6, 3, 3, 0, 0.2, new int[] {white, white, floor, white, white, white}, null);
+            s.box(s.matte(0, 0, 0, 60, 45, 30), -1.65, 1.75, -4.65, -1.55, 1.85, -4.55); // a warm bulb by the wall
+            s.box(s.matte(0, 0, 0, 30, 40, 60), 1.45, 0.95, -2.85, 1.55, 1.05, -2.75);   // a cool one, lower
+            s.box(s.matte(0.4f, 0.3f, 0.25f), -0.6, 0, -3.8, 0.6, 0.7, -3.0);            // a block for shadow
+            s.look(-0.2, 1.6, -0.4, 0.05, -0.25, -1, 70);
         });
         all.put("toggle", (s, state) -> {
             int white = s.matte(0.8f, 0.8f, 0.8f);

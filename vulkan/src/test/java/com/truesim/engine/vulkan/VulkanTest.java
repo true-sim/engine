@@ -481,6 +481,31 @@ class VulkanTest {
     }
 
     @Test
+    void addressedBuffersStartWhereEveryShaderLoadMayBeAligned() {
+        // Slang marks a pointer's or a 64-bit value's load Aligned 8 and a vector's up to 16; the driver may place a
+        // small buffer at 4 bytes (the RX 9070 XT did, which GPU-assisted validation reports as
+        // VUID-RuntimeSpirv-PhysicalStorageBuffer64-06315).
+        int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        try (VulkanInstance instance = headless();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+            List<GpuBuffer> buffers = new ArrayList<>();
+            try {
+                for (int size = 4; size <= 600; size += 12) {
+                    buffers.add(GpuBuffer.deviceLocal(device, size, usage));
+                    buffers.add(GpuBuffer.hostVisible(device, size, usage));
+                    buffers.add(GpuBuffer.hostWritten(device, size, usage));
+                }
+                for (GpuBuffer buffer : buffers) {
+                    assertThat(buffer.deviceAddress() % GpuBuffer.ADDRESS_ALIGNMENT).as(buffer + " at 0x%x",
+                        buffer.deviceAddress()).isZero();
+                }
+            } finally {
+                buffers.forEach(GpuBuffer::close);
+            }
+        }
+    }
+
+    @Test
     void gpuAssistedValidationRunsWork() {
         VulkanInstance instance;
         try {

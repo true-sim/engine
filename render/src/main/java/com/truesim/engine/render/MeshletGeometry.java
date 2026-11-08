@@ -180,7 +180,7 @@ public final class MeshletGeometry implements GeometryProvider {
                     shadows.prepare(ctx);
                 }
                 renderer.drawTypedAttached(ctx.unsafe().commands(), view, late, address(ctx, lights),
-                    indirect == null ? 0 : ctx.address(indirect.table()), typed);
+                    indirect == null ? ctx.absent() : ctx.address(indirect.table()), typed);
             });
             case IDS -> pass.record(ctx -> {
                 if (geometry != null) {
@@ -254,6 +254,6 @@ public final class MeshletGeometry implements GeometryProvider {
     }
 
     private static long address(PassContext ctx, Buffer lights) {
-        return lights == null ? 0 : ctx.address(lights);
+        return ctx.addressOrAbsent(lights);
     }
 }

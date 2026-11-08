@@ -9,9 +9,12 @@
 //   rotation new each frame, and a fixed set never turned, for relocation and classification; inactive probes send
 //   only those) as paths of the reference path tracer's wavefront (pathtracing/paths.slang, its probe mode), whose
 //   hits are shaded by their material type with the same BRDF, lights and environment, the volume's own light of the
-//   frame before giving the further bounces.
-// - blendMain, a group per probe: the rays' light into the probe's irradiance (cosine-weighted, as irradiance / pi)
-//   and sky visibility per octahedral texel, the distances into mean and mean square per texel (a power of the cosine),
+//   frame before giving the further bounces. Beside them, light samples of the frame's emitters (next-event
+//   estimation, pathtracing/emitters.slang): each an emitter chosen and a direction into its bounding sphere's cone,
+//   counting only that emitter's emission; the emission the turned rays meet and theirs are weighed by the balance
+//   heuristic, so a small bright emitter lights every update by its share, not only those whose rays met it.
+// - blendMain, a group per probe: the rays' light into the probe's irradiance (cosine-weighted, as irradiance / pi),
+//   the light samples' parts added by the cosine, and sky visibility per octahedral texel, the distances into mean and mean square per texel (a power of the cosine),
 //   the history weighed by one over its frames (capped at maxFrames: the still scene's lag), and restarted where this
 //   update disagrees with it beyond its noise (adaptive hysteresis: changes nothing announced); borders copied for
 //   bilinear filtering across the octahedron's seams; the probe relocated off nearby surfaces and classified (inside
@@ -19,6 +22,7 @@
 import probes.volume;
 import surfaces;
 import bindless;
+import pathtracing.emitters;
 
 /** A ray as the path tracer's wavefront takes it: pathtracing/paths.slang's PathState, the same 80 bytes. */
 struct ProbePath
@@ -69,6 +73,9 @@ struct ProbePush
     uint fresh;               // a probe whose history holds fewer updates updates every frame, budget or not
     uint variances;           // storage slot: per irradiance texel, the mean variance of its updates (their noise)
     float4 rotation;          // this frame's rotation of the rays (a unit quaternion)
+    EmitterList* emitters;    // the emitters light samples choose from (pathtracing/emitters.slang)
+    uint lightSamples;        // light samples per probe update, beside its rays (0: none); the ray image holds two
+                              // texels each, after the rays: the irradiance part found and the direction
 };
 
 [[vk::push_constant]]
@@ -88,6 +95,9 @@ static const uint PROBE_RESTARTED = 16;
 /** Probes per row of the ray image. */
 static const uint RAY_ROW = 32;
 static const uint MAX_RAYS = 256;
+static const uint MAX_LIGHT_SAMPLES = 32;
+/** paths.slang's PATH_EMITTER: a light sample, the instance it chose in its throughput's x. */
+static const uint PATH_EMITTER = 1u << 26;
 static const float MISSED = 10000; // a ray's distance where it met nothing
 
 /** The slot of probe `index` (as ordered in the states): its cascade and its place in the cascade's grid. */
@@ -233,10 +243,25 @@ float3 rayDirection(uint k)
     return rotateQ(push.rotation, fibonacci(float(k - fixed), float(push.rayCount - fixed)));
 }
 
-/** The ray image's texel of probe `index`'s ray `k`. */
+/** The ray image's texel of probe `index`'s ray `k` (from rayCount on, its light samples' texels, two each). */
 uint2 rayTexel(uint index, uint k)
 {
-    return uint2(k + push.rayCount * (index % RAY_ROW), index / RAY_ROW);
+    return uint2(k + (push.rayCount + 2 * push.lightSamples) * (index % RAY_ROW), index / RAY_ROW);
+}
+
+/** Whether light samples are taken this frame: some asked for, and emitters listed. */
+bool sampling()
+{
+    return push.lightSamples > 0 && push.emitters[0].count > 0;
+}
+
+/** PCG's output function over a state stepped linearly (as paths.slang's random01): a value in [0, 1). */
+float uniform01(inout uint state)
+{
+    state = state * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    word = (word >> 22u) ^ word;
+    return float(word >> 8) * (1.0 / 16777216.0);
 }
 
 [shader("compute")]
@@ -245,7 +270,7 @@ void generateMain(uint3 id : SV_DispatchThreadID)
 {
     uint k = id.x;
     uint index = id.y + id.z * 65535;
-    if (k >= push.rayCount || index >= probeCount())
+    if (k >= push.rayCount + push.lightSamples || index >= probeCount())
     {
         return;
     }
@@ -255,20 +280,41 @@ void generateMain(uint3 id : SV_DispatchThreadID)
     {
         return;
     }
+    if (k >= push.rayCount && !sampling())
+    {
+        return; // no emitters: the blend takes none of these texels either
+    }
     int3 probes = int3(push.volume[0].probes);
     uint cascade;
     float spacing;
     float3 position = gridPosition(index, probes, cascade, spacing) + states[index].offset;
-    uint slot;
-    InterlockedAdd(push.counts[0], 1, slot);
-    uint2 texel = rayTexel(index, k);
+    bool light = k >= push.rayCount;
+    uint2 texel = rayTexel(index, light ? push.rayCount + 2 * (k - push.rayCount) : k);
     ProbePath path;
     path.origin = position + push.toAnchor;
-    path.direction = rayDirection(k);
-    path.pixel = texel.x | texel.y << 16;
+    path.direction = light ? float3(0, 0, 1) : rayDirection(k);
     path.flags = 0;
     path.throughput = 1;
     path.rng = seed(texel, push.frame);
+    if (light)
+    {
+        // A light sample: an emitter chosen, a direction into its sphere's cone
+        uint rng = path.rng;
+        float3 u = float3(uniform01(rng), uniform01(rng), uniform01(rng));
+        float3 direction;
+        uint instance;
+        if (!sampleEmitter(push.emitters, path.origin, u, direction, instance))
+        {
+            return; // never while emitters are listed
+        }
+        path.direction = direction;
+        path.flags = PATH_EMITTER;
+        path.throughput = float3(asfloat(instance), 0, 0);
+        path.rng = rng;
+    }
+    uint slot;
+    InterlockedAdd(push.counts[0], 1, slot);
+    path.pixel = texel.x | texel.y << 16;
     path.instance = 0;
     path.primitive = 0;
     path.bary = 0;
@@ -288,6 +334,8 @@ groupshared float2 relative[36];
 groupshared float noises[36];          // per irradiance texel: an update's variance, as the adaptive test took it
 groupshared float updated[36];         // per irradiance texel: this update's variance (of its luminance)
 groupshared uint stillActive;
+groupshared float4 lightFound[MAX_LIGHT_SAMPLES]; // per light sample: the irradiance part (rgb), its luminance (a)
+groupshared float3 lightWay[MAX_LIGHT_SAMPLES];
 
 /** The octahedral direction of interior texel `t` of a tile of `n` interior texels a side. */
 float3 texelDirection(uint2 t, uint n)
@@ -350,6 +398,15 @@ void blendMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     {
         rayLight[k] = images[push.rayImage][rayTexel(index, k)];
         rayWay[k] = rayDirection(k);
+    }
+    // The light samples, where taken (an active probe, emitters listed): what each found and its direction
+    uint samples = active && sampling() ? min(push.lightSamples, MAX_LIGHT_SAMPLES) : 0;
+    if (t < samples)
+    {
+        uint2 at = rayTexel(index, push.rayCount + 2 * t);
+        float3 found = images[push.rayImage][at].rgb;
+        lightFound[t] = float4(found, luminance3(found));
+        lightWay[t] = images[push.rayImage][at + uint2(1, 0)].xyz;
     }
     if (t == 0)
     {
@@ -482,6 +539,26 @@ void blendMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
             lum2 += w * y * y;
         }
         float4 update = weights > 0 ? float4(sum / weights, sky / weights) : float4(0, 0, 0, 0);
+        // The light samples' part: each its emission's share of the irradiance, by the cosine (as irradiance / pi);
+        // the rays took only their share of the emission they met. Its noise is the spread of the samples' estimates.
+        float3 sampled = 0;
+        float sampledLum = 0;
+        float sampledLum2 = 0;
+        for (uint j = 0; j < samples; j++)
+        {
+            float c = max(dot(n, lightWay[j]), 0.0) / 3.14159265;
+            sampled += c * lightFound[j].rgb;
+            float y = c * lightFound[j].a * float(samples); // one sample's estimate alone
+            sampledLum += y;
+            sampledLum2 += y * y;
+        }
+        float sampledMean = samples > 0 ? sampledLum / float(samples) : 0;
+        float sampledVariance = samples > 0
+            ? max(sampledLum2 / float(samples) - sampledMean * sampledMean, 0.0) / float(samples) : 0;
+        if (weights > 0)
+        {
+            update.rgb += sampled;
+        }
         float4 history = images[push.irradiance][irradianceTile + 1 + texel];
         float now = luminance3(update.rgb);
         float was = luminance3(history.rgb);
@@ -489,6 +566,8 @@ void blendMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         noises[t] = 0;
         float mean = weights > 0 ? lum / weights : 0;
         float variance = weights > 0 ? max(lum2 / weights - mean * mean, 0.0) * weights2 / (weights * weights) : 0;
+        mean += weights > 0 ? sampledMean : 0;
+        variance += weights > 0 ? sampledVariance : 0;
         updated[t] = variance;
         if (frames > 0 && weights > 0 && (push.flags & PROBES_ADAPTIVE) != 0)
         {

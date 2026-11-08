@@ -431,8 +431,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            record(ctx, pipeline, selection, lights == null ? 0 : ctx.address(lights), list,
-                indirect == null ? 0 : ctx.address(indirect.table()));
+            record(ctx, pipeline, selection, ctx.addressOrAbsent(lights), list,
+                indirect == null ? ctx.absent() : ctx.address(indirect.table()));
         });
     }
 
@@ -720,7 +720,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 shadows.prepare(ctx);
             }
             long words = SceneBehind.words(ctx, behind);
-            long address = lights == null ? 0 : ctx.address(lights);
+            long address = ctx.addressOrAbsent(lights);
             long indirect = targets.indirectAddress(ctx);
             for (int category = 0; category < categories; category++) {
                 for (int drawList = MeshletRenderer.BIN_BLENDED; drawList < LISTS; drawList += MeshletRenderer.BINS) {
