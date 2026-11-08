@@ -17,6 +17,7 @@ import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.render.materials.TestFogParameters;
 import com.truesim.engine.render.materials.TestGlowLight;
 import com.truesim.engine.render.materials.TestGlowParameters;
+import com.truesim.engine.render.materials.TestSnowCoverParameters;
 import com.truesim.engine.render.materials.TestSnowParameters;
 import com.truesim.engine.render.materials.TestTintParameters;
 import com.truesim.engine.render.materials.TransmissionParameters;
@@ -91,10 +92,10 @@ class ShadingHooksTest {
     void theListingHoldingEveryOtherIsFoundOnTheClasspathWithItsVariants() {
         ShadingHooks hooks = ShadingHooks.of(device);
         assertThat(hooks.name()).isEqualTo("TestEngineShadingHooks");
-        // The library's first; then the project's by file (fog, glow, snow, tint), test.tint ordered before test.fog by
-        // its attribute
-        assertThat(hooks.hooks()).containsExactly(ProbeVolume.HOOK, "test.glow", "test.snow", "test.tint",
-            "test.fog");
+        // The library's first; then the project's by file (fog, glow, snow, snowCover, tint), test.tint ordered before
+        // test.fog and test.snowCover before test.tint by their attributes
+        assertThat(hooks.hooks()).containsExactly(ProbeVolume.HOOK, "test.glow", "test.snow", "test.snowCover",
+            "test.tint", "test.fog");
         assertThat(device.shaderVariants().resolve("shaders/material-types/metallicRoughnessForward.spv"))
             .isEqualTo("shaders/shading-hooks/TestEngineShadingHooks/material-types/metallicRoughnessForward.spv");
         assertThat(device.shaderVariants().resolve("shaders/ao/ao.spv")).endsWith("ao/ao.hooks.spv");
@@ -579,6 +580,40 @@ class ShadingHooksTest {
             overrides.remove(entry);
             values.remove("test.snow");
             values.remove("test.tint");
+        }
+    }
+
+    /**
+     * The snow cover (test/hooks/testSnowCover.slang, the hook pictures' snow) on level ground seen from above: at
+     * coverage 0 every pixel is what it is with the hook off, however high its noise; at coverage 1 the ground is snow.
+     */
+    @ParameterizedTest
+    @EnumSource(value = Shading.class, names = {"FORWARD", "VISIBILITY_BUFFER"})
+    void snowCoverAtCoverageZeroLeavesSurfacesUntouchedAndAtOneCoversThem(Shading shading) {
+        assumeShading(shading);
+        int ground = materials.add(new Material(MR.withBaseColor(new Color(0.2f, 0.3f, 0.1f, 1)).withRoughness(0.4f)
+            .withMetallic(0.5f)).doubleSided(true));
+        view(shading, ground);
+        // Level ground (the quad turned to face up) 1 m below the camera, 6 m across: the lower half of the view
+        float turn = (float) Math.sqrt(0.5);
+        rig.scene().set(0, quad, ground, 0, -1, -3.5, -turn, 0, 0, turn, 6, 6, 6);
+        rig.frames(3);
+        BufferedImage bare = rig.target().shot();
+        int[] grass = rig.target().rgba(SIZE / 2, SIZE - 4);
+        assertThat(grass[1]).as("%s: the ground in view", shading).isGreaterThan(10);
+        ShadingHookValues values = ShadingHookValues.of(device);
+        try {
+            for (float scale : new float[] {1.2f, 4, 13}) { // noise cells per metre: many highs across the ground
+                values.set("test.snowCover", TestSnowCoverParameters.DEFAULTS.withCoverage(0).withScale(scale), true);
+                rig.frames(3);
+                assertSame(bare, rig.target().shot(), shading + ": coverage 0, scale " + scale);
+            }
+            values.set("test.snowCover", TestSnowCoverParameters.DEFAULTS.withCoverage(1), true);
+            rig.frames(3);
+            int[] covered = rig.target().rgba(SIZE / 2, SIZE - 4);
+            assertThat(covered[2]).as("%s: coverage 1, snow over the ground", shading).isGreaterThan(grass[2] + 60);
+        } finally {
+            values.remove("test.snowCover");
         }
     }
 
