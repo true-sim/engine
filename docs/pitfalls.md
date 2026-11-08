@@ -704,17 +704,25 @@ memory, in those scenes; which one was not found.
 
 ## Tests and measurements
 
-**Two runs on the RX 9070 XT render the Cornell box's corners differently.** `GiDeterminismTest` renders every GI scene
-twice before the padded run: on the RX 9070 XT the two plain runs differ in the Cornell box (one or two raster pixels'
-alpha by one unit in the last place, 1.0 against 0.99999994; probe and cascade images in 231 to 664 floats, about 1e-3
-of their light), from run to run, with no allocation between; on lavapipe the Cornell box's probe or cascade image
-differs between two runs in some runs too, and every other image matches bit for bit. The raster pixel
-(31, 0) looks exactly at the corner of the right wall and the ceiling (y = 2.0, x = 1.0): two instances' faces at the
-same depth there. What decides between them from run to run was not traced.
-- Proof: two plain runs of `renderAll` compared on the RX 9070 XT, four times (true-sim/engine, GI emissive and #442).
-- Rule: a test of bit-exact images first renders the same thing twice; a device whose two runs differ is held to their
-  spread, not to bit-exactness (`GiDeterminismTest`: within 1 % of each image's light there, where the stale-memory
-  fault moved 16 to 26 %).
+**Two runs render the Cornell box's corners differently.** `GiDeterminismTest` first required bit-exact images where
+two plain runs agreed and only then allowed a spread. On the RX 9070 XT two plain runs differ in the Cornell box (one or
+two raster pixels' alpha by one unit in the last place, 1.0 against 0.99999994; probe and cascade images in 231 to 664
+floats, about 1e-3 of their light), with no allocation between; on lavapipe its probe or cascade image differs in some
+runs too. CI then had two plain runs agree and the padded one not (cornell probes, 281 floats, 3.6e-4 of its light):
+the condition was itself a coin toss. The raster pixel (31, 0) looks exactly at the corner of the right wall and the
+ceiling (y = 2.0, x = 1.0): two instances' faces at the same depth there. It is not stale memory: on lavapipe, every
+transient buffer of the graph filled each frame with 0, 0x7f7f7f7f or 0x3f800000 gave the same cascade image bit for
+bit, while the same run repeated gave one of two images (143 pixels of the upper half, 2.2e-4 of the light apart). The
+engine's order-dependent sums on these paths (the world light grid's lists, the light clusters, the light rays' float
+add) take no part in that scene (no punctual lights, no types with geometry hooks); what decides between the two from
+run to run was not traced.
+- Proof: two plain runs of `renderAll` compared on the RX 9070 XT, four times; CI run 42475903054 (shard 2); a
+  diagnostic run of the Cornell box alone on lavapipe under each fill (`FrameGraph`'s transient buffers filled at the
+  frame's start, not committed); the test with a fixed bound passing every local lavapipe run (true-sim/engine, GI
+  emissive and #442).
+- Rule: a test of image determinism is held to a fixed bound far below the fault it looks for and far above the ties
+  measured (`GiDeterminismTest.TIES`: 1 % of each image's light, where the ties moved at most 0.1 % and the stale
+  memory 16 to 26 %), never to a bound that depends on whether another run happened to agree.
 
 **A still scene's benchmark hides what motion costs.** 200 shadowed point lights over the rocks cost 0.98 ms against
 0.93 unshadowed with the camera flying, as every tile stayed; with 100 rocks moving through the lights nearly every
