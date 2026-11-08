@@ -18,6 +18,7 @@ import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.render.materials.Grass;
 import com.truesim.engine.render.materials.GrassParameters;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
+import com.truesim.engine.render.materials.TestWindParameters;
 import com.truesim.engine.render.shadows.Shadows;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -33,6 +34,7 @@ import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.function.IntFunction;
 import javax.imageio.ImageIO;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -82,7 +84,7 @@ class DisplacementFilm {
             int soil = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
                 .withBaseColor(new Color(0.35f, 0.26f, 0.15f, 1)).withRoughness(0.9f)));
             GrassParameters blade = GrassParameters.DEFAULTS;
-            int grass = materials.add(new Material(blade).doubleSided(true).displacement(blade.bend() + 0.01f));
+            int grass = materials.add(DisplacementBenchmark.grass(blade));
             gpu.setMaterials(materials);
             float extent = DisplacementBenchmark.PATCHES * DisplacementBenchmark.PATCH;
             gpu.set(0, ground, soil, 0, 0, 0, 0, 0, 0, 1, extent / 2, 1, extent / 2);
@@ -96,8 +98,8 @@ class DisplacementFilm {
                 Path3 walk = f -> new double[] {-2 + 0.03 * f, 1.1, 18 - 0.12 * f, 0.15 + 0.002 * f, -0.28, -1};
                 film(device, renderer, lights, null, sky, walk, 240, 1280, 720, ShadowSpec.cascades(4, 2048, 40),
                     false, out.resolve("flythrough"));
-                // Popping at bounds: the same frames with the blades' bounds grown far past their bend (10 against
-                // 0.31) must be the same image: nothing was culled that the displacement brought into view
+                // Popping at bounds: the same frames with the blades' bounds grown far past their reach (10 against
+                // 0.51) must be the same image: nothing was culled that the displacement brought into view
                 materials.set(grass, new Material(blade).doubleSided(true).displacement(10));
                 film(device, renderer, lights, null, sky, walk, 60, 1280, 720, ShadowSpec.cascades(4, 2048, 40),
                     false, out.resolve("flythrough-wide"));
@@ -114,7 +116,7 @@ class DisplacementFilm {
                 }
                 System.out.printf(Locale.ROOT, "bounds check: %,d pixels of 60 frames differ with bounds grown to 10%n",
                     differing);
-                materials.set(grass, new Material(blade).doubleSided(true).displacement(blade.bend() + 0.01f));
+                materials.set(grass, DisplacementBenchmark.grass(blade));
                 // 3. The blades moving with the wind beside their motion vectors (camera still)
                 lights.directional(0, 0.6f, -0.35f, 0.7f, 3, 3, 2.7f).setCount(1);
                 Path3 still = f -> new double[] {0, 1.4, 4, 0, -0.9, -1};
@@ -129,6 +131,85 @@ class DisplacementFilm {
                 }
             }
         }
+    }
+
+    /**
+     * The grass field through changing weather, the camera moving low through it (RASTER, cascaded shadows, a low sun):
+     * calm (each blade at its own rest posture), a breeze, strong gusts rolling across the field, calm again; 18 s.
+     * At 1280 x 720 into {@code TRUESIM_FILM/weather}, and the same shot at 640 x 720 into {@code weather-narrow} (one
+     * half of a before and after side by side).
+     */
+    @Test
+    void grassInChangingWeather() throws Exception {
+        Path out = Path.of(System.getenv("TRUESIM_FILM"));
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("film").surfaces(false).build();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 23, 1 << 17, 2048));
+             GpuScene gpu = new GpuScene(device, pool, DisplacementBenchmark.PATCHES * DisplacementBenchmark.PATCHES
+                 + 8);
+             MeshletRenderer renderer = MeshletBenchmark.withView(new MeshletRenderer(device, gpu,
+                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT), 80_000_000);
+             Materials materials = new Materials(device, 8);
+             Lights lights = new Lights(device, 4, 8)) {
+            MeshData patchMesh = DisplacementBenchmark.patch(7);
+            int patch = pool.add(patchMesh);
+            int ground = pool.add(MeshletRendererTest.grid(1, 2, false, VertexFormat.of(VertexAttribute.NORMAL)));
+            materials.register(Grass.TYPE);
+            int soil = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
+                .withBaseColor(new Color(0.35f, 0.26f, 0.15f, 1)).withRoughness(0.9f)));
+            int grass = materials.add(DisplacementBenchmark.grass(GrassParameters.DEFAULTS));
+            gpu.setMaterials(materials);
+            float extent = DisplacementBenchmark.PATCHES * DisplacementBenchmark.PATCH;
+            gpu.set(0, ground, soil, 0, 0, 0, 0, 0, 0, 1, extent / 2, 1, extent / 2);
+            DisplacementBenchmark.Field field = new DisplacementBenchmark.Field(device, gpu, pool, null, patch,
+                patchMesh, grass, grass);
+            Environment sky = Environment.uniform("sky", 0.35f, 0.45f, 0.6f);
+            try {
+                field.as(Displacement.RASTER);
+                lights.directional(0, 0.45f, -0.5f, 0.75f, 3, 3, 2.7f).setCount(1);
+                int frames = 18 * FPS;
+                Path3 low = f -> {
+                    double t = f / (double) FPS;
+                    return new double[] {-3 + 0.8 * Math.sin(t * 0.25), 0.75, 10 - 0.45 * t,
+                        0.25 * Math.sin(t * 0.2 + 0.4), -0.2, -1};
+                };
+                IntFunction<TestWindParameters> weather = f -> DisplacementBenchmark.wind(f / (float) FPS,
+                    weather(f / (float) FPS));
+                String only = System.getenv("TRUESIM_FILM_ONLY"); // "narrow": the side by side's half alone
+                if (!"narrow".equals(only)) {
+                    film(device, renderer, lights, null, sky, low, frames, 1280, 720,
+                        ShadowSpec.cascades(4, 2048, 40), false, out.resolve("weather"), weather);
+                }
+                film(device, renderer, lights, null, sky, low, frames, 640, 720, ShadowSpec.cascades(4, 2048, 40),
+                    false, out.resolve("weather-narrow"), weather);
+            } finally {
+                field.as(null);
+                device.waitIdle();
+                gpu.setMaterials(null);
+            }
+        }
+    }
+
+    /** The wind's strength at {@code t} s: calm 3 s, a breeze (0.55) by 5 s, strong gusts (1.35) 10 to 14 s, calm. */
+    private static float weather(float t) {
+        if (t < 3) {
+            return 0;
+        } else if (t < 5) {
+            return 0.55f * smooth((t - 3) / 2);
+        } else if (t < 8) {
+            return 0.55f;
+        } else if (t < 10) {
+            return 0.55f + 0.8f * smooth((t - 8) / 2);
+        } else if (t < 14) {
+            return 1.35f;
+        } else if (t < 16) {
+            return 1.35f * (1 - smooth((t - 14) / 2));
+        }
+        return 0;
+    }
+
+    private static float smooth(float x) {
+        return x * x * (3 - 2 * x);
     }
 
     /**
@@ -221,6 +302,14 @@ class DisplacementFilm {
     private static void film(VulkanDevice device, MeshletRenderer renderer, Lights lights, RayTracing rays,
         Environment sky, Path3 path, int frames, int width, int height, ShadowSpec spec, boolean motion, Path dir,
         float speed) throws Exception {
+        film(device, renderer, lights, rays, sky, path, frames, width, height, spec, motion, dir,
+            f -> DisplacementBenchmark.wind(speed * f / (float) FPS));
+    }
+
+    /** As above, the wind of frame {@code f} given by {@code wind}. */
+    private static void film(VulkanDevice device, MeshletRenderer renderer, Lights lights, RayTracing rays,
+        Environment sky, Path3 path, int frames, int width, int height, ShadowSpec spec, boolean motion, Path dir,
+        IntFunction<TestWindParameters> wind) throws Exception {
         Files.createDirectories(dir);
         lights.shadow(0, spec);
         int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -259,7 +348,7 @@ class DisplacementFilm {
                 if (f == -8) {
                     view.set(camera, 1, MeshletRenderer.MODE_LIT); // once: read again as frames cull it
                 }
-                hooks.set("test.wind", DisplacementBenchmark.wind(speed * Math.max(f, 0) / (float) FPS));
+                hooks.set("test.wind", wind.apply(Math.max(f, 0)));
                 device.submitAndWait(device.graphics(), commands -> {
                     graph.record(commands);
                     copy(commands, color, colorBack, width, height);

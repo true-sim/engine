@@ -94,35 +94,51 @@ class DisplacementBenchmark {
         new Configuration("COMPUTE, rays", Displacement.COMPUTE, true),
     };
 
-    /** A patch of blades: each 4 segments up (10 vertices, 8 triangles), v the height on the blade, normals sideways. */
+    /** A patch of {@link #BLADES} x {@link #BLADES} blades. */
     static MeshData patch(long seed) {
+        return patch(seed, BLADES, PATCH, null);
+    }
+
+    /**
+     * A patch of {@code side} x {@code side} blades over {@code size} x {@code size} (around the origin) for
+     * test/grass.slang: each a strip standing straight up from its root at y = 0, 4 segments (10 vertices, 8
+     * triangles), facing a random way, its height (0.3 to 0.65) and width (2.4 to 4.8 cm at the root, narrowing to a
+     * fifth at the tip) its own; v its height on the blade, UV1 its root's x and z, normals across its face. The
+     * vertices as made (blade by blade, row by row from the root, 2 a row) into {@code made} unless null: the builder
+     * reorders them.
+     */
+    static MeshData patch(long seed, int side, float size, float[] made) {
         Random random = new Random(seed);
-        int blades = BLADES * BLADES;
+        int count = side * side;
         int per = 10;
-        float[] positions = new float[3 * per * blades];
-        float[] normals = new float[3 * per * blades];
-        float[] uvs = new float[2 * per * blades];
-        int[] indices = new int[24 * blades];
-        for (int b = 0; b < blades; b++) {
-            float x = ((b % BLADES) + random.nextFloat()) / BLADES * PATCH - PATCH / 2;
-            float z = ((b / BLADES) + random.nextFloat()) / BLADES * PATCH - PATCH / 2;
+        float[] positions = new float[3 * per * count];
+        float[] normals = new float[3 * per * count];
+        float[] uvs = new float[2 * per * count];
+        float[] roots = new float[2 * per * count];
+        int[] indices = new int[24 * count];
+        for (int b = 0; b < count; b++) {
+            float x = ((b % side) + random.nextFloat()) / side * size - size / 2;
+            float z = ((b / side) + random.nextFloat()) / side * size - size / 2;
             double angle = random.nextDouble() * Math.PI;
-            float dx = (float) Math.cos(angle) * 0.02f;
-            float dz = (float) Math.sin(angle) * 0.02f;
-            float height = 0.35f + 0.3f * random.nextFloat();
+            float halfWidth = 0.012f + 0.012f * random.nextFloat();
+            float dx = (float) Math.cos(angle) * halfWidth;
+            float dz = (float) Math.sin(angle) * halfWidth;
+            float height = TALLEST - 0.35f * random.nextFloat();
             for (int s = 0; s <= 4; s++) {
                 float v = s / 4f;
                 float width = 1 - 0.8f * v; // narrowing to the tip
-                for (int side = 0; side < 2; side++) {
-                    int vertex = b * per + 2 * s + side;
-                    float sign = side == 0 ? -1 : 1;
+                for (int edge = 0; edge < 2; edge++) {
+                    int vertex = b * per + 2 * s + edge;
+                    float sign = edge == 0 ? -1 : 1;
                     positions[3 * vertex] = x + sign * dx * width;
                     positions[3 * vertex + 1] = height * v;
                     positions[3 * vertex + 2] = z + sign * dz * width;
                     normals[3 * vertex] = (float) -Math.sin(angle);
                     normals[3 * vertex + 2] = (float) Math.cos(angle);
-                    uvs[2 * vertex] = side;
+                    uvs[2 * vertex] = edge;
                     uvs[2 * vertex + 1] = v;
+                    roots[2 * vertex] = x;
+                    roots[2 * vertex + 1] = z;
                 }
             }
             for (int s = 0; s < 4; s++) {
@@ -131,14 +147,37 @@ class DisplacementBenchmark {
                 System.arraycopy(quad, 0, indices, 24 * b + 6 * s, 6);
             }
         }
-        VertexFormat format = VertexFormat.of(VertexAttribute.NORMAL, VertexAttribute.UV0);
-        return new MeshBuilder(format, per * blades).positions(positions).attribute(VertexAttribute.NORMAL, normals)
-            .attribute(VertexAttribute.UV0, uvs).submesh(indices).buildFlat();
+        if (made != null) {
+            System.arraycopy(positions, 0, made, 0, positions.length);
+        }
+        VertexFormat format = VertexFormat.of(VertexAttribute.NORMAL, VertexAttribute.UV0, VertexAttribute.UV1);
+        return new MeshBuilder(format, per * count).positions(positions).attribute(VertexAttribute.NORMAL, normals)
+            .attribute(VertexAttribute.UV0, uvs).attribute(VertexAttribute.UV1, roots).submesh(indices).buildFlat();
+    }
+
+    /** The tallest blade of {@link #patch}. */
+    static final float TALLEST = 0.65f;
+
+    /**
+     * How far grass.slang moves a vertex of {@link #patch}'s blades at most: a tip bent to the type's largest bend (1.5
+     * radians) on its arc lies 0.704 of the blade's height from where it stood; the cross-section turned moves its
+     * edges at most twice the widest half-width (2.4 cm).
+     */
+    static final float REACH = 0.704f * TALLEST + 2 * 0.024f + 0.01f;
+
+    /** The grass material of {@code blade}: double-sided, declaring {@link #REACH}. */
+    static Material grass(GrassParameters blade) {
+        return new Material(blade).doubleSided(true).displacement(REACH);
     }
 
     /** The wind at {@code time} seconds. */
     static TestWindParameters wind(float time) {
-        return TestWindParameters.DEFAULTS.withDirection(new Vec3(0.8, 0, 0.6)).withStrength(1).withTime(time)
+        return wind(time, 1);
+    }
+
+    /** The wind at {@code time} seconds, of {@code strength}. */
+    static TestWindParameters wind(float time, float strength) {
+        return TestWindParameters.DEFAULTS.withDirection(new Vec3(0.8, 0, 0.6)).withStrength(strength).withTime(time)
             .withFrequency(0.4f).withWavelength(9);
     }
 
@@ -169,8 +208,7 @@ class DisplacementBenchmark {
             materials.register(Grass.TYPE);
             int soil = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
                 .withBaseColor(new Color(0.25f, 0.18f, 0.1f, 1)).withRoughness(0.9f)));
-            GrassParameters blade = GrassParameters.DEFAULTS;
-            int grass = materials.add(new Material(blade).doubleSided(true).displacement(blade.bend() + 0.01f));
+            int grass = materials.add(grass(GrassParameters.DEFAULTS));
             int still = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
                 .withBaseColor(new Color(0.2f, 0.4f, 0.08f, 1)).withRoughness(0.8f)).doubleSided(true));
             gpu.setMaterials(materials);
