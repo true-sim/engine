@@ -95,6 +95,8 @@ class GiBenchmark {
             g -> g.settings().set(ProbeVolume.ASYNC, false)));
         techniques.add(gi("cascades, no reach", ProbeVolumeLighting.CASCADES,
             g -> g.settings().set(RadianceCascades.REACH, 0f)));
+        techniques.add(gi("probes, no light samples", ProbeVolumeLighting.PROBES,
+            g -> g.settings().set(ProbeVolume.EMITTER_SAMPLES, 0)));
         for (float budget : new float[] {0.5f, 0.25f}) {
             techniques.add(gi("probes, budget " + budget, ProbeVolumeLighting.PROBES,
                 g -> g.settings().set(ProbeVolume.BUDGET, budget)));
@@ -131,7 +133,8 @@ class GiBenchmark {
                                 .set(RadianceCascades.SPACING, RadianceCascades.SPACING.defaultValue())
                                 .set(RadianceCascades.DIRECTIONS, RadianceCascades.DIRECTIONS.defaultValue())
                                 .set(RadianceCascades.REACH, RadianceCascades.REACH.defaultValue())
-                                .set(ProbeVolume.ASYNC, true).set(ProbeVolume.BUDGET, 1f);
+                                .set(ProbeVolume.ASYNC, true).set(ProbeVolume.BUDGET, 1f)
+                                .set(ProbeVolume.EMITTER_SAMPLES, ProbeVolume.EMITTER_SAMPLES.defaultValue());
                             sponza.graph.settings().techniques().set(sponza.graph.settings(), AmbientOcclusion.SLOT,
                                 "denoiser", Denoiser.Mode.SVGF);
                             sponza.graph.settings().techniques().set(sponza.graph.settings(), AmbientOcclusion.SLOT,
@@ -156,6 +159,96 @@ class GiBenchmark {
                         System.out.printf(Locale.ROOT, "| %d x %d | %s | %s | %s | %s | %s | %s |%n", size[0],
                             size[1], setups.get(c).name(), range(all, Sample::frame), range(all, Sample::span),
                             range(all, Sample::ao), range(all, Sample::probes), range(all, Sample::shading));
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * What the probes' light samples of emitters cost, and what they leave of the flicker: the GI scene {@code bulbs}
+     * (two small bright emissive boxes), and the same with 254 small dim ones more spread over its ceiling, at 1920 x
+     * 1080 through the probe volume, every probe each frame (budget 1), by the samples per update and the choice; the
+     * probe passes' GPU time (the emitter list's two passes among them) and the image's frame-to-frame change (each
+     * pixel off the mean of the frames before and after it, over the light), ranges of the rounds' medians. Sponza,
+     * which has no emitters, pays the list alone ({@link #globalIlluminationCosts}, samples 0 against 8).
+     */
+    @Test
+    void emitterSamplingCosts() throws Exception {
+        List<Setup> setups = List.of(
+            new Setup("no light samples", g -> g.settings().set(ProbeVolume.EMITTER_SAMPLES, 0)),
+            new Setup("4 light samples, nearby", g -> g.settings().set(ProbeVolume.EMITTER_SAMPLES, 4)),
+            new Setup("8 light samples, nearby", g -> g.settings().set(ProbeVolume.EMITTER_SAMPLES, 8)),
+            new Setup("16 light samples, nearby", g -> g.settings().set(ProbeVolume.EMITTER_SAMPLES, 16)),
+            new Setup("8 light samples, by power", g -> g.settings().set(ProbeVolume.EMITTER_SAMPLES, 8)
+                .set(ProbeVolume.EMITTER_SELECTION, ProbeVolume.EmitterSelection.POWER)));
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("gi").surfaces(false).build();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+            assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
+            for (int extra : new int[] {0, 254}) {
+                try (GiHarness harness = new GiHarness(device, 1920, 1080)) {
+                    FrameGraph graph = harness.graph();
+                    harness.realtime("bulbs", 0);
+                    if (extra > 0) {
+                        GiScenes.Stage stage = harness.stage();
+                        int dim = stage.matte(0, 0, 0, 6, 5, 4);
+                        for (int i = 0; i < extra; i++) {
+                            double x = -2.7 + 5.4 * ((i % 17) + 0.5) / 17;
+                            double z = -5.7 + 5.4 * ((i / 17) + 0.5) / 15;
+                            stage.box(dim, x - 0.03, 2.9, z - 0.03, x + 0.03, 2.96, z + 0.03);
+                        }
+                        stage.finish();
+                    }
+                    double[][] probes = new double[setups.size()][ROUNDS];
+                    double[][] flicker = new double[setups.size()][ROUNDS];
+                    for (int round = -WARMUP; round < ROUNDS; round++) {
+                        for (int c = 0; c < setups.size(); c++) {
+                            AmbientOcclusion.SLOT.choose(graph.settings(), null);
+                            ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.PROBES);
+                            graph.settings().set(ProbeVolume.BUDGET, 1f).reset(ProbeVolume.EMITTER_SAMPLES)
+                                .reset(ProbeVolume.EMITTER_SELECTION);
+                            setups.get(c).apply().accept(graph);
+                            harness.render(SETTLE);
+                            graph.timings(true);
+                            harness.render(4);
+                            double[] times = new double[TIMED];
+                            float[][] images = new float[TIMED][];
+                            for (int i = 0; i < TIMED; i++) {
+                                images[i] = harness.render(1);
+                                GpuTimings timings = graph.timings();
+                                for (int t = 0; timings != null && t < timings.count(); t++) {
+                                    double ms = timings.millis(t);
+                                    if (!Double.isNaN(ms) && timings.pass(t).startsWith("probe ")) {
+                                        times[i] += ms;
+                                    }
+                                }
+                            }
+                            graph.timings(false);
+                            double off = 0;
+                            double light = 0;
+                            for (int i = 1; i + 1 < TIMED; i++) {
+                                for (int p = 0; p < images[i].length; p += 4) {
+                                    off += Math.abs(images[i][p + 1] - (images[i - 1][p + 1] + images[i + 1][p + 1]) / 2);
+                                    light += images[i][p + 1];
+                                }
+                            }
+                            if (round >= 0) {
+                                probes[c][round] = median(times);
+                                flicker[c][round] = off / Math.max(light, 1.0e-30);
+                            }
+                            System.out.printf(Locale.ROOT, "  round %d, bulbs + %d, %s: probes %.3f ms, flicker %.5f%n",
+                                round, extra, setups.get(c).name(), median(times), off / Math.max(light, 1.0e-30));
+                        }
+                    }
+                    System.out.printf(Locale.ROOT, "Light samples on %s, the bulbs scene and %d more emitters, 1920 x"
+                        + " 1080, budget 1:%n", device.gpu().name(), extra);
+                    System.out.println("| Emitters | Light samples | Probe passes | Frame-to-frame change |");
+                    System.out.println("|---|---|---|---|");
+                    for (int c = 0; c < setups.size(); c++) {
+                        System.out.printf(Locale.ROOT, "| %d | %s | %.3f-%.3f ms | %.5f-%.5f |%n", 2 + extra,
+                            setups.get(c).name(), Arrays.stream(probes[c]).min().orElse(0),
+                            Arrays.stream(probes[c]).max().orElse(0), Arrays.stream(flicker[c]).min().orElse(0),
+                            Arrays.stream(flicker[c]).max().orElse(0));
                     }
                 }
             }

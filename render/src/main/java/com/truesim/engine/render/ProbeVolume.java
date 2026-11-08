@@ -20,6 +20,9 @@ import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
+import com.truesim.engine.render.layout.EmitterListLayout;
+import com.truesim.engine.render.layout.EmitterPush;
+import com.truesim.engine.render.layout.EmitterRecordLayout;
 import com.truesim.engine.render.layout.IndirectConstants;
 import com.truesim.engine.render.layout.ProbeVolumeParametersLayout;
 import com.truesim.engine.render.layout.IndirectLightLayout;
@@ -170,11 +173,43 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
      */
     public static final Setting<Float> SKY_FOOTPRINT = ProbeVolumeLighting.PROBES.setting("skyFootprint");
 
+    /**
+     * Light samples per probe update beside its rays: next-event estimation of emissive surfaces. Each chooses an
+     * emitter (an instance whose material gives off light: pathtracing/emitters.slang's list, {@link #EMITTERS} at
+     * most) by {@link #EMITTER_SELECTION} and a direction in the cone of its bounding sphere; what it meets of that
+     * emitter's emission, and the emission the probe's turned rays meet by chance, are weighed by the balance
+     * heuristic, so a small bright emitter (a lamp's bulb) lights the probes every update by its share instead of in
+     * the updates whose rays happened to meet it. 0: rays alone. The graph rebuilds when it changes.
+     */
+    public static final Setting<Integer> EMITTER_SAMPLES = ProbeVolumeLighting.PROBES.setting("emitterSamples");
+
+    /**
+     * The most emitters the probes' light samples choose from. A frame finding more samples none (the rays meet
+     * emission by chance, as without samples) and says so ({@code found} in the list); the graph rebuilds when it
+     * changes.
+     */
+    public static final Setting<Integer> EMITTERS = ProbeVolumeLighting.PROBES.setting("emitters");
+
+    /** How a light sample chooses its emitter ({@link EmitterSelection}). */
+    public static final Setting<EmitterSelection> EMITTER_SELECTION =
+        ProbeVolumeLighting.PROBES.setting("emitterSelection");
+
+    /** How a probe's light sample chooses an emitter. */
+    public enum EmitterSelection {
+        /** By its power alone (a search of the list's running sums): the same choice for every probe, its cost the log
+         *  of the emitters'. */
+        POWER,
+        /** By its power times the solid angle it covers from the probe: near emitters chosen more, every emitter
+         *  weighed for every sample (its cost the emitters'). */
+        NEARBY
+    }
+
     /** Its settings: the probes kind's tunables ({@link ProbeVolumeLighting.Probes}). */
     public static final List<Setting<?>> ALL = List.of(ASYNC, ITERATIONS, CASCADES, PROBES, PROBES_UP, SPACING, RAYS,
         FIXED_RAYS, BUDGET,
         LAYERS, NORMAL_BIAS, VIEW_BIAS, BLEND, DEPTH_RANGE, RELOCATE, CLASSIFY, MAX_FRAMES, ADAPTIVE, SENSITIVITY,
-        DRIFT, INVALIDATE, LIGHT_MARGIN, INSTANCE_MARGIN, FRESH, SKY_FOOTPRINT);
+        DRIFT, INVALIDATE, LIGHT_MARGIN, INSTANCE_MARGIN, FRESH, SKY_FOOTPRINT, EMITTER_SAMPLES, EMITTERS,
+        EMITTER_SELECTION);
 
     static final Format IRRADIANCE_FORMAT = Format.R16G16B16A16_SFLOAT;
     static final Format DEPTH_FORMAT = Format.R16G16_SFLOAT;
@@ -190,6 +225,9 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
     private static final int RESET_ALL = 2;
     private static final int RELOCATE_FLAG = 4;
     private static final int CLASSIFY_FLAG = 8;
+    private static final int MAX_LIGHT_SAMPLES = 32; // update.slang's
+    /** Where the emitter list's records start: past its header, 16-byte aligned (their float4 spheres). */
+    private static final int EMITTER_RECORDS = (EmitterListLayout.BYTES + 15) / 16 * 16;
 
     public ProbeVolume {
         Objects.requireNonNull(rayTracing, "rayTracing");
@@ -275,6 +313,8 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         int rays = g.setting(RAYS);
         int fixed = Math.min(g.setting(FIXED_RAYS), rays / 2);
         int layers = g.setting(LAYERS);
+        int lightSamples = Math.min(g.setting(EMITTER_SAMPLES), MAX_LIGHT_SAMPLES);
+        int emitterCapacity = Math.max(1, g.setting(EMITTERS));
         int count = across * across * up * cascades;
         double coarsest = spacing * (double) (1 << (cascades - 1));
         EngineSettings settings = g.settings();
@@ -289,9 +329,10 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         Buffer states = g.persistentBuffer("probe states", (long) STATE_BYTES * count);
         Buffer data = g.createBuffer("probe volume", ProbeVolumeDataLayout.BYTES);
         Buffer table = g.createBuffer("probe volume indirect light", IndirectLightLayout.BYTES);
-        Image rayImage = g.create("probe rays", ImageDesc.of(RAY_FORMAT, rays * RAY_ROW,
+        // Per probe its rays' texels, then two per light sample (the part of the irradiance found, the direction)
+        Image rayImage = g.create("probe rays", ImageDesc.of(RAY_FORMAT, (rays + 2 * lightSamples) * RAY_ROW,
             (count + RAY_ROW - 1) / RAY_ROW));
-        long capacity = (long) count * rays;
+        long capacity = (long) count * (rays + lightSamples);
         Buffer[] paths = {g.createBuffer("probe paths", ReferencePathTracer.PATH_BYTES * capacity),
             g.createBuffer("probe paths (next)", ReferencePathTracer.PATH_BYTES * capacity)};
         Materials materials = renderer.scene().materials();
@@ -309,6 +350,12 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         int lightWords = light == null ? 0 : light.words();
         Buffer status = g.createBuffer("probe status", 16);
         int instanceCapacity = renderer.scene().capacity();
+        // The emitters light samples choose from: the list (its header written at setup, its records by listMain),
+        // and per instance id its power and its slot
+        Buffer emitters = g.createBuffer("probe emitters", EMITTER_RECORDS
+            + (long) EmitterRecordLayout.BYTES * emitterCapacity);
+        Buffer emitterPowers = g.createBuffer("probe emitter powers", 4L * Math.max(1, instanceCapacity));
+        Buffer emitterSlots = g.createBuffer("probe emitter slots", 4L * Math.max(1, instanceCapacity));
         Buffer previousInstances = g.persistentBuffer("probe instances before", 64L * instanceCapacity);
         Buffer previousLights = g.persistentBuffer("probe lights before", (long) Lights.LIGHT_BYTES
             * lights.capacity());
@@ -327,6 +374,8 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         Pipeline prepare = g.computeProgram(update, "prepareMain", ProbePush.BYTES);
         Pipeline generate = g.computeProgram(update, "generateMain", ProbePush.BYTES);
         Pipeline blend = g.computeProgram(update, "blendMain", ProbePush.BYTES);
+        Pipeline powersPipeline = g.computeProgram("shaders/probes/emitters.spv", "powersMain", EmitterPush.BYTES);
+        Pipeline listPipeline = g.computeProgram("shaders/probes/emitters.spv", "listMain", EmitterPush.BYTES);
         Pipeline instancesPipeline = g.computeProgram("shaders/probes/invalidate.spv", "instancesMain",
             InvalidatePush.BYTES);
         Pipeline lightsPipeline = g.computeProgram("shaders/probes/invalidate.spv", "lightsMain",
@@ -344,11 +393,13 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                     own.specialization(materials.binFeatures(bin)));
             }
         }
-        Frame frame = new Frame(across, up, cascades, spacing, rays, fixed, count, skinnedWords, own);
+        Frame frame = new Frame(across, up, cascades, spacing, rays, fixed, count, skinnedWords, own, lightSamples,
+            emitterCapacity, instanceCapacity, emitters);
 
         g.pass("probe volume setup").write(data, BufferAccess.TRANSFER_DST).write(table, BufferAccess.TRANSFER_DST)
             .write(status, BufferAccess.TRANSFER_DST).write(counts, BufferAccess.TRANSFER_DST)
             .write(binTables, BufferAccess.TRANSFER_DST).write(skinned, BufferAccess.TRANSFER_DST)
+            .write(emitters, BufferAccess.TRANSFER_DST)
             .read(maps.sh(), BufferAccess.TRANSFER_SRC).read(maps.specular(), Access.SAMPLED_COMPUTE)
             .read(maps.sheen(), Access.SAMPLED_COMPUTE).read(brdf, Access.SAMPLED_COMPUTE)
             .read(irradiance, Access.SAMPLED_COMPUTE).read(depth, Access.SAMPLED_COMPUTE)
@@ -356,6 +407,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             .record(ctx -> {
                 frame.setup(ctx, settings, camera, coarsest, data, table, states, irradiance, depth, maps, brdf,
                     specularMips, sheenMips, skinned);
+                frame.emitterHeader(ctx, settings, emitters);
                 ctx.fill(status, 0);
                 ctx.fill(counts, 0, countsBytes, 0);
                 if (light != null) {
@@ -363,6 +415,19 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 }
                 ctx.fill(binTables, 0, tablesBytes, 0);
             });
+
+        // The emitters, listed in id order: each instance's power, then the list (one group)
+        EmitterPush emitterPush = new EmitterPush();
+        reading(g, scene, topLevel, pass(g, "probe emitter powers")).read(emitters, BufferAccess.STORAGE_READ)
+            .write(emitterPowers, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> ctx.dispatch(powersPipeline, frame.emitterPush(emitterPush, ctx, emitters)
+                .powers(ctx.address(emitterPowers)),
+                (frame.instances() + 63) / 64));
+        EmitterPush listPush = new EmitterPush();
+        reading(g, scene, topLevel, pass(g, "probe emitter list")).write(emitters, BufferAccess.STORAGE_WRITE)
+            .read(emitterPowers, BufferAccess.STORAGE_READ).write(emitterSlots, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> ctx.dispatch(listPipeline, frame.emitterPush(listPush, ctx, emitters)
+                .powers(ctx.address(emitterPowers)).slots(ctx.address(emitterSlots)), 1));
 
         InvalidatePush invalidatePush = new InvalidatePush();
         scene.read(g.pass("probe invalidation"), BufferAccess.STORAGE_READ).read(data, BufferAccess.STORAGE_READ)
@@ -413,11 +478,11 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             }
             ProbePush generatePush = new ProbePush();
             pass(g, "probe rays" + again).read(data, BufferAccess.STORAGE_READ)
-                .read(states, BufferAccess.STORAGE_READ)
+                .read(states, BufferAccess.STORAGE_READ).read(emitters, BufferAccess.STORAGE_READ)
                 .write(paths[0], BufferAccess.STORAGE_WRITE).write(counts, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> ctx.dispatch(generate, frame.probePush(generatePush, ctx, settings, camera, coarsest,
                     data,
-                    null, paths[0], counts, null, null, null), (rays + 63) / 64, Math.min(count, 65535),
+                    null, paths[0], counts, null, null, null), (rays + lightSamples + 63) / 64, Math.min(count, 65535),
                     (count + 65534) / 65535));
 
             int pushes = 4 * layers;
@@ -454,7 +519,8 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                     .write(counts, BufferAccess.STORAGE_WRITE).read(binTables, BufferAccess.INDIRECT)
                     .read(binTables, BufferAccess.STORAGE_READ).write(rayImage, Access.STORAGE_WRITE)
                     .read(table, BufferAccess.STORAGE_READ)
-                    .read(data, BufferAccess.STORAGE_READ)
+                    .read(data, BufferAccess.STORAGE_READ).read(emitters, BufferAccess.STORAGE_READ)
+                    .read(emitterSlots, BufferAccess.STORAGE_READ)
                     .read(states, BufferAccess.STORAGE_READ).read(irradiance, Access.SAMPLED_COMPUTE)
                     .read(depth, Access.SAMPLED_COMPUTE).read(maps.specular(), Access.SAMPLED_COMPUTE)
                     .read(maps.sheen(), Access.SAMPLED_COMPUTE).read(brdf, Access.SAMPLED_COMPUTE);
@@ -465,7 +531,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                             ctx.dispatchIndirect(shade[bin], pathPush(shadePush, ctx, rayImage, current, next,
                                 binTables,
                                 counts, table, world, binTable, tablesBytes, bounce, bins, bin, layers)
-                                .lightRays(lightWords), binTables,
+                                .lightRays(lightWords).emitters(ctx.address(emitters)), binTables,
                                 binTable + 16L * bin);
                         }
                     }
@@ -477,7 +543,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             }
             ProbePush blendPush = new ProbePush();
             pass(g, "probe blending" + again).read(data, BufferAccess.STORAGE_READ)
-                .read(rayImage, Access.STORAGE_READ)
+                .read(rayImage, Access.STORAGE_READ).read(emitters, BufferAccess.STORAGE_READ)
                 .write(irradiance, Access.STORAGE_WRITE).write(depth, Access.STORAGE_WRITE)
                 .write(variances, Access.STORAGE_WRITE).write(states, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> ctx.dispatch(blend, frame.probePush(blendPush, ctx, settings, camera, coarsest, data,
@@ -525,8 +591,8 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 - rayTracing.origin(1)), (float) (view.position(2) - rayTracing.origin(2)))
             .accumulation(rayImage == null ? 0 : ctx.storage(rayImage))
             .size(0)
-            .bounce(bounce).binCount(bins).bin(bin).sample((int) ctx.frame())
-            .limits(layers & 0xff | (255 << 8) | PATH_PROBES)
+            .shading(bin | bins << 16).sample((int) ctx.frame())
+            .limits(layers & 0xff | (255 << 8) | PATH_PROBES | bounce << 24)
             .list((int) ((tablesBytes - binTable) / 4));
     }
 
@@ -549,10 +615,18 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         final float[] environmentRotation = new float[4];
         long resetFrame = Long.MIN_VALUE; // the frame every probe restarts in (the environment changed)
         long firstFrame = Long.MIN_VALUE;
+        final int lightSamples;
+        final int emitterCapacity;
+        final int instanceCapacity; // the ids the emitter powers and slots hold
+        final Buffer emitters;
 
         Frame(int across, int up, int cascades, float spacing, int rays, int fixed, int count, int skinnedWords,
-            ProbeHooks own) {
+            ProbeHooks own, int lightSamples, int emitterCapacity, int instanceCapacity, Buffer emitters) {
             this.own = own;
+            this.lightSamples = lightSamples;
+            this.emitterCapacity = emitterCapacity;
+            this.instanceCapacity = instanceCapacity;
+            this.emitters = emitters;
             this.across = across;
             this.up = up;
             this.cascades = cascades;
@@ -663,6 +737,36 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             ctx.copy(maps.sh(), 0, table, IndirectLightLayout.SH, 27 * 4L);
         }
 
+        /** The instance ids the emitters are looked for among: as many as the scene holds, as the buffers do. */
+        int instances() {
+            return Math.min(renderer.scene().capacity(), instanceCapacity);
+        }
+
+        /**
+         * The emitter list's header (pathtracing/emitters.slang's EmitterList): none listed yet, the samples, the rays
+         * they are weighed against, the choice; the list pass writes where the per-instance buffers are. Allocates
+         * nothing.
+         */
+        void emitterHeader(PassContext ctx, EngineSettings settings, Buffer list) {
+            try (MemoryStack stack = stackPush()) {
+                long header = stack.ncalloc(16, 1, EmitterListLayout.BYTES);
+                memPutInt(header + EmitterListLayout.CAPACITY, emitterCapacity);
+                memPutInt(header + EmitterListLayout.SAMPLES, lightSamples);
+                memPutInt(header + EmitterListLayout.TURNED, rays - fixed);
+                memPutInt(header + EmitterListLayout.SELECTION, settings.get(EMITTER_SELECTION).ordinal());
+                memPutInt(header + EmitterListLayout.INSTANCES, instances());
+                memPutLong(header + EmitterListLayout.RECORDS, ctx.address(list) + EMITTER_RECORDS);
+                Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, EmitterListLayout.BYTES,
+                    header);
+            }
+        }
+
+        /** probes/emitters.slang's push block. */
+        EmitterPush emitterPush(EmitterPush push, PassContext ctx, Buffer list) {
+            return push.list(ctx.address(list)).rays(rayTracing.sceneAddress(renderer.scene()))
+                .view(anchor.view().address()).instances(instances());
+        }
+
         /** The lights this frame's invalidation compared: the next one's before. */
         synchronized void lightsCounted(int count) {
             lightsBefore = count;
@@ -705,7 +809,9 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 .depth(depth == null ? 0 : ctx.storage(depth))
                 .frame((int) now).period(Math.max(1, Math.round(1 / budget))).maxFrames(settings.get(MAX_FRAMES))
                 .flags(flags).sensitivity(settings.get(SENSITIVITY)).drift(settings.get(DRIFT))
-                .fresh(settings.get(FRESH));
+                .fresh(settings.get(FRESH)).lightSamples(lightSamples)
+                // the emitters where the pass declares them: the rays' generation and the blend
+                .emitters(paths != null || rayImage != null ? ctx.address(emitters) : ctx.absent());
             // This frame's turn of the rays: a random unit quaternion from the frame's number (Shoemake 1992)
             long h = mix(now * 0x9E3779B97F4A7C15L + 1);
             double u1 = (h >>> 11) * 0x1.0p-53;
