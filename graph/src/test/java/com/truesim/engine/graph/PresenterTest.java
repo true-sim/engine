@@ -139,6 +139,26 @@ class PresenterTest {
                 assertThat(presenter.render()).isEqualTo(3);
                 graph.settings().set(PresentSettings.HDR, true);
                 assertThat(presenter.render()).isEqualTo(3);
+                // A transform in steps: both techniques added to each window's view, replaced together.
+                List<Key<Image>> steps = new java.util.ArrayList<>();
+                presenter.outputTransform(new OutputTransform() {
+                    @Override
+                    public Technique transform(Key<Image> source, Key<Image> target,
+                        com.truesim.engine.vulkan.DisplayEncoding encoding) {
+                        throw new AssertionError("in steps: transforms(...)");
+                    }
+
+                    @Override
+                    public List<Technique> transforms(Key<Image> source, Key<Image> target,
+                        com.truesim.engine.vulkan.DisplayEncoding encoding,
+                        com.truesim.engine.settings.EngineSettings settings) {
+                        Key<Image> between = Key.image("test.between" + steps.size());
+                        steps.add(between);
+                        return List.of(copy(source, between), copy(between, target));
+                    }
+                });
+                assertThat(steps).as("one pair per window").hasSize(3);
+                assertThat(presenter.render()).isEqualTo(3);
                 presenter.outputTransform(null);
                 assertThat(presenter.render()).as("copied as they are again").isEqualTo(3);
                 assertThat(mainTarget.shownKey()).as("the presented key itself").isSameAs(COLOR);
@@ -159,6 +179,17 @@ class PresenterTest {
             }
             assertThat(instance.validationErrors()).as("validation errors").isZero();
         }
+    }
+
+    /** A technique providing {@code target} as a copy of {@code source}. */
+    private static Technique copy(Key<Image> source, Key<Image> target) {
+        return new FrameGraphTest.Lambda(List.of(target), g -> {
+            Image from = g.require(source);
+            Image to = g.create("copied", ImageDesc.of(Format.R16G16B16A16_SFLOAT, from.width(), from.height()));
+            g.pass("copy").read(from, Access.TRANSFER_SRC).write(to, Access.TRANSFER_DST)
+                .record(ctx -> ctx.blit(from.whole(), to.whole(), false));
+            g.provide(target, to);
+        });
     }
 
     /** A validated instance with surfaces, or the test skipped where there is no Vulkan. */

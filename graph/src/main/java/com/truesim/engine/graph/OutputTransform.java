@@ -27,6 +27,17 @@ public interface OutputTransform {
     }
 
     /**
+     * The techniques of the window's view that provide {@code target} from {@code source}, reading {@code settings}:
+     * {@link #transform(Key, Key, DisplayEncoding, com.truesim.engine.settings.EngineSettings)}'s one by default. A
+     * transform in steps gives each (tone mapping into a display-light image, then encoding it, so techniques of the
+     * view can modify the display-light image between them); the presenter adds and removes them together.
+     */
+    default java.util.List<Technique> transforms(Key<Image> source, Key<Image> target, DisplayEncoding encoding,
+        com.truesim.engine.settings.EngineSettings settings) {
+        return java.util.List.of(transform(source, target, encoding, settings));
+    }
+
+    /**
      * What HDR windows tell their displays about the content, as {@code settings} (the window's: the graph's by
      * default) say now: read again
      * when they change. Null (the default): nothing, the display guesses.

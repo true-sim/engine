@@ -73,6 +73,7 @@ class TechniqueSettingsTest {
         for (DisplayTransform.Curve curve : DisplayTransform.Curve.values()) {
             assertThat(DisplayTransform.curve(DisplayTransform.curve(settings, curve))).isEqualTo(curve);
         }
+        DisplayTransform.curve(settings, DisplayTransform.Curve.ACES);
         assertThat(settings.toMap()).containsEntry("render.interpolation", "off")
             .containsEntry("display.toneCurve", "aces");
     }

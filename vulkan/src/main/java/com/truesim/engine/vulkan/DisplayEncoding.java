@@ -9,7 +9,12 @@ public enum DisplayEncoding {
     /** HDR10: Rec. 2020 primaries, encoded by the PQ curve (SMPTE ST 2084) from absolute brightness in nits. */
     HDR10_PQ(true),
     /** scRGB: linear Rec. 709 primaries in floats, 1.0 being 80 nits and brighter colors above it. */
-    SCRGB_LINEAR(true);
+    SCRGB_LINEAR(true),
+    /**
+     * Standard dynamic range in an image of a UNORM format (where the surface offers no sRGB format): linear colors
+     * from 0 to 1, which the output pass encodes by the sRGB curve itself.
+     */
+    SDR_UNORM(false);
 
     private final boolean hdr;
 
