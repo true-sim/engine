@@ -75,8 +75,14 @@ public static const uint SHADOW_MASK = 1;
 /** No shadow: an entry no technique of the view set reads as lit. */
 public static const uint SHADOW_NONE = 3;
 
-/** Shadow map filters: what PCSS, VSM, ESM and others will add to. */
+/**
+ * Shadow map filters, in the low 8 bits of an entry's filter word; above them the kernel's half-width in sixteenths of
+ * a texel (12 bits: PCF's, PCSS's least), then PCSS's widest (12 bits). Both weigh every texel of the kernel by a
+ * tent's integral over it, so the light changes smoothly with the position and no texel's edge shows as a step.
+ */
 public static const uint PCF = 0;
+/** Percentage-closer soft shadows: the kernel as wide as the light's penumbra there, from the blockers' depth. */
+public static const uint PCSS = 1;
 
 /**
  * The frame's light list, as a binning technique made it: 80 bytes, then the layout's own data. Shading reads it
@@ -238,6 +244,7 @@ public struct ShadowQuery
     public uint2 pixel;
     public float depth;            // from the viewer, along the view direction
     public float fromViewer;       // distance from the viewer
+    public float lightRadius;      // the light's size (Light.radius): angular radius (directional) or radius
 };
 
 /** How a kind of shadow (or a shadow map filter) is evaluated: a new technique implements this. */
@@ -247,19 +254,91 @@ public interface IShadow
     float visibility(Shadow s, ShadowQuery q);
 }
 
+/** The integral from minus infinity to `x` of a tent of half-width `r` about 0 (and area 1). */
+float tentCdf(float x, float r)
+{
+    float t = clamp(x / r, -1, 1);
+    return t <= 0 ? 0.5 * (1 + t) * (1 + t) : 1 - 0.5 * (1 - t) * (1 - t);
+}
+
+/** A map's texels: a tile of `size` texels per side at `corner` of a depth map (or atlas) `1 / texelSize` wide. */
+struct MapTexels
+{
+    uint map;
+    int2 corner;
+    int size;
+    float texelSize;
+
+    /**
+     * Texels c - 1 and c each way (in the tile; kept within it, as an atlas's neighbours are other lights' maps), as
+     * (x: (c.x - 1, c.y), y: (c.x, c.y), z: (c.x, c.y - 1), w: (c.x - 1, c.y - 1)): a gather at their shared corner.
+     */
+    float4 gather(int2 c)
+    {
+        int2 k = clamp(c, 1, size - 1) + corner;
+        return textures[NonUniformResourceIndex(map)].GatherRed(samplers[NEAREST_CLAMP], float2(k) * texelSize);
+    }
+}
+
 /**
- * A depth map, 3 x 3 percentage-closer filtering; outside the map, lit. Looked up from the surface moved along its
- * normal by the entry's normal offset (about a texel), against acne where the light grazes.
+ * The share of the light reaching `p` (texels, in the tile: texel i spans i to i + 1) through the texels within `r`
+ * texels: each texel compared at the receiver's depth over it (`depth` at `p`, `slope` more per texel each way) and
+ * weighted by the integral over it of a tent of half-width `r` about `p`, separable. The weights change smoothly with
+ * `p` and `r`, so neither an edge's texels nor the kernel's width show as steps, as equal weights over whole texels
+ * do.
+ */
+float tentFiltered(MapTexels m, float2 p, float r, float depth, float2 slope)
+{
+    int2 lo = int2(floor(p - r));
+    int2 hi = int2(floor(p + r));
+    float sum = 0;
+    for (int y = lo.y; y <= hi.y; y += 2)
+    {
+        float wy0 = tentCdf(y + 1 - p.y, r) - tentCdf(y - p.y, r);
+        float wy1 = tentCdf(y + 2 - p.y, r) - tentCdf(y + 1 - p.y, r);
+        float dy0 = depth + slope.y * (y + 0.5 - p.y);
+        float dy1 = dy0 + slope.y;
+        for (int x = lo.x; x <= hi.x; x += 2)
+        {
+            float wx0 = tentCdf(x + 1 - p.x, r) - tentCdf(x - p.x, r);
+            float wx1 = tentCdf(x + 2 - p.x, r) - tentCdf(x + 1 - p.x, r);
+            float dx0 = slope.x * (x + 0.5 - p.x);
+            float dx1 = dx0 + slope.x;
+            float4 g = m.gather(int2(x + 1, y + 1));
+            // Reverse depth: lit where the receiver is at least as near the light as the texel's caster.
+            sum += wy0 * (wx0 * step(g.w, dy0 + dx0) + wx1 * step(g.z, dy0 + dx1))
+                + wy1 * (wx0 * step(g.x, dy1 + dx0) + wx1 * step(g.y, dy1 + dx1));
+        }
+    }
+    return sum;
+}
+
+/**
+ * A depth map filtered by PCF or PCSS (the entry's filter word); outside the map, lit. Looked up from the surface moved
+ * along its normal by the entry's normal offset (about a texel), against acne where the light grazes; a kernel's
+ * texels are compared at the depth of the surface's plane over each (receiver plane depth bias, Isidoro 2006), so a
+ * wide kernel does not shadow a sloped surface by itself. A query without a normal (a point in a volume: fog) takes
+ * neither.
+ *
+ * <p>PCF: a tent of the filter word's half-width (texels). PCSS (Fernando 2005): blockers searched over the widest
+ * penumbra (16 gathers, 64 texels, spread evenly); none there: lit; otherwise their mean depth (weighed by a tent over
+ * the search, so it changes smoothly with the position) gives the half-width of
+ * the penumbra a light of radius `lightRadius` casts there (directional: an angular radius, the penumbra growing with
+ * the distance from the blockers; spot and point: a radius, seen from the blockers), the tent that wide, from the
+ * filter word's least to its widest. Blockers on all 64: in the umbra, no filtering. A point in a volume (no normal)
+ * takes the least kernel without a search.
  */
 public struct PcfShadow : IShadow
 {
     public float visibility(Shadow s, ShadowQuery q)
     {
         float3 normal = dot(q.normal, q.toLight) < 0 ? -q.normal : q.normal;
+        bool surface = dot(normal, normal) > 0;
         bool perspective = s.params.y > 0;
         // A perspective map's texels grow with the distance from the light: its offset and bias with them.
         float scale = perspective ? length(q.world) : 1;
-        float4 clip = mul(s.toShadow, float4(q.world + normal * (s.params.x * scale), 1));
+        float3 world = q.world + normal * (s.params.x * scale);
+        float4 clip = mul(s.toShadow, float4(world, 1));
         float3 p = clip.xyz / clip.w;
         float2 uv = p.xy * 0.5 + 0.5;
         if (any(uv < 0) || any(uv > 1) || p.z < 0 || p.z > 1)
@@ -270,23 +349,101 @@ public struct PcfShadow : IShadow
         float depth = perspective ? s.params.y / max(s.params.y / max(p.z, 1.0e-20) - s.bias * scale, s.params.y)
             : p.z + s.bias;
         uint atlas = s.atlas != 0 ? s.atlas : s.size;
-        int2 corner = int2(s.tile & 0xffff, s.tile >> 16);
-        // The 3 x 3 texels around, kept within the tile (an atlas's neighbours are other lights' maps).
-        int2 texel = clamp(int2(floor(uv * s.size)), 1, int(s.size) - 2) + corner;
-        uint map = NonUniformResourceIndex(s.map); // neighbours may read other cascades and lights
-        // The 3 x 3 texels around, in four gathers of 2 x 2 rather than nine loads: each taken at a texel corner (in
-        // texels, c: its 2 x 2 is c - 1 and c each way, as bilinear filtering would read there), edges clamped by the
-        // sampler. Gathered as (x: left bottom, y: right bottom, z: right top, w: left top), top the lower row.
-        float texelSize = 1.0 / atlas;
-        float4 a = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel) * texelSize);
-        float4 b = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel + int2(2, 0)) * texelSize);
-        float4 c = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel + int2(0, 2)) * texelSize);
-        float4 d = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel + int2(2, 2)) * texelSize);
-        float4 litA = step(a, depth);          // texels (-1, -1) to (0, 0): all four
-        float2 litB = step(float2(b.w, b.x), depth); // (1, -1), (1, 0)
-        float2 litC = step(float2(c.w, c.z), depth); // (-1, 1), (0, 1)
-        float litD = step(d.w, depth);         // (1, 1)
-        return (dot(litA, 1) + litB.x + litB.y + litC.x + litC.y + litD) / 9;
+        MapTexels m = { s.map, int2(s.tile & 0xffff, s.tile >> 16), int(s.size), 1.0 / atlas };
+        float size = float(s.size);
+        float2 at = uv * size;
+        // A texel's size in the world at the surface: an orthographic map's the same everywhere, a perspective one's
+        // growing with the distance along its axis (near / depth).
+        float rowScale = length(float3(s.toShadow[0][0], s.toShadow[0][1], s.toShadow[0][2]));
+        float along = perspective ? s.params.y / max(p.z, 1.0e-20) : 1;
+        float texel = 2 * along / max(rowScale * size, 1.0e-20);
+        // The receiver's plane: its depth's change per texel each way, from two points on it a texel off.
+        float2 slope = 0;
+        if (surface)
+        {
+            float3 t1 = normalize(cross(normal, abs(normal.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0)));
+            float3 t2 = cross(normal, t1);
+            float4 c1 = mul(s.toShadow, float4(world + t1 * texel, 1));
+            float4 c2 = mul(s.toShadow, float4(world + t2 * texel, 1));
+            float4 c3 = mul(s.toShadow, float4(world + q.toLight * texel, 1));
+            float3 d1 = c1.xyz / c1.w - p;
+            float3 d2 = c2.xyz / c2.w - p;
+            float2 u1 = d1.xy * 0.5 * size;
+            float2 u2 = d2.xy * 0.5 * size;
+            float det = u1.x * u2.y - u2.x * u1.y;
+            if (abs(det) > 1.0e-6)
+            {
+                slope = float2(d1.z * u2.y - d2.z * u1.y, u1.x * d2.z - u2.x * d1.z) / det;
+                // At most four times a texel's step towards the light in depth (a surface 76 degrees from facing
+                // it): more sloped ones the normal offset keeps lit.
+                float most = 4 * abs(c3.z / c3.w - p.z);
+                float l = length(slope);
+                slope *= l > most ? most / l : 1;
+            }
+        }
+        uint kind = s.filter & 0xff;
+        float least = max(float((s.filter >> 8) & 0xfff) / 16, 0.5);
+        float r = least;
+        // A point in a volume takes the narrowest kernel: what samples it (fog froxels, jittered over frames) is
+        // coarser than a penumbra, and a search per froxel cost five times the froxels' light (docs/pitfalls.md).
+        if (kind == PCSS && q.lightRadius > 0 && surface)
+        {
+            float widest = max(float(s.filter >> 20) / 16, least);
+            // 4 x 4 gathers, their corners spread evenly over the widest penumbra about the surface.
+            float spacing = max(2, (2 * widest - 2) / 3);
+            float blockers = 0;
+            float weights = 0;
+            float found = 0;
+            float reach = 1.5 * spacing + 1.5; // past the search's outermost texels' centres
+            for (int j = 0; j < 4; j++)
+            {
+                for (int i = 0; i < 4; i++)
+                {
+                    int2 c = int2(round(at + (float2(i, j) - 1.5) * spacing));
+                    float4 g = m.gather(c);
+                    float2 o = float2(c) - at; // the texels' centres: o -+ 0.5 each way
+                    float4 receiver = depth + float4(dot(slope, o + float2(-0.5, 0.5)),
+                        dot(slope, o + float2(0.5, 0.5)), dot(slope, o + float2(0.5, -0.5)),
+                        dot(slope, o + float2(-0.5, -0.5)));
+                    float4 blocks = float4(g > receiver);
+                    // Weighed by a tent over the search (the texels' centres from the surface): the mean changes
+                    // smoothly as texels come into reach, not a step a texel (stripes along penumbrae otherwise)
+                    float4 ox = o.x + float4(-0.5, 0.5, 0.5, -0.5);
+                    float4 oy = o.y + float4(0.5, 0.5, -0.5, -0.5);
+                    float4 w = saturate(1 - abs(ox) / reach) * saturate(1 - abs(oy) / reach) * blocks;
+                    blockers += dot(w, g);
+                    weights += dot(w, 1);
+                    found += dot(blocks, 1);
+                }
+            }
+            if (found == 0)
+            {
+                return 1; // nothing between it and the light within the widest penumbra
+            }
+            if (found == 64)
+            {
+                return 0; // blockers all over the widest penumbra: in the umbra
+            }
+            float blocker = blockers / max(weights, 1.0e-6);
+            float spread;
+            if (perspective)
+            {
+                // Distances along the map's axis (near / depth): seen from the blockers, the light's radius spreads
+                // over the gap to the surface by their ratio.
+                float toReceiver = s.params.y / max(p.z, 1.0e-20);
+                float toBlocker = s.params.y / max(blocker, 1.0e-20);
+                spread = q.lightRadius * max(toReceiver - toBlocker, 0) / max(toBlocker, 1.0e-6);
+            }
+            else
+            {
+                // Depth to world: the map's depth row takes a world unit to its length in depth.
+                float depthScale = length(float3(s.toShadow[2][0], s.toShadow[2][1], s.toShadow[2][2]));
+                spread = max(blocker - p.z, 0) / max(depthScale, 1.0e-20) * tan(q.lightRadius);
+            }
+            // A tent as spread as the light's disc seen edge-on (its variance: R^2 / 6 against r^2 / 4).
+            r = clamp(1.2247449 * spread / texel, least, widest);
+        }
+        return tentFiltered(m, at, r, depth, slope);
     }
 }
 
@@ -305,7 +462,7 @@ public float shadowVisibility(Shadow s, ShadowQuery q)
     switch (s.kind)
     {
     case SHADOW_MAP:
-        return s.filter == PCF ? PcfShadow().visibility(s, q) : 1;
+        return (s.filter & 0xff) <= PCSS ? PcfShadow().visibility(s, q) : 1;
     case SHADOW_MASK:
         return MaskShadow().visibility(s, q);
     default:
@@ -409,7 +566,8 @@ public float3 lightIrradiance(LightListHeader h, Light light, float3 world, floa
     if (shadow >= 0)
     {
         Shadow entry = shadows[shadow];
-        ShadowQuery q = { world + h.toEntry(entry), normal, toLight, distance, pixel, depth, length(world) };
+        ShadowQuery q = { world + h.toEntry(entry), normal, toLight, distance, pixel, depth, length(world),
+            light.radius };
         irradiance *= shadowVisibility(entry, q);
     }
     return irradiance;

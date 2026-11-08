@@ -2039,7 +2039,8 @@ public final class Shadows implements AutoCloseable {
     }
 
     /** Writes shared map entries of light {@code light} from {@code first}; returns the entries used, 0 for none. */
-    private int writeShared(ShadowTable table, int light, int first, int atlasSlot) {
+    private int writeShared(ShadowTable table, int light, int first, int atlasSlot, int filter, float radius,
+        float widest) {
         Group group = shared[light];
         if (group == null || !group.usedNow || group.droppedNow) {
             return 0;
@@ -2055,7 +2056,7 @@ public final class Shadows implements AutoCloseable {
         for (int f = 0; f < group.count; f++) {
             Tile tile = group.tiles[f];
             table.atlasMap(first + f, tile.camera, atlasSlot, atlas.size(), tile.x, tile.y, tile.size, tile.bias,
-                tile.split, tile.normalOffset, tile.near);
+                tile.split, tile.normalOffset, tile.near).filter(first + f, filter, radius, widest);
         }
         return group.count;
     }
@@ -2266,13 +2267,18 @@ public final class Shadows implements AutoCloseable {
             int entry = 0;
             int count = Math.min(lights.count(), named.length);
             int overflowed = 0;
+            EngineSettings settings = port.settings();
+            int filter = settings.get(ShadowSettings.MAP_FILTER) == ShadowSettings.Filter.PCSS ? ShadowTable.PCSS
+                : ShadowTable.PCF;
+            float radius = settings.get(ShadowSettings.MAP_FILTER_RADIUS);
+            float widest = settings.get(ShadowSettings.MAP_PENUMBRA);
             for (int light = 0; light < count; light++) {
                 int used = 0;
                 Group group = (anchor != null ? anchor : this).cascades[light];
                 if (atlasSlot >= 0) {
-                    used = writeShared(table, light, entry, atlasSlot);
+                    used = writeShared(table, light, entry, atlasSlot, filter, radius, widest);
                     if (used == 0 && group != null && group.usedNow && !group.droppedNow) {
-                        used = writeCascades(table, group, entry, atlasSlot);
+                        used = writeCascades(table, group, entry, atlasSlot, filter, radius, widest);
                     }
                 }
                 if (used == 0) {
@@ -2299,7 +2305,8 @@ public final class Shadows implements AutoCloseable {
             stats.overflowed = overflowed;
         }
 
-        private int writeCascades(ShadowTable table, Group group, int first, int atlasSlot) {
+        private int writeCascades(ShadowTable table, Group group, int first, int atlasSlot, int filter, float radius,
+            float widest) {
             for (int i = 0; i < group.count; i++) {
                 if (!group.tiles[i].valid) {
                     return 0;
@@ -2311,7 +2318,8 @@ public final class Shadows implements AutoCloseable {
             for (int i = 0; i < group.count; i++) {
                 Tile tile = group.tiles[i];
                 table.atlasMap(first + i, tile.camera, atlasSlot, atlas.size(), tile.x, tile.y, tile.size, tile.bias,
-                    group.count == 1 ? Float.MAX_VALUE : tile.split, tile.normalOffset, 0);
+                    group.count == 1 ? Float.MAX_VALUE : tile.split, tile.normalOffset, 0).filter(first + i, filter,
+                    radius, widest);
             }
             return group.count;
         }
