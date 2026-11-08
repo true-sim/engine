@@ -26,6 +26,7 @@ module materials;
 
 __exported import bindless;
 __exported import shading;
+__exported import hooks; // displacement reads the scene's hook block (DisplacePoint.hooks)
 
 // ---------------------------------------------------------------------------------------------- what the build reads
 
@@ -72,11 +73,11 @@ public struct Material
 {
     public uint header;            // type bits 0-7 (0: metallic-roughness), double-sided bit 8, masked bit 9,
                                    // blended bit 10, refuses hooks bit 11, hook coat bit 12 (hooks.slang),
-                                   // cutoff bits 16-31
+                                   // displaces bit 13 (MATERIAL_DISPLACES), cutoff bits 16-31
     public uint parameters;        // its block: its type's parameters, then its features' sections
     public int maskTexture;        // masking: the texture whose alpha it compares (-1: none)
     public float maskAlpha;        // masking: the alpha factor
-    public uint geometry;          // a geometry block (displacement, to come); 0: none
+    public uint geometry;          // its largest displacement: asuint of a float, mesh units (MATERIAL_DISPLACES)
     public uint features;          // the FEATURE_* bits it shows
     public uint featureTable;      // from its block's start: a uint per feature it shows, in bit order, each the
                                    // offset of the feature's section from the block's start
@@ -122,10 +123,18 @@ public static const uint FEATURE_BITS = 12;
  * (`[MaterialParameters(FEATURE_CLEARCOAT | GEOMETRY_KEEP)]`): parts of the type that decide where its surfaces are,
  * so they run in every pass drawing them (color, depth, shadows, the visibility buffer's IDs). A type with one gets
  * depth, shadow and ID pipelines of its own; the others share one. GEOMETRY_KEEP: its keep() says which points of its
- * surfaces exist (a cutout, a dissolve), holes alike in every pass. Displacement (#68) is to join as another bit, its
- * displace() run by the vertex stages.
+ * surfaces exist (a cutout, a dissolve), holes alike in every pass. GEOMETRY_DISPLACE: its displace() moves its
+ * vertices, in every pass reading its geometry (RASTER) or once a frame into the instance's copy of the mesh (COMPUTE).
  */
 public static const uint GEOMETRY_KEEP = 1u << 16;
+/** A geometry hook: the type's displace() moves its vertices (IMaterial.displace; README, "Displacement"). */
+public static const uint GEOMETRY_DISPLACE = 1u << 17;
+
+/**
+ * A material's header bit: its type displaces (GEOMETRY_DISPLACE), by at most materialDisplacement(), in mesh units:
+ * culling grows its meshlets' spheres by it and tests no normal cone.
+ */
+public static const uint MATERIAL_DISPLACES = 1u << 13;
 /** Where geometry hooks start in the attribute's mask: the bits below are features. */
 public static const uint GEOMETRY_SHIFT = 16;
 
@@ -172,6 +181,18 @@ public uint materialShadingBin(Material m)
 public uint materialGeometry(Material m)
 {
     return m.bin >> 16;
+}
+
+/** Whether `m`'s type displaces its vertices (GEOMETRY_DISPLACE). */
+public bool materialDisplaces(Material m)
+{
+    return (m.header & MATERIAL_DISPLACES) != 0;
+}
+
+/** How far at most `m`'s displacement moves a vertex, in its mesh's units (0 where it does not displace). */
+public float materialDisplacement(Material m)
+{
+    return materialDisplaces(m) ? asfloat(m.geometry) : 0;
 }
 
 /** The features `m` shows. */
@@ -368,6 +389,112 @@ public interface IMaterial
     static bool keep(Parameters p, MaterialRef m, SurfaceInput in)
     {
         return true;
+    }
+
+    /**
+     * A geometry hook (GEOMETRY_DISPLACE): where vertex `in` of a surface of material `m` is drawn, at most the
+     * material's declared displacement away (Material.displacement in Java: bounds grow by it). Runs, where the type's
+     * parameters' attribute names GEOMETRY_DISPLACE, for every vertex of its surfaces in every pass reading their
+     * geometry (RASTER), or once a frame into the instance's copy of the mesh (COMPUTE: ray tracing sees it); the same
+     * function either way. Vertices stay where they are unless a type says otherwise (`override`).
+     */
+    static Displaced displace(Parameters p, MaterialRef m, DisplacePoint in)
+    {
+        return Displaced.of(in);
+    }
+};
+
+/**
+ * A vertex as a type's displace() gets it (GEOMETRY_DISPLACE): in its mesh's space, as drawn before displacing (after
+ * morph targets and skinning), with the instance drawing it and the scene's hook block, whose records carry what the
+ * frame knows (wind, a snow depth field: a hook of the geometry point, IGeometryHook, or any hook's record). The same in
+ * every pass and both modes, so every view moves it alike: color, depth, shadows, IDs, motion vectors, the copies ray
+ * tracing traces.
+ */
+public struct DisplacePoint
+{
+    public float3 position;        // in the mesh's space
+    public float3 normal;          // unit, in the mesh's space ((0, 1, 0) without normals)
+    public float4 tangent;         // in the mesh's space, w the bitangent's sign; 0 without tangents
+    public float2 uv;
+    public float2 uv1;
+    public float4 color;           // the vertex color (1 without)
+    public float4 rotation;        // the instance: world = origin + originLow + rotate(rotation, position * scale)
+    public float3 scale;
+    public float3 origin;          // the instance's world position, high part
+    public float3 originLow;       // and the rest
+    public uint instance;          // its id
+    public ShadingHookBlock* hooks; // the scene's hook block (this frame's, or the frame before's for motion vectors)
+    public uint entry;             // the instance's override entry in it (0: none)
+
+    /** Direction `d` of the mesh in the world: scaled and turned as the instance is (not normalized). */
+    public float3 toWorld(float3 d)
+    {
+        float3 v = d * scale;
+        float3 t = 2.0 * cross(rotation.xyz, v);
+        return v + rotation.w * t + cross(rotation.xyz, t);
+    }
+
+    /** World direction `d` in the mesh's space: as toWorld undoes it. */
+    public float3 toMesh(float3 d)
+    {
+        float3 q = -rotation.xyz;
+        float3 t = 2.0 * cross(q, d);
+        float3 s = scale;
+        float3 safe = float3(abs(s.x) > 1.0e-20 ? s.x : 1.0e-20, abs(s.y) > 1.0e-20 ? s.y : 1.0e-20,
+            abs(s.z) > 1.0e-20 ? s.z : 1.0e-20);
+        return (d + rotation.w * t + cross(q, t)) / safe;
+    }
+
+    /**
+     * The vertex's world position (single precision: far from the origin prefer worldFrom, an anchor near the vertex
+     * taken off exactly).
+     */
+    public float3 world()
+    {
+        return origin + (originLow + toWorld(position));
+    }
+
+    /**
+     * The vertex's world position relative to the world point `anchor` (high part) plus `anchorLow`: precise anywhere
+     * in a large world for an anchor near it (a field's cell, a hook record's own origin).
+     */
+    public float3 worldFrom(float3 anchor, float3 anchorLow)
+    {
+        precise float3 high = origin - anchor;
+        precise float3 low = originLow - anchorLow;
+        return high + (low + toWorld(position));
+    }
+
+    /** Hook `index`'s record (T, its [ShadingHookParameters] struct) in the scene's block, by the instance's entry. */
+    public T* hook<T>(uint index)
+    {
+        return (T*) hookRecord(hooks, index, hooks[0].hooks, entry);
+    }
+
+    /** Whether hook `index` is on in the scene's block for the instance (its bit, the entry's switch). */
+    public bool hookOn(uint index)
+    {
+        uint count = hooks[0].hooks;
+        return hookRuns(hooks, index, count, entry, noHooksRefused(hooks, count));
+    }
+};
+
+/** Where a type's displace() puts a vertex: in its mesh's space. */
+public struct Displaced
+{
+    public float3 position;
+    public float3 normal;          // unit
+    public float4 tangent;         // w the bitangent's sign (0 without tangents)
+
+    /** The vertex of `in` where it is. */
+    public static Displaced of(DisplacePoint in)
+    {
+        Displaced d;
+        d.position = in.position;
+        d.normal = in.normal;
+        d.tangent = in.tangent;
+        return d;
     }
 };
 

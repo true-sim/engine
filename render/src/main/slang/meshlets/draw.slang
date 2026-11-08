@@ -17,7 +17,7 @@ VertexOut vertexMain(uint index : SV_VulkanVertexID)
         push.scene[0].attributes, v.meshlet,
         meshletSubmesh(push.scene[0].meshlets, v.meshlet));
     out.instance = v.instance;
-    out.firstTriangle = v.firstIndex / 3;
+    out.firstTriangle = drawFirstTriangle(v); // primitive IDs count from it
     return out;
 }
 

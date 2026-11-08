@@ -119,6 +119,20 @@ public final class Deformation {
     private MemorySegment previousTable;
     private FrameBuffer framePrevious;
     private int previousMeshes; // records the table holds
+    // Displacement into copies (Displacement.COMPUTE): which copies, their sources' vertex submeshes and the frame's
+    // passes; per mesh number the box it is drawn in (its bounds, grown by the table's largest displacement where
+    // displaced), whether posed in place by skinning, and where it keeps the frame before's vertices this frame
+    private final CopyDisplacement displacement;
+    private float[] drawn = new float[7 * 64];
+    private float[] margins = filledFloats(64); // how far its instance's materials displace it, as bound (-1: not yet)
+    private boolean[] skinnedNow = new boolean[64];
+    private long[] keptAt = new long[64];
+
+    private static float[] filledFloats(int length) {
+        float[] array = new float[length];
+        Arrays.fill(array, -1);
+        return array;
+    }
 
     private static int[] filled(int length) {
         int[] array = new int[length];
@@ -139,6 +153,7 @@ public final class Deformation {
         this.morphRanges = new RangeAllocator(1 << 16);
         this.morphData = GpuBuffer.hostVisible(device, 1 << 16,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        this.displacement = new CopyDisplacement(device, pool, slots);
     }
 
     /** Takes copy {@code copy} (a pool's deformed mesh) with {@code joints} joints, its palette's. */
@@ -152,14 +167,74 @@ public final class Deformation {
      */
     @AllowAllocation("adding a copy")
     public void add(int copy, int joints, MeshData mesh) {
+        int targets = mesh == null ? 0 : mesh.morphTargetCount();
+        if (joints < (targets > 0 ? 0 : 1) || joints > 256) {
+            throw new IllegalArgumentException("A copy has 1 to 256 joints, or 0 with morph targets: " + joints);
+        }
+        addCopy(copy, joints, mesh);
+    }
+
+    /**
+     * Copy {@code copy} (a pool's deformed mesh, {@link GeometryPool#addDeformed}) is displaced once a frame by its
+     * materials' types ({@link Displacement#COMPUTE}): after its morph targets and skinning, if it has them (added with
+     * them before), else from its source's vertices as they are; its box grows by the material table's largest
+     * displacement. The instance drawing it ({@link GpuScene#set} with the copy as its mesh) is the one whose pose,
+     * materials and override entry displace it; it draws the copy as it is (never displaced again in the vertex
+     * stages), and ray tracing's bottom level of it ({@link RayTracing#addDeformed}) is refitted each frame. Allocates
+     * when first displacing a copy.
+     */
+    @AllowAllocation("adding a copy")
+    public void displace(int copy) {
+        if (pool.deformedFrom(copy) < 0) {
+            throw new IllegalArgumentException("Not a deformed copy: " + copy);
+        }
+        if (copy >= added.length || !added[copy]) {
+            addCopy(copy, 0, null); // no joints, no morphs: displaced from its source alone
+        }
+        displacement.add(copy);
+        posed[copy] = true;
+        changed[copy] = true;
+    }
+
+    /** Whether pool mesh {@code mesh} is a copy displaced once a frame ({@link #displace}). */
+    public boolean displaces(int mesh) {
+        return displacement.displaces(mesh);
+    }
+
+    /**
+     * Displaced copy {@code copy} is drawn by instance {@code instance} ({@link GpuScene} writing it), whose materials
+     * displace it at most {@code margin}: its box grows by that, around its source's box where it has no joints or
+     * morphs. On any thread for different copies.
+     */
+    void bind(int copy, int instance, float margin) {
+        displacement.bind(copy, instance);
+        if (margins[copy] != margin) {
+            margins[copy] = margin;
+            changed[copy] = true;
+            if (jointCount[copy] == 0 && targetCount[copy] == 0) {
+                displacement.restBounds(copy, margin, bounds);
+            }
+        }
+    }
+
+    /** How much copy {@code copy}'s posed box grows when drawn: its margin where displaced and posed by joints. */
+    private float grown(int copy) {
+        return displacement.displaces(copy) && (jointCount[copy] > 0 || targetCount[copy] > 0)
+            ? Math.max(margins[copy], 0) : 0;
+    }
+
+    /** How many copies are displaced once a frame. */
+    public int displacedCount() {
+        return displacement.size();
+    }
+
+    @AllowAllocation("adding a copy")
+    private void addCopy(int copy, int joints, MeshData mesh) {
         int source = pool.deformedFrom(copy);
         if (source < 0) {
             throw new IllegalArgumentException("Not a deformed copy: " + copy);
         }
         int targets = mesh == null ? 0 : mesh.morphTargetCount();
-        if (joints < (targets > 0 ? 0 : 1) || joints > 256) {
-            throw new IllegalArgumentException("A copy has 1 to 256 joints, or 0 with morph targets: " + joints);
-        }
         if (targets > 0 && mesh.vertexCount() != pool.vertexCountOf(copy)) {
             throw new IllegalArgumentException("Not the copy's mesh: " + mesh.vertexCount() + " vertices for "
                 + pool.vertexCountOf(copy));
@@ -186,6 +261,12 @@ public final class Deformation {
             previousOffset = Arrays.copyOf(previousOffset, length);
             previousVertices = Arrays.copyOf(previousVertices, length);
             skinnedBounds = Arrays.copyOf(skinnedBounds, 6 * length);
+            drawn = Arrays.copyOf(drawn, 7 * length);
+            int oldMargins = margins.length;
+            margins = Arrays.copyOf(margins, length);
+            Arrays.fill(margins, oldMargins, length, -1);
+            skinnedNow = Arrays.copyOf(skinnedNow, length);
+            keptAt = Arrays.copyOf(keptAt, length);
         }
         int slotCount = Math.max(1, joints + (targets + MATRIX_FLOATS - 1) / MATRIX_FLOATS);
         long first = allocateSlots(slotCount);
@@ -377,6 +458,7 @@ public final class Deformation {
         if (copy >= added.length || !added[copy]) {
             return; // added to the pool, never posed here
         }
+        displacement.forget(copy);
         matrixRanges.release(firstMatrix[copy], matrixSlots[copy]);
         if (previousVertices[copy] > 0) {
             previousRanges.release(previousOffset[copy], previousVertices[copy]);
@@ -428,14 +510,17 @@ public final class Deformation {
         return copy < added.length && added[copy] && posed[copy];
     }
 
-    /** Along {@code axis}, the corner of the box copy {@code copy} was last posed in ({@link #bounds}). */
+    /**
+     * Along {@code axis}, the corner of the box copy {@code copy} was last posed in ({@link #bounds}; a displaced
+     * copy's grown by its displacement).
+     */
     float boxMin(int copy, int axis) {
-        return bounds[7 * copy + axis];
+        return bounds[7 * copy + axis] - grown(copy);
     }
 
     /** Along {@code axis}, the size of the box copy {@code copy} was last posed in. */
     float boxExtent(int copy, int axis) {
-        return bounds[7 * copy + 3 + axis];
+        return bounds[7 * copy + 3 + axis] + 2 * grown(copy);
     }
 
     /** How many copies it poses. */
@@ -643,9 +728,26 @@ public final class Deformation {
      * meshlet spheres; barriers around it, as the mesh table it writes is not one of the graph's buffers.
      */
     void record(PassContext ctx, SceneData.Buffers buffers, Pipeline skin, Pipeline spheres, DeformPush push,
-        Pipeline keep, KeepPush keepPush) {
+        Pipeline keep, KeepPush keepPush, GpuScene scene) {
         retired.release();
         releaseMorphRanges();
+        // The box each copy is drawn in: as posed; displaced ones (moving every frame) grown by the table's largest
+        // displacement, those without joints or morphs around their source's box
+        for (int i = 0; i < copyCount; i++) {
+            int copy = copies[i];
+            boolean displaced = displacement.displaces(copy);
+            skinnedNow[copy] = jointCount[copy] > 0 || targetCount[copy] > 0;
+            int b = 7 * copy;
+            float grow = grown(copy);
+            for (int axis = 0; axis < 3; axis++) {
+                drawn[b + axis] = boxMin(copy, axis);
+                drawn[b + 3 + axis] = boxExtent(copy, axis);
+            }
+            drawn[b + 6] = bounds[b + 6] + grow;
+            if (displaced) {
+                changed[copy] = true; // displaced anew every frame
+            }
+        }
         int skinning = 0;
         for (int i = 0; i < copyCount; i++) {
             skinning += posed[copies[i]] && changed[copies[i]] ? 1 : 0;
@@ -703,7 +805,8 @@ public final class Deformation {
             keepPush.positions(ctx.address(buffers.positions())).previous(previousPositions.deviceAddress());
             for (int i = 0; i < copyCount; i++) {
                 int copy = copies[i];
-                if (moves(copy)) {
+                keptAt[copy] = moves(copy) ? previousOffset[copy] : -1;
+                if (moves(copy) && !(displacement.displaces(copy) && !skinnedNow[copy])) { // those kept as displaced
                     int vertices = previousVertices[copy];
                     ctx.dispatch(keep, keepPush.from(pool.vertexBase(copy)).to((int) previousOffset[copy])
                         .count(vertices), (vertices + 63) / 64);
@@ -717,8 +820,8 @@ public final class Deformation {
             .meshletVertices(ctx.address(buffers.meshletVertices())).clusterLod(ctx.address(buffers.clusterLod()));
         for (int i = 0; i < copyCount; i++) {
             int copy = copies[i];
-            if (!posed[copy] || !changed[copy]) {
-                continue;
+            if (!posed[copy] || !changed[copy] || displacement.displaces(copy) && !skinnedNow[copy]) {
+                continue; // displaced from its source: copied in by the displacement below
             }
             int vertices = pool.vertexCountOf(copy);
             set(push, copy, matrixBase).vertices(vertices);
@@ -727,17 +830,24 @@ public final class Deformation {
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        if (displacement.size() > 0) {
+            // Displaced copies: posed (or copied from their sources), then moved by their types, their spheres after
+            displacement.record(ctx, buffers, scene, skinnedNow, keptAt, keeping, drawn,
+                previousPositions == null ? 0 : previousPositions.deviceAddress());
+        }
         for (int i = 0; i < copyCount; i++) {
             int copy = copies[i];
             if (!posed[copy] || !changed[copy]) {
                 continue;
             }
-            int meshlets = pool.meshletCount(copy);
-            set(push, copy, matrixBase).vertices(meshlets);
-            ctx.dispatch(spheres, push, (meshlets + 63) / 64);
+            if (!displacement.displaces(copy)) {
+                int meshlets = pool.meshletCount(copy);
+                set(push, copy, matrixBase).vertices(meshlets);
+                ctx.dispatch(spheres, push, (meshlets + 63) / 64);
+            }
             changed[copy] = false;
             skins[copy]++;
-            System.arraycopy(bounds, 7 * copy, skinnedBounds, 6 * copy, 6); // what its vertices are quantized in now
+            System.arraycopy(drawn, 7 * copy, skinnedBounds, 6 * copy, 6); // what its vertices are quantized in now
         }
         // Everything after reads them: culling, drawing, ray tracing
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -760,8 +870,8 @@ public final class Deformation {
         push.previous(matrixBase + 4L * MATRIX_FLOATS * (blended[copy] ? previousMatrix[copy] : firstMatrix[copy]))
             .blend(blended[copy] ? factor[copy] : -1);
         return push.matrices(matrixBase + 4L * MATRIX_FLOATS * firstMatrix[copy]).source(source)
-            .target(copy).growth(bounds[b + 6]).boxMin(bounds[b], bounds[b + 1], bounds[b + 2])
-            .boxExtent(bounds[b + 3], bounds[b + 4], bounds[b + 5]);
+            .target(copy).growth(drawn[b + 6]).boxMin(drawn[b], drawn[b + 1], drawn[b + 2])
+            .boxExtent(drawn[b + 3], drawn[b + 4], drawn[b + 5]);
     }
 
     /** Frees its buffers: the pool's closing. */
@@ -774,6 +884,7 @@ public final class Deformation {
             previousPositions.close();
         }
         morphData.close();
+        displacement.close();
         retired.close();
         arena.close();
     }

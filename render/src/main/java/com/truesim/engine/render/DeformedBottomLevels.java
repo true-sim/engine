@@ -71,7 +71,7 @@ final class DeformedBottomLevels {
     private static final int MAX_BUILDS = 32;
     private static final int FLAGS = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
         | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-    private static final int TRANSFORM_BYTES = 48; // a 3 x 4 matrix of floats, 16-byte aligned by its place
+    private static final int TRANSFORM_BYTES = 48; // a 3 x 4 matrix of floats, 16-byte aligned from its copy's start
     private static final int USAGE = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
         | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
@@ -326,7 +326,12 @@ final class DeformedBottomLevels {
         }
         prepare(work);
         long positions = pool.positions().deviceAddress(); // as the deformation pass left them
-        long transformBase = transforms.deviceAddress();
+        // Builds read transforms at 16-byte aligned addresses (VUID-vkCmdBuildAccelerationStructuresKHR-pInfos-03810);
+        // each slot's copy is a buffer of its own, whose start is not always so aligned: this frame's are written from
+        // its copy's first aligned byte (pitfalls.md)
+        long transformCopy = transforms.deviceAddress();
+        long transformBase = (transformCopy + 15) & ~15L;
+        long transformPad = transformBase - transformCopy;
         // Frames before traced these levels, and the deformation pass wrote their positions.
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT
             | VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -370,7 +375,7 @@ final class DeformedBottomLevels {
             }
             moved |= copy.placed;
             copy.skins = skins;
-            writeTransform(copy, (long) TRANSFORM_BYTES * entry);
+            writeTransform(copy, transformPad + (long) TRANSFORM_BYTES * entry);
             record(copy, refit, positions, transformBase + (long) TRANSFORM_BYTES * entry, scratchAddress,
                 geometries + (long) VkAccelerationStructureGeometryKHR.SIZEOF * entry,
                 infos + (long) VkAccelerationStructureBuildGeometryInfoKHR.SIZEOF * entry,
@@ -436,12 +441,12 @@ final class DeformedBottomLevels {
             }
             scratch = structures.scratch(buildStride * MAX_BUILDS + updateStride * room);
         }
-        if (transforms == null || transforms.size() < (long) TRANSFORM_BYTES * work) {
+        if (transforms == null || transforms.size() < (long) TRANSFORM_BYTES * work + 16) {
             if (transforms != null) {
                 FrameBuffer old = transforms;
                 structures.retire(old::close);
             }
-            transforms = FrameBuffer.create(device, (long) TRANSFORM_BYTES * room,
+            transforms = FrameBuffer.create(device, (long) TRANSFORM_BYTES * room + 16,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | USAGE, slots);
         }
         if (work > recordCapacity) { // the arena frees the old ones with the rest

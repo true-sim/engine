@@ -17,6 +17,7 @@ struct InstancePush
     Occlusion occlusion;
     CulledView* rows;      // the views of the rows, and their phases
     uint firstRow;         // the row of this dispatch's first (dispatches have at most 65,535 rows)
+    float displacement;    // the material table's largest displacement (mesh units): INSTANCE_DISPLACED grow by it
 };
 
 [[vk::push_constant]]
@@ -51,7 +52,9 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     Instance instance = relative(stored, view);
     MeshEntry mesh = push.meshes[instance.mesh];
     float3 center = toWorld(instance, mesh.sphere.xyz);
-    float radius = mesh.sphere.w * maxScale(instance);
+    // Displaced in the vertex stages (RASTER): grown by the most any material moves a vertex (meshlets by their own)
+    float radius = (mesh.sphere.w + ((stored.mesh & INSTANCE_DISPLACED) != 0 ? push.displacement : 0))
+        * maxScale(instance);
     uint phase = row.phase;
     bool inView = inFrustum(view, center, radius);
     if (phase == PHASE_EARLY && (!inView || view.visibility[instanceId] == 0))

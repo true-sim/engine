@@ -181,6 +181,21 @@ public void shadeTiles<M : IMaterial>(uint3 group, uint3 thread)
     }
 }
 
+/** Vertex `vertex` as drawing transformed it: displaced by type M where `displaced` (RASTER). */
+VertexOut resolveVertex<M : IMaterial>(View view, Instance stored, Instance instance, uint id, MeshEntry mesh,
+    uint vertex, uint meshlet, uint submesh, bool displaced)
+{
+    if (!displaced)
+    {
+        return transformVertex(view, instance, mesh, vertex, push.scene[0].positions, push.scene[0].attributes,
+            meshlet, submesh);
+    }
+    LocalVertex local = localVertex(mesh, vertex, push.scene[0].positions, push.scene[0].attributes);
+    MaterialRef ref = { push.scene[0].materials, instance.materialBase + submesh };
+    return transformLocal(view, instance, displacedVertex<M>(local, stored, id, ref, push.scene[0].hooks), meshlet,
+        submesh);
+}
+
 /** Shades pixel `id` with material type M, shadow rays traced by `rays`. */
 public void shadePixel<M : IMaterial>(uint3 id)
 {
@@ -195,8 +210,13 @@ public void shadePixel<M : IMaterial>(uint3 id)
         return;
     }
     View view = push.view[0];
-    Instance instance = relative(push.scene[0].instances[ids.x - 1], view);
+    Instance stored = push.scene[0].instances[ids.x - 1];
+    Instance instance = relative(stored, view);
     MeshEntry mesh = push.scene[0].meshes[instance.mesh];
+    uint submeshOf = (ids.y & CLASSIC_TRIANGLE) != 0 ? (ids.y >> 24) & 0x7f
+        : meshletSubmesh(push.scene[0].meshlets, ids.y >> 7);
+    // Displaced in the vertex stages (RASTER): the triangle rebuilt as they drew it
+    bool displaced = displacedInStages(stored, push.scene[0].materials[stored.materialBase + submeshOf]);
     VertexOut v[3];
     if ((ids.y & CLASSIC_TRIANGLE) != 0)
     {
@@ -207,8 +227,7 @@ public void shadePixel<M : IMaterial>(uint3 id)
         for (uint k = 0; k < 3; k++)
         {
             uint vertex = mesh.vertexBase + push.classicIndices[first + k];
-            v[k] = transformVertex(view, instance, mesh, vertex, push.scene[0].positions, push.scene[0].attributes,
-                t >> 7, submesh);
+            v[k] = resolveVertex<M>(view, stored, instance, ids.x - 1, mesh, vertex, t >> 7, submesh, displaced);
         }
     }
     else
@@ -222,8 +241,7 @@ public void shadePixel<M : IMaterial>(uint3 id)
         for (uint k = 0; k < 3; k++)
         {
             uint vertex = mesh.vertexBase + push.scene[0].meshletVertices[vertexBase + triangleByte(first + k)];
-            v[k] = transformVertex(view, instance, mesh, vertex, push.scene[0].positions, push.scene[0].attributes,
-                m, submesh);
+            v[k] = resolveVertex<M>(view, stored, instance, ids.x - 1, mesh, vertex, m, submesh, displaced);
         }
     }
     float4x4 toWorld = view.inverseViewProjection;

@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
@@ -498,7 +499,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     static ShadingPipelines.Key geometryKey(MaterialType type, int list, int target, boolean casters) {
         int bin = list % MeshletRenderer.BINS;
         boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
-        return new ShadingPipelines.Key("shaders/classic/draw.spv", "classicVertexMain", false, type.geometryShader(),
+        return new ShadingPipelines.Key(vertexShader(type), vertexEntry(type), false, type.geometryShader(),
             type.name() + (masked ? "Masked" : "") + (casters ? "ShadowMain" : target == ShadingPipelines.DEPTH
                 ? "DepthMain" : "ClassicIdsMain"),
             0, type.geometry(), (bin == MeshletRenderer.BIN_OPAQUE && !casters ? ShadingPipelines.CULL_BACK
@@ -544,13 +545,24 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         boolean weighted = target == ShadingPipelines.WEIGHTED;
         int bin = list % MeshletRenderer.BINS;
         boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
-        return new ShadingPipelines.Key("shaders/classic/draw.spv", "classicVertexMain", false, type.forwardShader(),
+        return new ShadingPipelines.Key(vertexShader(type), vertexEntry(type), false, type.forwardShader(),
             type.name() + (weighted ? "BlendedMain" : target == ShadingPipelines.COLOR_SURFACES
                 ? (masked ? "MaskedSurfaceMain" : "SurfaceMain") : masked ? "MaskedMain" : "FragmentMain"), features,
             type.geometry(),
             (bin == MeshletRenderer.BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED)
                 | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0),
             target, DRAW_PUSH, hooks);
+    }
+
+    /** The vertex stage's shader of {@code type}'s pipelines: its own where it displaces (RASTER), else the shared. */
+    private static String vertexShader(MaterialType type) {
+        return type.displaces() ? type.displaceShader() : "shaders/classic/draw.spv";
+    }
+
+    /** The vertex stage's entry point of {@code type}'s pipelines. */
+    @AllowAllocation("building the graph, when it changes")
+    private static String vertexEntry(MaterialType type) {
+        return type.displaces() ? type.name() + "ClassicVertexMain" : "classicVertexMain";
     }
 
     /** Bytes of a draw list of {@code categories} parts per list: the parts' counts, their commands, their records. */
@@ -795,6 +807,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             memPutLong(push + SelectPush.DRAWS, list);
             memPutLong(push + SelectPush.RECORDS, list + recordsOffset(categories));
             memPutInt(push + SelectPush.CATEGORIES, categories);
+            memPutFloat(push + SelectPush.DISPLACEMENT, scene.materials().largestDisplacement());
             memPutInt(push + SelectPush.BY_TYPE, byType);
             memPutInt(push + SelectPush.BY_GEOMETRY, byGeometry);
             memPutInt(push + SelectPush.INSTANCE_COUNT, scene.highWater());

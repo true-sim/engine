@@ -55,11 +55,19 @@ import java.util.function.Function;
  *                        ({@link ReferencePathTracer}); null: its hits are not shaded (devices without ray tracing
  *                        never load it)
  * @param hitEntry        that entry point; null with no shader
+ * @param displaceShader  the shader of its displacing vertex and mesh stages ({@code <name>VertexMain},
+ *                        {@code <name>MeshIdsMain}, {@code <name>MeshLeanMain}, {@code <name>ClassicVertexMain}), drawn
+ *                        where it has {@link Material#GEOMETRY_DISPLACE} and its instances displace in the stages
+ *                        ({@link Displacement#RASTER})
+ * @param displaceMotionShader the shader of its motion vectors where it displaces ({@code <name>MotionMain})
+ * @param displaceComputeShader the shader of its displacement into instances' copies ({@code <name>DisplaceMain},
+ *                        {@link Displacement#COMPUTE})
  */
 public record MaterialType(String name, Class<? extends MaterialParameters> parameters,
     Function<MaterialValues, ? extends MaterialParameters> fromValues, int allowedFeatures, String shader,
     String entry, String forwardShader, String forwardLeanShader,
-    String geometryShader, String hitShader, String hitEntry) {
+    String geometryShader, String hitShader, String hitEntry, String displaceShader, String displaceMotionShader,
+    String displaceComputeShader) {
 
     public MaterialType {
         Objects.requireNonNull(name, "name");
@@ -70,6 +78,9 @@ public record MaterialType(String name, Class<? extends MaterialParameters> para
         Objects.requireNonNull(forwardShader, "forwardShader");
         Objects.requireNonNull(forwardLeanShader, "forwardLeanShader");
         Objects.requireNonNull(geometryShader, "geometryShader");
+        Objects.requireNonNull(displaceShader, "displaceShader");
+        Objects.requireNonNull(displaceMotionShader, "displaceMotionShader");
+        Objects.requireNonNull(displaceComputeShader, "displaceComputeShader");
         if ((hitShader == null) != (hitEntry == null)) {
             throw new IllegalArgumentException("A hit shader and its entry point, or neither: " + name);
         }
@@ -85,5 +96,10 @@ public record MaterialType(String name, Class<? extends MaterialParameters> para
      */
     public int geometry() {
         return allowedFeatures & Material.GEOMETRY_HOOKS;
+    }
+
+    /** Whether its {@code displace()} moves its vertices ({@link Material#GEOMETRY_DISPLACE}). */
+    public boolean displaces() {
+        return (allowedFeatures & Material.GEOMETRY_DISPLACE) != 0;
     }
 }

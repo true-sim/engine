@@ -63,6 +63,8 @@ public final class GpuScene implements AutoCloseable {
     /** Instance flags above the mesh id, as meshlets/common.slang has them. */
     private static final int LIVE = CommonConstants.INSTANCE_LIVE;
     private static final int CASTS_SHADOWS = CommonConstants.INSTANCE_CASTS_SHADOWS;
+    private static final int DISPLACED = CommonConstants.INSTANCE_DISPLACED;
+    private static final int PREDISPLACED = CommonConstants.INSTANCE_PREDISPLACED;
     private static final int MESH_BITS = (1 << 24) - 1;
     /** Layer 0: where instances are unless set otherwise. */
     private static final int DEFAULT_LAYERS = 1;
@@ -71,6 +73,7 @@ public final class GpuScene implements AutoCloseable {
     private final GeometryPool pool;
     private int capacity;
     private volatile ShadingHookOverrides hookOverrides; // made at need
+    private volatile GeometryHooks geometryHooks; // made at need
     private final RecordBuffer instances; // the GPU's, device-local, uploading at the start of each frame
     // Per id, its mesh word as last written (mesh, live, casts shadows), 0 for a hole or an id the GPU writes: what
     // ray tracing reads to leave out of its top level what has nothing to trace.
@@ -520,14 +523,23 @@ public final class GpuScene implements AutoCloseable {
         m.set(FLOAT, o + InstanceLayout.POSITION, hx);
         m.set(FLOAT, o + InstanceLayout.POSITION + 4, hy);
         m.set(FLOAT, o + InstanceLayout.POSITION + 8, hz);
-        int word = mesh | LIVE | flags;
+        // Displaced where drawn (RASTER) where a material of it displaces, unless its mesh is a copy displaced already
+        Deformation deformation = pool.deformation();
+        boolean predisplaced = deformation.displaces(mesh);
+        int slots = Math.max(1, pool.materialSlots(mesh));
+        int word = mesh | LIVE | flags | (predisplaced ? PREDISPLACED
+            : materials.displaces(material, slots) ? DISPLACED : 0);
+        if (predisplaced) {
+            // the instance its copy is displaced for, and how far its materials displace it
+            deformation.bind(mesh, instances.pendingIndex(entry), Math.max(0, materials.displacement(material, slots)));
+        }
         m.set(INT, o + InstanceLayout.MESH, word);
         meshWords[instances.pendingIndex(entry)] = word; // by id: the entry is its place among the changes
         m.set(FLOAT, o + InstanceLayout.SCALE, sx);
         m.set(FLOAT, o + InstanceLayout.SCALE + 4, sy);
         m.set(FLOAT, o + InstanceLayout.SCALE + 8, sz);
         m.set(INT, o + InstanceLayout.MATERIAL_BASE, material);
-        reference(material, Math.max(1, pool.materialSlots(mesh))); // its submeshes' materials draw
+        reference(material, slots); // its submeshes' materials draw
         m.set(FLOAT, o + InstanceLayout.POSITION_LOW, (float) (x - hx));
         m.set(FLOAT, o + InstanceLayout.POSITION_LOW + 4, (float) (y - hy));
         m.set(FLOAT, o + InstanceLayout.POSITION_LOW + 8, (float) (z - hz));
@@ -798,6 +810,7 @@ public final class GpuScene implements AutoCloseable {
         followMaterialBuffers();
         if (!uploadsInPasses) { // as the records: listed until they upload
             clearMobilityChanges();
+            geometryHooks().publish();
         }
         instances.upload(commands);
     }
@@ -819,6 +832,7 @@ public final class GpuScene implements AutoCloseable {
     void uploadInPass(VkCommandBuffer commands) {
         followMaterialBuffers();
         clearMobilityChanges();
+        geometryHooks().publish(); // once a frame: the frame's block, and the frame before's kept
         instances.uploadInPass(commands);
     }
 
@@ -917,7 +931,36 @@ public final class GpuScene implements AutoCloseable {
         table.putLong(SceneTableLayout.MESHLET_VERTICES, pool.meshletVertices().deviceAddress());
         table.putLong(SceneTableLayout.MESHLET_TRIANGLES, pool.meshletTriangles().deviceAddress());
         table.putLong(SceneTableLayout.MATERIALS, materials.deviceAddress());
+        GeometryHooks hooks = geometryHooks();
+        table.putLong(SceneTableLayout.HOOKS, hooks.address());
+        table.putLong(SceneTableLayout.PREVIOUS_HOOKS, hooks.previousAddress());
         return table.deviceAddress();
+    }
+
+    /**
+     * The scene's hook block for its geometry ({@link GeometryHooks}): what material types' displacement reads, the same
+     * in every view, this frame's and the frame before's. Made when first asked.
+     */
+    public GeometryHooks geometryHooks() {
+        GeometryHooks hooks = geometryHooks;
+        return hooks != null ? hooks : makeGeometryHooks();
+    }
+
+    @AllowAllocation("made once")
+    private synchronized GeometryHooks makeGeometryHooks() {
+        if (geometryHooks == null) {
+            geometryHooks = new GeometryHooks(device, this, slots);
+        }
+        return geometryHooks;
+    }
+
+    /**
+     * Whether instance {@code id} is displaced where it is drawn ({@link Displacement#RASTER}: a material of it
+     * displaces, its mesh no copy displaced once a frame), as last written: shadow maps draw its tiles again each
+     * frame, as for deformed copies.
+     */
+    public boolean displacedInStages(int id) {
+        return id >= 0 && id < meshWords.length && (meshWords[id] & DISPLACED) != 0;
     }
 
     /** The material table's device address, for passes shading the instances (as {@code shading.slang} reads it). */
@@ -931,6 +974,9 @@ public final class GpuScene implements AutoCloseable {
             closed = true;
             if (hookOverrides != null) {
                 hookOverrides.close();
+            }
+            if (geometryHooks != null) {
+                geometryHooks.close();
             }
             instances.close();
             motion.close();

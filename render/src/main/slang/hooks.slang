@@ -14,6 +14,8 @@
 //   IMediaHook     static void media(ShadingPoint p, X* params, inout ViewRay ray)
 //       what lies between the camera and the point: fog, aerial perspective, volumetric media; the sky's points are at
 //       infinity (p.path == SHADING_SKY).
+//   IGeometryHook  (no function)
+//       data geometry reads: material types' displace() take its record from the scene's hook block (wind, snow depth).
 //
 // Hooks may import hooks, bindless, shading and lights (and their own modules); nothing of the engine's shading paths.
 // The build (truesim.slang) merges the hooks of a project and its libraries into the dispatch indirect.slang includes
@@ -231,6 +233,17 @@ public interface IMediaHook
 {
     associatedtype Parameters;
     static void media(ShadingPoint p, Parameters* params, inout ViewRay ray);
+};
+
+/**
+ * The geometry hook point: a hook carrying what geometry reads, with no function of its own. Its record lies in every
+ * hook block, the scene's too (engine-render's GpuScene.geometryHooks: one block for every view, this frame's and the
+ * frame before's), where material types' displace() read it (DisplacePoint.hook): wind, a snow depth field's slot and
+ * transform. Like any hook it has values in the scene, a technique or code writing them, and per-instance overrides.
+ */
+public interface IGeometryHook
+{
+    associatedtype Parameters;
 };
 
 /**

@@ -463,8 +463,19 @@ public final class SceneResources implements AutoCloseable {
      */
     @AllowAllocation("a skinned renderable drawn or changed")
     int addCopy(int source, int joints, MeshData data) {
+        return addCopy(source, joints, data, false);
+    }
+
+    /** As {@link #addCopy(int, int, MeshData)}, {@code displaced} once a frame by its materials (COMPUTE) too. */
+    @AllowAllocation("a skinned or displaced renderable drawn or changed")
+    int addCopy(int source, int joints, MeshData data, boolean displaced) {
         int copy = pool.addDeformed(source);
-        pool.deformation().add(copy, joints, data);
+        if (joints > 0 || data.morphTargetCount() > 0) {
+            pool.deformation().add(copy, joints, data);
+        }
+        if (displaced) {
+            pool.deformation().displace(copy);
+        }
         copies.put(copy, data);
         traceCopy(copy, data);
         return copy;
@@ -1808,6 +1819,17 @@ public final class SceneResources implements AutoCloseable {
             } else if (d.alphaMode() == MaterialData.AlphaMode.BLEND) {
                 material = material.alphaBlend();
             }
+            if (type.displaces()) {
+                // How far it displaces at most: the data's value "displacement" (in the mesh's units), which every
+                // displacing type's materials take beside their record (Material.displacement)
+                read.add(DISPLACEMENT);
+                material = material.displacement(d.values().f32(DISPLACEMENT, Float.NaN));
+                if (Float.isNaN(material.displacement())) {
+                    problem(entry, "material type " + type.name() + " displaces: its data needs \"" + DISPLACEMENT
+                        + "\", how far at most: it draws as the default");
+                    return Material.DEFAULT;
+                }
+            }
             unread(entry, d.values(), read, "");
             for (String name : d.features()) {
                 Set<String> readOfFeature = new HashSet<>();
@@ -1836,6 +1858,9 @@ public final class SceneResources implements AutoCloseable {
             return Material.DEFAULT;
         }
     }
+
+    /** A displacing type's data value: how far its displacement moves a vertex at most, in mesh units. */
+    static final String DISPLACEMENT = "displacement";
 
     /** Reports the names of {@code values} that the type never read: names it does not have, ignored. */
     @AllowAllocation("materials change rarely")

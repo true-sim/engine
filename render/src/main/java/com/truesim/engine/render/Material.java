@@ -37,10 +37,14 @@ import java.util.Objects;
  * @param refusedHooks the shading hooks it refuses by name (hooks.slang: snow on an indoor floor, fog on a sky dome), of
  *                     any hook point; none run at its points, whatever overrides switch on
  * @param hookCoat    whether surface hooks may put a coat of their own on it (a water layer: a clear coat)
+ * @param displacement the farthest its type's {@code displace()} moves a vertex ({@link #GEOMETRY_DISPLACE}), in its
+ *                    mesh's units: bounds grow by it ({@link #displacement(float)}); NaN where not declared, which a
+ *                    displacing type's material must not be
  */
 @AllowAllocation("materials are made when they change")
 public record Material(MaterialType type, MaterialParameters parameters, List<MaterialFeature> features,
-    boolean doubleSided, float alphaCutoff, boolean blended, List<String> refusedHooks, boolean hookCoat) {
+    boolean doubleSided, float alphaCutoff, boolean blended, List<String> refusedHooks, boolean hookCoat,
+    float displacement) {
 
     /** A clear coat: a glossy dielectric layer over the base, as car paint or varnish. */
     public static final int FEATURE_CLEARCOAT = MaterialsConstants.FEATURE_CLEARCOAT;
@@ -88,8 +92,14 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
     public static final int GEOMETRY_KEEP = MaterialsConstants.GEOMETRY_KEEP;
     /** Where geometry hooks start in a type's {@link MaterialType#allowedFeatures}. */
     public static final int GEOMETRY_SHIFT = MaterialsConstants.GEOMETRY_SHIFT;
+    /**
+     * A geometry hook of a material type: its {@code displace()} moves its vertices, in every pass reading its geometry
+     * ({@link Displacement#RASTER}) or once a frame into the instance's copy of its mesh ({@link Displacement#COMPUTE}),
+     * as materials.slang's {@code GEOMETRY_DISPLACE}. Its materials declare how far ({@link #displacement(float)}).
+     */
+    public static final int GEOMETRY_DISPLACE = MaterialsConstants.GEOMETRY_DISPLACE;
     /** Every geometry hook bit there is. */
-    static final int GEOMETRY_HOOKS = GEOMETRY_KEEP;
+    static final int GEOMETRY_HOOKS = GEOMETRY_KEEP | GEOMETRY_DISPLACE;
 
     /** Metallic-roughness's defaults: light gray, rough, opaque. Material 0 of every table. */
     public static final Material DEFAULT = new Material(MetallicRoughnessParameters.DEFAULTS);
@@ -118,6 +128,15 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
         if (blended && alphaCutoff >= 0) {
             throw new IllegalArgumentException("Masked or blended, not both");
         }
+        if (!Float.isNaN(displacement) && !(displacement >= 0 && displacement < Float.POSITIVE_INFINITY)) {
+            throw new IllegalArgumentException("A displacement of 0 or more: " + displacement);
+        }
+    }
+
+    /** Its displacement not declared: as the canonical constructor with {@code displacement} NaN. */
+    public Material(MaterialType type, MaterialParameters parameters, List<MaterialFeature> features,
+        boolean doubleSided, float alphaCutoff, boolean blended, List<String> refusedHooks, boolean hookCoat) {
+        this(type, parameters, features, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat, Float.NaN);
     }
 
     /** No hook refused, no coat of theirs: as {@link #Material(MaterialType, MaterialParameters, List, boolean, float,
@@ -145,7 +164,7 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
 
     /** This with {@code parameters} instead. */
     public Material parameters(MaterialParameters parameters) {
-        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat);
+        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat, displacement);
     }
 
     /** This showing {@code feature}, instead of any parameters it had for it. */
@@ -158,19 +177,19 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
         }
         with.add(feature);
         with.sort((a, b) -> Integer.compare(a.feature(), b.feature()));
-        return new Material(type, parameters, with, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat);
+        return new Material(type, parameters, with, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat, displacement);
     }
 
     /** This without feature {@code feature} (a {@code FEATURE_*} bit). */
     public Material withoutFeature(int feature) {
         List<MaterialFeature> without = new ArrayList<>(features);
         without.removeIf(f -> f.feature() == feature);
-        return new Material(type, parameters, without, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat);
+        return new Material(type, parameters, without, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat, displacement);
     }
 
     /** Whether back faces show too, lit as the front: leaves, cloth, thin walls. */
     public Material doubleSided(boolean twoSided) {
-        return new Material(type, parameters, features, twoSided, alphaCutoff, blended, refusedHooks, hookCoat);
+        return new Material(type, parameters, features, twoSided, alphaCutoff, blended, refusedHooks, hookCoat, displacement);
     }
 
     /**
@@ -181,12 +200,12 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
         if (!(cutoff >= 0 && cutoff <= 1)) {
             throw new IllegalArgumentException("A cutoff of 0 to 1: " + cutoff);
         }
-        return new Material(type, parameters, features, doubleSided, cutoff, false, refusedHooks, hookCoat);
+        return new Material(type, parameters, features, doubleSided, cutoff, false, refusedHooks, hookCoat, displacement);
     }
 
     /** Opaque again: alpha is neither compared nor blended. */
     public Material opaque() {
-        return new Material(type, parameters, features, doubleSided, -1, false, refusedHooks, hookCoat);
+        return new Material(type, parameters, features, doubleSided, -1, false, refusedHooks, hookCoat, displacement);
     }
 
     /**
@@ -194,7 +213,7 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
      * color's), after the opaque surfaces, as {@link Transparency#MODE} says; glass, smoke, fades.
      */
     public Material alphaBlend() {
-        return new Material(type, parameters, features, doubleSided, -1, true, refusedHooks, hookCoat);
+        return new Material(type, parameters, features, doubleSided, -1, true, refusedHooks, hookCoat, displacement);
     }
 
     public boolean masked() {
@@ -222,12 +241,12 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
     public Material refuseHooks(String... hooks) {
         List<String> more = new ArrayList<>(refusedHooks);
         more.addAll(List.of(hooks));
-        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, more, hookCoat);
+        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, more, hookCoat, displacement);
     }
 
     /** This refusing no shading hook. */
     public Material acceptHooks() {
-        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, List.of(), hookCoat);
+        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, List.of(), hookCoat, displacement);
     }
 
     /** Whether it refuses shading hook {@code hook}. */
@@ -237,7 +256,19 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
 
     /** This letting surface hooks put a coat of their own on it (a water layer), or not. */
     public Material hookCoat(boolean on) {
-        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, refusedHooks, on);
+        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, refusedHooks, on,
+            displacement);
+    }
+
+    /**
+     * This declaring that its type's {@code displace()} ({@link #GEOMETRY_DISPLACE}) moves a vertex at most
+     * {@code distance} (in its mesh's units, as the vertices): culling grows its meshlets' bounds by it (and its
+     * instances' by the table's largest), shadow maps the casters' reach; a displacement past it may be culled away. A
+     * displacing type's materials must declare it; other types' ignore it.
+     */
+    public Material displacement(float distance) {
+        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended, refusedHooks, hookCoat,
+            distance);
     }
 
     /** The features it shows, {@code FEATURE_*} bits. */
@@ -252,10 +283,11 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
     /**
      * The header word shaders read, for type id {@code typeId}: type in bits 0-7, double-sided bit 8, masked bit 9,
      * blended bit 10, refuses hooks bit 11 (their words after its feature table), hook coat bit 12 (hooks.slang),
-     * cutoff 16-31.
+     * displaces bit 13 (its type has {@link #GEOMETRY_DISPLACE}: {@code displaces}), cutoff 16-31.
      */
-    int header(int typeId) {
+    int header(int typeId, boolean displaces) {
         int header = typeId | (doubleSided ? 1 << 8 : 0) | (blended ? 1 << 10 : 0)
+            | (displaces ? MaterialsConstants.MATERIAL_DISPLACES : 0)
             | (refusedHooks.isEmpty() ? 0 : HooksConstants.MATERIAL_REFUSES_HOOKS)
             | (hookCoat ? HooksConstants.MATERIAL_HOOK_COAT : 0);
         if (alphaCutoff >= 0) {

@@ -112,7 +112,8 @@ public record SceneData(MeshletRenderer renderer) implements Request<SceneData.B
             .write(buffers.attributes, BufferAccess.STORAGE_WRITE).write(buffers.meshlets, BufferAccess.STORAGE_WRITE)
             .read(buffers.meshletVertices, BufferAccess.STORAGE_READ)
             .write(buffers.clusterLod, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> pool.deformation().record(ctx, buffers, skin, spheres, push, keep, keepPush));
+            .read(buffers.instances, BufferAccess.STORAGE_READ) // displaced copies: their instances' poses
+            .record(ctx -> pool.deformation().record(ctx, buffers, skin, spheres, push, keep, keepPush, scene));
         return buffers;
     }
 }

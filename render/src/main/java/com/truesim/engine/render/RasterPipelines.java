@@ -189,9 +189,11 @@ final class RasterPipelines implements AutoCloseable {
         boolean surfaces = target == ShadingPipelines.COLOR_SURFACES;
         String suffix = weighted ? "BlendedMain" : surfaces ? (masking(bin) ? "MaskedSurfaceMain" : "SurfaceMain")
             : masking(bin) ? "MaskedMain" : lean ? "Main" : "FragmentMain";
-        return new ShadingPipelines.Key(!meshShading ? "shaders/meshlets/draw.spv" : lean
-            ? "shaders/meshlets/lean.spv" : "shaders/meshlets/mesh.spv",
-            !meshShading ? "vertexMain" : lean ? "meshLeanTypedMain" : "meshIdsTypedMain", meshShading,
+        boolean displaces = type.displaces(); // its own vertex and mesh stages, displacing (RASTER)
+        return new ShadingPipelines.Key(displaces ? type.displaceShader() : !meshShading ? "shaders/meshlets/draw.spv"
+            : lean ? "shaders/meshlets/lean.spv" : "shaders/meshlets/mesh.spv",
+            displaces ? type.name() + (!meshShading ? "VertexMain" : lean ? "MeshLeanMain" : "MeshIdsMain")
+            : !meshShading ? "vertexMain" : lean ? "meshLeanTypedMain" : "meshIdsTypedMain", meshShading,
             lean ? type.forwardLeanShader() : type.forwardShader(), type.name() + (lean ? "Lean" : "") + suffix,
             features, type.geometry(), bin == BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED,
             target, DRAW_PUSH, hooks);
@@ -314,8 +316,11 @@ final class RasterPipelines implements AutoCloseable {
         boolean shadow = role == SHADOW;
         boolean depth = role == DEPTH || shadow;
         boolean slim = meshShading && slimMeshes && depth && !masked && type == null;
-        String geometryShader = !meshShading ? "shaders/meshlets/draw.spv" : "shaders/meshlets/mesh.spv";
-        String geometryEntry = !meshShading ? "vertexMain" : slim ? "meshTypedMain" : "meshIdsTypedMain";
+        boolean displaces = type != null && type.displaces(); // its own vertex and mesh stages, displacing (RASTER)
+        String geometryShader = displaces ? type.displaceShader() : !meshShading ? "shaders/meshlets/draw.spv"
+            : "shaders/meshlets/mesh.spv";
+        String geometryEntry = displaces ? type.name() + (!meshShading ? "VertexMain" : "MeshIdsMain")
+            : !meshShading ? "vertexMain" : slim ? "meshTypedMain" : "meshIdsTypedMain";
         String fragmentShader;
         String fragmentEntry;
         if (type != null) {

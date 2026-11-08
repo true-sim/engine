@@ -112,6 +112,12 @@ public final class Materials implements AutoCloseable {
     private final Map<Long, Integer> binOf = new HashMap<>();
     // The types with geometry hooks (MaterialType.geometry), in registration order: each one's number is its index + 1.
     private final List<MaterialType> geometryTypes = new java.util.concurrent.CopyOnWriteArrayList<>();
+    // Displacement: per id whether its material's type displaces (GEOMETRY_DISPLACE), the largest displacement any
+    // material written declared (sticky: instances' bounds grow by it), and the modes types were given (else the
+    // setting's)
+    private volatile float[] displacing = filledNegative(16); // per id its declared displacement; -1: none
+    private volatile float largestDisplacement;
+    private final Map<MaterialType, Displacement> displacementModes = new java.util.concurrent.ConcurrentHashMap<>();
     private int blended; // how many materials are drawn blended: the transparency pass runs while there are
     private int transmissive; // how many are transmissive: transparency copies the scene behind while there are
     /** The type of each parameters' record, where one type takes it. */
@@ -330,6 +336,89 @@ public final class Materials implements AutoCloseable {
         return geometryTypes.get(number - 1);
     }
 
+    /**
+     * Where {@code type}'s displacement runs for instances that do not say ({@link Displacement}); null: as the setting
+     * {@link Displacement#MODE} says. Read when instances are made (engine-scene's {@code SceneSync}).
+     */
+    public Materials displacementMode(MaterialType type, Displacement mode) {
+        java.util.Objects.requireNonNull(type, "type");
+        if (!type.displaces()) {
+            throw new IllegalArgumentException(type.name() + " does not displace (GEOMETRY_DISPLACE)");
+        }
+        if (mode == null) {
+            displacementModes.remove(type);
+        } else {
+            displacementModes.put(type, mode);
+        }
+        return this;
+    }
+
+    /** Where {@code type}'s displacement runs for instances that do not say; null: as the setting says. */
+    public Displacement displacementMode(MaterialType type) {
+        return displacementModes.get(type);
+    }
+
+    private static float[] filledNegative(int length) {
+        float[] array = new float[length];
+        Arrays.fill(array, -1);
+        return array;
+    }
+
+    /** Whether material {@code id}'s type displaces its vertices ({@link Material#GEOMETRY_DISPLACE}). */
+    public boolean displaces(int id) {
+        float[] d = displacing;
+        return id >= 0 && id < d.length && d[id] >= 0;
+    }
+
+    /** Whether any of materials {@code first} to {@code first + count - 1} displaces. Allocates nothing. */
+    public boolean displaces(int first, int count) {
+        return displacement(first, count) >= 0;
+    }
+
+    /**
+     * The largest displacement materials {@code first} to {@code first + count - 1} declare, of those displacing; -1
+     * where none displaces. Allocates nothing.
+     */
+    public float displacement(int first, int count) {
+        float[] d = displacing;
+        float most = -1;
+        for (int id = Math.max(first, 0); id < first + count && id < d.length; id++) {
+            most = Math.max(most, d[id]);
+        }
+        return most;
+    }
+
+    /** Material {@code id}'s type, as registered. */
+    public MaterialType materialType(int id) {
+        return types.get(typeId(material(id)));
+    }
+
+    /**
+     * The largest displacement a material of the table declared ({@link Material#displacement(float)}), in mesh units:
+     * instances displaced where they are drawn grow their bounds by it (their meshlets by their own material's). It
+     * never shrinks.
+     */
+    public float largestDisplacement() {
+        return largestDisplacement;
+    }
+
+    /** The registered types that displace, in registration order (a type's number among those with geometry hooks). */
+    @AllowAllocation("building the graph, when it changes")
+    public List<MaterialType> displacingTypes() {
+        List<MaterialType> found = new ArrayList<>();
+        for (int i = 0; i < geometryTypes.size(); i++) {
+            if (geometryTypes.get(i).displaces()) {
+                found.add(geometryTypes.get(i));
+            }
+        }
+        return found;
+    }
+
+    /** {@code type}'s id in the table (materials.slang's type bits of a header), or -1 where not registered. */
+    int typeIndex(MaterialType type) {
+        return types.indexOf(type);
+    }
+
     /** {@code type}'s number among the types with geometry hooks, from 1; 0 if it has none. */
     private int geometryNumber(MaterialType type) {
         return type.geometry() == 0 ? 0 : geometryTypes.indexOf(type) + 1;
@@ -476,12 +565,52 @@ public final class Materials implements AutoCloseable {
         heapStart = start;
     }
 
-    /** Replaces material {@code id} with {@code material}; any id of a block. */
+    /**
+     * Replaces material {@code id} with {@code material}; any id of a block. A material instances took keeps displacing
+     * or not (their bounds and passes follow it from when they were set): to change that, add a material and set the
+     * instances to it.
+     */
     public void set(int id, Material material) {
         if (!contains(id)) {
             throw new IllegalArgumentException("No material " + id);
         }
+        boolean displaces = types.get(typeId(material)).displaces();
+        if (displaces != displaces(id) && takenByInstances(id)) {
+            throw new IllegalArgumentException("Material " + id + " is drawn by instances and " + (displaces
+                ? "did not displace" : "displaced") + ": add the new material and set the instances to it");
+        }
         write(id, material);
+    }
+
+    /** Whether an instance took material {@code id} ({@link #reference}). */
+    private boolean takenByInstances(int id) {
+        synchronized (usage) {
+            return id >>> 6 < referenced.length && (referenced[id >>> 6] & 1L << id) != 0;
+        }
+    }
+
+    /** Notes whether material {@code id}'s type displaces, and by how much at most. */
+    @AllowAllocation("materials are written when they change")
+    private synchronized void noteDisplacing(int id, boolean displaces, float distance) {
+        float[] d = displacing;
+        float value = displaces ? distance : -1;
+        if (id >= d.length) {
+            if (!displaces) {
+                return;
+            }
+            int old = d.length;
+            d = Arrays.copyOf(d, Math.max(2 * d.length, id + 1));
+            Arrays.fill(d, old, d.length, -1);
+        } else if (d[id] == value) {
+            return;
+        } else {
+            d = d.clone(); // readers on other threads see a whole array
+        }
+        d[id] = value;
+        displacing = d;
+        if (distance > largestDisplacement) {
+            largestDisplacement = distance;
+        }
     }
 
     /**
@@ -1019,6 +1148,12 @@ public final class Materials implements AutoCloseable {
     /** Writes {@code material}'s blocks and slot under {@code id}; false (and nothing changed) without heap room. */
     private void write(int id, Material material) {
         int typeId = typeId(material);
+        boolean displaces = types.get(typeId).displaces();
+        if (displaces && Float.isNaN(material.displacement())) {
+            throw new IllegalArgumentException(types.get(typeId).name() + " displaces its vertices: its materials "
+                + "declare how far at most (Material.displacement)");
+        }
+        noteDisplacing(id, displaces, displaces ? material.displacement() : 0);
         int bin = bin(typeId, material.featureMask());
         int raster = 1 << rasterBin(material);
         if ((binRasters[bin] & raster) == 0) {
@@ -1080,11 +1215,11 @@ public final class Materials implements AutoCloseable {
             entry += 4;
         }
         table.put(block, scratch, 0, bytes);
-        table.putInt(slot + MaterialLayout.HEADER, material.header(typeId));
+        table.putInt(slot + MaterialLayout.HEADER, material.header(typeId, displaces));
         table.putInt(slot + MaterialLayout.PARAMETERS, (int) block);
         table.putInt(slot + MaterialLayout.MASK_TEXTURE, material.parameters().maskTexture());
         table.putFloat(slot + MaterialLayout.MASK_ALPHA, material.parameters().maskAlpha());
-        table.putInt(slot + MaterialLayout.GEOMETRY, 0);
+        table.putFloat(slot + MaterialLayout.GEOMETRY, displaces ? material.displacement() : 0);
         table.putInt(slot + MaterialLayout.FEATURES, material.featureMask());
         table.putInt(slot + MaterialLayout.FEATURE_TABLE, (int) featureTable);
         // Its shading bin, and its type's number among those with geometry hooks (materials.slang's Material.bin).

@@ -282,6 +282,19 @@ struct it described already instead of describing it again, and the probe's own 
   the build.
 - Rule: declare a `[HostLayout]` struct before any struct holding a pointer to it.
 
+**The indexed path's primitive IDs restart at every typed draw.** The visibility buffer's IDs store a triangle as the
+primitive ID less the visible meshlet's first triangle; the vertex stage gave that first triangle counted from its raster
+bin's first index, as drawing a whole bin does. A typed draw (the lists split by shading bin, or by type with geometry
+hooks for depth and IDs) draws its part from the part's own first index, and primitive IDs count from each draw's
+start: for every part but the first the stored triangle was off by the parts before it. With a type with geometry hooks
+on the indexed path (a dissolving quad beside metallic-roughness), the visibility buffer's shading read far past its
+meshlets' triangles and the RX 9070 XT lost the device (a page fault "in no buffer"), on main as on the branch.
+- Proof: `DisplacementTest.theIndexedPathsIdsOfATypedDrawCountFromItsPart`, losing the device on main 819cbf95 (the
+  test alone in a worktree of it) and passing with the first triangle counted from the part (forward.slang's
+  `drawFirstTriangle`) (true-sim/engine, per-material displacement PR). Forward shading never read primitive IDs on that
+  path, and the shared types' part starts at the bin's first index, which hid it.
+- Rule: a value a fragment stage subtracts from `SV_PrimitiveID` counts from the first index of the draw it is in.
+
 **On lavapipe, a load through a null pointer crashed the process even behind a branch.** The light clusters read the
 GPU-written lights' count through a pointer that was null without them: as a ternary (`p == nullptr ? 0 : p[0]`, a
 select loading both sides) and then guarded by an `if`, every test with light clusters on CI's lavapipe died with
@@ -396,6 +409,17 @@ casters), while rasterizing, which selects by error, drew them.
   beside a two-triangle quad) sees the sky through the quad without the fix (true-sim/engine, GI S0).
 - Rule: a bottom level is built from the level's cut (own error at most the level's, parent's above it), as drawing
   selects, and rays find a triangle's meshlet through that list, not a range.
+
+**A frame buffer's copy is a buffer of its own, not always 16-byte aligned.** Deformed copies' bottom levels read their
+build transforms from a `FrameBuffer` (a host-visible buffer per frame slot) at `deviceAddress() + 48 * entry`; a build
+must read them at 16-byte aligned addresses (VUID-vkCmdBuildAccelerationStructuresKHR-pInfos-03810), and one slot's copy
+began 8 bytes past a multiple of 16 on the RX 9070 XT (0x202ed5948): four validation errors in a test whose only bottom
+level was a displaced copy's, none in tests that had built another level first (other allocations before it).
+- Proof: `DisplacementTest.pathTracedHitsSeeACopyDisplacedOnceAFrame` (true-sim/engine, per-material displacement PR),
+  clean with each frame's transforms written from its copy's first aligned byte (`DeformedBottomLevels`, as
+  `BottomLevels.align16` does). LWJGL's VMA binding here has no `vmaCreateBufferWithAlignment` to ask for it instead.
+- Rule: an address handed to an acceleration structure build is aligned by the code taking it, per buffer copy; a
+  buffer's memory requirements say nothing of what a build reads.
 
 **A build transform of a flat mesh was not invertible.** Bottom levels scale quantized positions by the mesh's box;
 a flat quad's box has no height, so the scale was 0 on one axis (VUID-VkTransformMatrixKHR-matrix-03799). The
@@ -613,6 +637,20 @@ first 600 frames, about 20 of 255 luma).
   frame, began up to 0.5 mm inside them.
 - Rule: rays of world-fixed probes start from positions computed exactly the same every frame; a camera-relative frame
   is snapped to a grid on which the sums are exact, finer than the offsets rays start off surfaces by.
+
+**A material type's module may not import the shading hooks' dispatch.** A displacing test type (`test/wave.slang`)
+imported `indirect` for the hooks' index constants (`HOOK_TEST_WIND`); `generateTestSlangRecords` failed with E15300
+"failed to find include file 'shading-hooks/dispatch.slang'": the build probes every material record's and type's module
+before it writes the dispatch those modules would include. Moving the record into a module of its own was not enough:
+the probe imports the type's module too.
+- Proof: the failing build while adding displacement (true-sim/engine, per-material displacement PR); passing with the
+  index declared `extern static const uint RUN_HOOK_TEST_WIND_INDEX;` in the type's module, which the dispatch exports
+  per hook (`hooks.properties`' `switch.declaration`); slangc 2026.20 resolves it when the entry point links (checked in
+  the SPIR-V: the constant folded to the hook's index), and reports E45001 "unresolved external symbol" where the
+  listing lacks the hook. A plain `public static const` does not link to an `extern` (E45001 too): it must be `export`.
+- Rule: a material type reads hook indices through `extern static const uint RUN_HOOK_<NAME>_INDEX;`, never by
+  importing `indirect`; its entry points are rebuilt with the application's listing (`typeEntries`), so the index is the
+  application's.
 
 **A generated file `#include`-ing a library shader of the same relative path includes itself.** A shading-hooks
 variant of a library's `lit.slang`, written as `shading-hooks/GameHooks/lit.slang` holding `#include "lit.slang"`,

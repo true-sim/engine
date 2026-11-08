@@ -606,6 +606,19 @@ public final class GeometryPool implements AutoCloseable {
         }
     }
 
+    /**
+     * Mesh {@code mesh}'s quantization box, in its own space, into {@code out}: min x, y, z, extent x, y, z. Read for
+     * meshes the GPU does not rewrite (sources, not their posed copies). Allocates nothing.
+     */
+    void box(int mesh, float[] out) {
+        MemorySegment table = meshTable.memory();
+        long o = (long) MESH_ENTRY_BYTES * mesh;
+        for (int i = 0; i < 3; i++) {
+            out[i] = table.get(F32, o + 4L * i);
+            out[3 + i] = table.get(F32, o + 16 + 4L * i);
+        }
+    }
+
     /** The mesh {@code mesh} is a deformed copy of, or -1 if it is not one. */
     public int deformedFrom(int mesh) {
         if (!contains(mesh)) {

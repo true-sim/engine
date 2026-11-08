@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
@@ -288,6 +289,7 @@ final class CullPasses implements AutoCloseable {
             memPutInt(push + InstancePush.MAX_CHUNKS, maxChunks);
             occlusion(push + InstancePush.OCCLUSION, pyramid, width, height, mips);
             memPutLong(push + InstancePush.ROWS, this.views.rows().deviceAddress());
+            memPutFloat(push + InstancePush.DISPLACEMENT, scene.materials().largestDisplacement());
             instancesPass.bind(commands);
             // A row of workgroups per view, at most 65,535 rows a dispatch (the guaranteed size).
             for (int first = 0; first < count; first += MAX_ROWS) {

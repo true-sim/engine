@@ -78,11 +78,17 @@ public struct SceneTable
     public uint* meshletVertices;  // mesh vertex indices, per meshlet
     public uint* meshletTriangles; // 3 bytes per triangle, as words
     public Material* materials;
+    public ShadingHookBlock* hooks;         // the scene's hook block (GpuScene.geometryHooks): what displacement reads
+    public ShadingHookBlock* previousHooks; // as the frame before had it (motion vectors); never null
 };
 
 /** Instance flags, in the mesh word's top 8 bits. */
 public static const uint INSTANCE_LIVE = 1u << 24;          // 0: a hole, an id not in use
 public static const uint INSTANCE_CASTS_SHADOWS = 1u << 25;
+/** A material of it displaces in the passes drawing it (RASTER): its bounds grow by the table's largest displacement. */
+public static const uint INSTANCE_DISPLACED = 1u << 26;
+/** Its mesh is a copy displaced once a frame (COMPUTE, Deformation): drawn as it is, never displaced again. */
+public static const uint INSTANCE_PREDISPLACED = 1u << 27;
 public static const uint INSTANCE_MESH = 0xffffffu;
 
 /** View flags. */
@@ -497,6 +503,17 @@ public struct VertexOut
 public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets, float* clusterLod,
     bool doubleSided)
 {
+    return meshletVisible(view, instance, m, meshlets, clusterLod, doubleSided, 0);
+}
+
+/**
+ * meshletVisible, its material displacing its vertices by up to `displacement` (mesh units; 0: none): its sphere grown
+ * by it and no normal cone tested (displaced triangles may face anywhere). The detail rule keeps its spheres, so the cut
+ * is the undisplaced mesh's.
+ */
+public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets, float* clusterLod,
+    bool doubleSided, float displacement)
+{
     float scale = maxScale(instance);
     uint l = m * 10;
     float3 own = toWorld(instance, float3(clusterLod[l], clusterLod[l + 1], clusterLod[l + 2]));
@@ -509,7 +526,7 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
     }
     uint w = m * 8;
     float3 center = toWorld(instance, asfloat(uint3(meshlets[w + 3], meshlets[w + 4], meshlets[w + 5])));
-    float radius = asfloat(meshlets[w + 6]) * scale;
+    float radius = (asfloat(meshlets[w + 6]) + displacement) * scale;
     if (!inFrustum(view, center, radius))
     {
         return false;
@@ -517,8 +534,8 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
     float4 cone = decodeSnorm8(meshlets[w + 7]);
     // Back faces as seen from the eye; orthographic views and views of casters drawn two-sided keep them.
     float3 fromEye = center - view.eye;
-    return doubleSided || view.orthographic != 0 || (view.flags & VIEW_BOTH_SIDES) != 0 || cone.w >= 1
-        || dot(fromEye, normalToWorld(instance, cone.xyz)) < cone.w * length(fromEye) + radius;
+    return doubleSided || displacement > 0 || view.orthographic != 0 || (view.flags & VIEW_BOTH_SIDES) != 0
+        || cone.w >= 1 || dot(fromEye, normalToWorld(instance, cone.xyz)) < cone.w * length(fromEye) + radius;
 }
 
 /** The submesh of pool meshlet `m`: its material is the instance's material base plus this. */
@@ -578,6 +595,118 @@ public VertexOut transformVertex(View view, Instance instance, MeshEntry mesh, u
     out.material = instance.materialBase + submesh;
     out.instance = 0;
     out.firstTriangle = 0;
+    return out;
+}
+
+/** A mesh vertex in its mesh's space, decoded: what the vertex stages start from, and displacement changes. */
+public struct LocalVertex
+{
+    public float3 position;
+    public float3 normal;          // unit; (0, 1, 0) without normals
+    public float4 tangent;         // w the bitangent's sign; 0 without tangents
+    public float2 uv;
+    public float2 uv1;
+    public float4 color;           // 1 without
+};
+
+/** Pool vertex `vertex` of `mesh`, decoded in its mesh's space. */
+public LocalVertex localVertex(MeshEntry mesh, uint vertex, uint2* positions, uint* attributes)
+{
+    LocalVertex v;
+    v.position = decodePosition(positions[vertex], mesh);
+    v.normal = float3(0, 1, 0);
+    v.tangent = 0;
+    v.uv = 0;
+    v.uv1 = 0;
+    v.color = 1;
+    uint format = mesh.attributeFormat;
+    if ((format & 1) != 0)
+    {
+        v.normal = decodeOctahedral(attributeWord(mesh, attributes, vertex, 0));
+    }
+    if ((format & 2) != 0)
+    {
+        uint word = attributeWord(mesh, attributes, vertex, 1);
+        v.tangent = float4(decodeOctahedral(word), (word & 1) != 0 ? -1.0 : 1.0);
+    }
+    if ((format & 4) != 0)
+    {
+        uint word = attributeWord(mesh, attributes, vertex, 2);
+        v.uv = float2(decodeHalf(word & 0xffff), decodeHalf(word >> 16));
+    }
+    if ((format & 8) != 0)
+    {
+        uint word = attributeWord(mesh, attributes, vertex, 3);
+        v.uv1 = float2(decodeHalf(word & 0xffff), decodeHalf(word >> 16));
+    }
+    if ((format & 16) != 0)
+    {
+        uint word = attributeWord(mesh, attributes, vertex, 4);
+        v.color = float4(word & 0xff, (word >> 8) & 0xff, (word >> 16) & 0xff, word >> 24) / 255.0;
+    }
+    return v;
+}
+
+/** Vertex `v` of a (relative()) instance, transformed as transformVertex does. */
+public VertexOut transformLocal(View view, Instance instance, LocalVertex v, uint meshlet, uint submesh)
+{
+    float3 world = toWorld(instance, v.position);
+    VertexOut out;
+    out.position = mul(view.viewProjection, float4(world, 1.0));
+    out.world = world;
+    out.normal = normalToWorld(instance, v.normal);
+    out.tangent = 0;
+    if (dot(v.tangent.xyz, v.tangent.xyz) > 0)
+    {
+        out.tangent = float4(rotate(instance.rotation, normalize(v.tangent.xyz * instance.scale)),
+            (v.tangent.w < 0) != mirrored(instance) ? -1.0 : 1.0);
+    }
+    out.uv = v.uv;
+    out.uv1 = v.uv1;
+    out.color = v.color;
+    out.meshlet = meshlet;
+    out.material = instance.materialBase + submesh;
+    out.instance = 0;
+    out.firstTriangle = 0;
+    return out;
+}
+
+/**
+ * Whether stored instance `stored` (as stored, before relative()) is displaced where it is drawn, its material `m`'s
+ * type displacing: unless its mesh is a copy displaced already (COMPUTE).
+ */
+public bool displacedInStages(Instance stored, Material m)
+{
+    return materialDisplaces(m) && (stored.mesh & INSTANCE_PREDISPLACED) == 0;
+}
+
+/**
+ * Vertex `v` of stored instance `stored` (id `id`) where material `ref`'s type M displaces it, by the scene's hook block
+ * `hooks` (this frame's, or the frame before's): the vertex stages' (RASTER), the visibility buffer's, motion vectors'
+ * and the compute pass's (COMPUTE) one evaluation.
+ */
+public LocalVertex displacedVertex<M : IMaterial>(LocalVertex v, Instance stored, uint id, MaterialRef ref,
+    ShadingHookBlock* hooks)
+{
+    DisplacePoint p;
+    p.position = v.position;
+    p.normal = v.normal;
+    p.tangent = v.tangent;
+    p.uv = v.uv;
+    p.uv1 = v.uv1;
+    p.color = v.color;
+    p.rotation = stored.rotation;
+    p.scale = stored.scale;
+    p.origin = stored.position;
+    p.originLow = stored.positionLow;
+    p.instance = id;
+    p.hooks = hooks;
+    p.entry = hookEntry(hooks, id);
+    Displaced d = M.displace(materialParameters<M.Parameters>(ref), ref, p);
+    LocalVertex out = v;
+    out.position = d.position;
+    out.normal = d.normal;
+    out.tangent = dot(v.tangent.xyz, v.tangent.xyz) > 0 ? float4(d.tangent.xyz, v.tangent.w) : v.tangent;
     return out;
 }
 
