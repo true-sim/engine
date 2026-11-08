@@ -35,6 +35,9 @@ public final class GeometryHooks implements AutoCloseable {
     private final ShadingHookParameters[] records; // set by code, by hook index; null: the scene's or the defaults
     private final Boolean[] turned;                // switched by code; null: on where set, else as the scene's values
     private long published;                        // frames composed
+    private boolean dirty;                         // set or turned since the last composition
+    private long seenValues = -1;                  // the scene values' changes composed last
+    private boolean changedLast;                   // the last publish changed the frame's block
 
     @AllowAllocation("made with its scene")
     GeometryHooks(VulkanDevice device, GpuScene scene, FrameSlots slots) {
@@ -66,26 +69,36 @@ public final class GeometryHooks implements AutoCloseable {
                 + record.getClass().getSimpleName());
         }
         records[index] = record;
+        dirty = true;
         return this;
     }
 
     /** Switches hook {@code hook} on or off from the next frame on; null: on where set, else as the scene's values. */
     public synchronized GeometryHooks turn(String hook, Boolean on) {
         turned[hooks.require(hook)] = on;
+        dirty = true;
         return this;
     }
 
-    /** How many frames it composed: one per upload of the scene's instances. */
+    /** How many frames it published: those changing it, and the one after each. */
     public synchronized long frames() {
         return published;
     }
 
     /**
      * Composes the frame's block (and keeps the one before as the frame before's), into the copies of the frame slot
-     * recording: as the scene's instances upload, once a frame. Allocates nothing, unless the override section grows.
+     * recording: as the scene's instances upload, once a frame; in frames where nothing changed (after the frame
+     * following a change), nothing is written. Allocates nothing, unless the override section grows.
      */
     synchronized void publish() {
         ShadingHookOverrides overrides = scene.hookOverridesIfMade();
+        long seen = values.changes();
+        // Unchanged since the frame before (nothing set, no scene value, no override entries): the blocks stand, and
+        // the frame before's equals this frame's once a frame passed (a block's writes reach every slot's copy)
+        boolean changes = published == 0 || dirty || seen != seenValues || overrides != null;
+        if (!changes && !changedLast) {
+            return;
+        }
         long bytes = ShadingHookOverrides.blockBytes(hooks, overrides);
         current.ensure(bytes, 2);
         before.ensure(Math.max(bytes, current.size()), 2);
@@ -101,8 +114,13 @@ public final class GeometryHooks implements AutoCloseable {
                 before.address() + ShadingHookBlockLayout.INSTANCES);
         }
         before.publishAll();
-        compose(last, overrides, current.address());
-        current.publishAll();
+        if (changes) {
+            compose(last, overrides, current.address());
+            current.publishAll();
+        }
+        dirty = false;
+        seenValues = seen;
+        changedLast = changes;
         published++;
     }
 

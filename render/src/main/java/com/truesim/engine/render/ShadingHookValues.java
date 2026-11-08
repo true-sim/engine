@@ -26,6 +26,7 @@ public final class ShadingHookValues {
     private volatile boolean[] enabled;
     private volatile ShadingHooks.Set present = ShadingHooks.Set.NONE;
     private volatile long version;
+    private volatile long changes; // any record or switch set, turned or removed
     private static final java.util.concurrent.atomic.AtomicLong VERSIONS = new java.util.concurrent.atomic.AtomicLong();
     private ShadingHooks.Set union = ShadingHooks.Set.NONE; // every hook a view was made with (UNION)
 
@@ -93,6 +94,7 @@ public final class ShadingHookValues {
         e[index] = on;
         enabled = e;
         authored = a;
+        changes++;
         if (!present.has(index)) {
             present = present.with(index);
             version++;
@@ -109,6 +111,7 @@ public final class ShadingHookValues {
             boolean[] e = enabled.clone();
             e[index] = on;
             enabled = e;
+            changes++;
         }
         return this;
     }
@@ -123,6 +126,7 @@ public final class ShadingHookValues {
         ShadingHookParameters[] a = authored.clone();
         a[index] = null;
         authored = a;
+        changes++;
         ShadingHooks.Set left = ShadingHooks.Set.NONE;
         for (int i = 0; i < a.length; i++) {
             if (a[i] != null) {
@@ -133,6 +137,11 @@ public final class ShadingHookValues {
         version++;
         VERSIONS.incrementAndGet();
         return this;
+    }
+
+    /** Counts every change of a record or switch ({@link #set}, {@link #on}, {@link #remove}). */
+    long changes() {
+        return changes;
     }
 
     /** Hook {@code index}'s authored record, or null: the scene holds none. Allocates nothing. */

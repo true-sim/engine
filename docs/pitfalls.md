@@ -38,6 +38,18 @@ iterator. Allocation tests that warmed 320 frames read about 45 bytes a frame in
 - Rule: per-frame code loops over lists by index; an allocation test counts the frames that allocate (one in a few
   hundred is the compiler) rather than trusting a warm-up to have compiled everything.
 
+**An allocation test whose warm-up was just enough failed once more code had to compile.**
+`MotionVectorsTest.motionVectorsOfTheVisibilityBufferShareItsIds` counts frames allocating among 400 after 400 warm-up
+frames and allows 7; on the RX 9070 XT main read 7 (passing by one) and the displacement branch 10, CI's lavapipe 12.
+Counted again in the same JVM, the next 400 frames read 3 on both and the ones after 0: the compiler finishing, not an
+allocation per frame (none in any frame once warm). The scene's geometry hook block, written every frame until then,
+also allocated in its first frames (interpreted `MemorySegment` writes: 21 bytes a call over calls 100 to 200, 0 after);
+it now writes nothing in frames where nothing changed.
+- Proof: the test's count printed four times in a row, main 819cbf95 and the branch in one session (7/3/0/0 against
+  10/3/0/0); a probe of `GeometryHooks.publish` alone (true-sim/engine, per-material displacement PR).
+- Rule: an allocation test counts after a warm-up that leaves the count well under its limit on main; a count near the
+  limit there is a test about to fail on the next change. Per-frame writers skip frames where nothing changed.
+
 **`Enum.values()` copies its array on every call.** `Format.of` allocated through it.
 - Proof: [#132](https://github.com/true-sim/engine/pull/132) (`Format.ALL`).
 - Rule: keep `values()` in a static field.
