@@ -214,6 +214,9 @@ class MotionVectorsTest {
             // Every frame skinning the quad anew, its vertices kept aside: nothing allocated per frame (an ID draw's
             // iterator over a list did, 16 bytes a phase, until the compiler took it away: pitfalls.md)
             pose(1);
+            // A first count discarded, as warm-up: its 400 frames read 7 allocating on main and 10 with displacement's
+            // code to compile, the next 400 3 on both, then 0 (pitfalls.md)
+            ReferencePathTracerTest.framesAllocating(device, graph, 400);
             assertThat(ReferencePathTracerTest.framesAllocating(device, graph, 400)).as("frames allocating")
                 .isLessThan(8);
             device.waitIdle();

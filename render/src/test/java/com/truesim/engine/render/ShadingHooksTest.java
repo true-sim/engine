@@ -92,10 +92,10 @@ class ShadingHooksTest {
     void theListingHoldingEveryOtherIsFoundOnTheClasspathWithItsVariants() {
         ShadingHooks hooks = ShadingHooks.of(device);
         assertThat(hooks.name()).isEqualTo("TestEngineShadingHooks");
-        // The library's first; then the project's by file (fog, glow, snow, snowCover, tint), test.tint ordered before
-        // test.fog and test.snowCover before test.tint by their attributes
+        // The library's first; then the project's by file (fog, glow, snow, snowCover, tint, wind), test.tint ordered
+        // before test.fog and test.snowCover before test.tint by their attributes
         assertThat(hooks.hooks()).containsExactly(ProbeVolume.HOOK, "test.glow", "test.snow", "test.snowCover",
-            "test.tint", "test.fog");
+            "test.tint", "test.fog", "test.wind");
         assertThat(device.shaderVariants().resolve("shaders/material-types/metallicRoughnessForward.spv"))
             .isEqualTo("shaders/shading-hooks/TestEngineShadingHooks/material-types/metallicRoughnessForward.spv");
         assertThat(device.shaderVariants().resolve("shaders/ao/ao.spv")).endsWith("ao/ao.hooks.spv");

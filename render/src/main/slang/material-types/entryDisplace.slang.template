@@ -1,0 +1,114 @@
+// The material type's vertex and mesh stages where it displaces (GEOMETRY_DISPLACE, Displacement.RASTER): drawn in
+// place of the shared ones, in every pass reading its geometry (color, depth, shadow maps, the visibility buffer's IDs)
+// on every path (indexed, mesh shaders full and lean, classic LOD), so its surfaces are displaced alike everywhere.
+// The push block is forward.slang's (classic LOD's at the same bytes: its draw records where the visible list is).
+import meshlets.forward;
+import classic.parts;
+import {module};
+
+/** A triangle's number in its meshlet, for the visibility buffer's fragment stages (as mesh.slang's). */
+struct DisplacedPrimitive
+{
+    uint id : SV_PrimitiveID;
+};
+
+/** The indexed path's: as draw.slang's vertexMain, displaced. */
+[shader("vertex")]
+VertexOut {name}VertexMain(uint index : SV_VulkanVertexID)
+{
+    VisibleMeshlet v = push.visible[index >> 8];
+    VertexOut out = typedMeshletVertex<{struct}>(push.view[0], v, index & 0xff,
+        meshletSubmesh(push.scene[0].meshlets, v.meshlet));
+    out.firstTriangle = drawFirstTriangle(v); // primitive IDs count from it
+    return out;
+}
+
+/** Classic LOD's: as classic/draw.slang's classicVertexMain, displaced. */
+[shader("vertex")]
+VertexOut {name}ClassicVertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+{
+    ClassicDraw draw = ((ClassicDraw*) push.visible)[slot]; // classic LOD's records lie where the visible list does
+    Instance stored = push.scene[0].instances[draw.instance];
+    Instance instance = relative(stored, push.view[0]);
+    MeshEntry mesh = push.scene[0].meshes[instance.mesh];
+    VertexOut out = typedVertex<{struct}>(push.view[0], stored, instance, draw.instance, mesh, vertex, draw.meshlet,
+        (draw.tag >> 24) & 0x7f);
+    out.firstTriangle = draw.tag;
+    return out;
+}
+
+/** Full vertices on mesh shaders (the visibility buffer's IDs, depth, shadows, color without barycentrics), typed. */
+[shader("mesh")]
+[outputtopology("triangle")]
+[numthreads(64, 1, 1)]
+void {name}MeshIdsMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertices VertexOut vertices[64],
+    out indices uint3 triangles[124], out primitives DisplacedPrimitive primitives[124])
+{
+    View view = push.view[0];
+    uint* triangleBytes = push.scene[0].meshletTriangles;
+    // One SetMeshOutputCounts reached by every invocation (pitfalls.md)
+    ListedMeshlet found = listedTypedMeshlet(view, group.y * 65535 + group.x);
+    bool listed = found.listed;
+    VisibleMeshlet v = listed ? push.visible[found.slot] : (VisibleMeshlet) 0;
+    uint w = v.meshlet * 8;
+    uint triangleOffset = push.scene[0].meshlets[w + 1];
+    uint counts = listed ? push.scene[0].meshlets[w + 2] : 0;
+    uint vertexCount = counts & 0xff;
+    uint triangleCount = (counts >> 8) & 0xff;
+    SetMeshOutputCounts(vertexCount, triangleCount);
+    if (thread < vertexCount)
+    {
+        vertices[thread] = typedMeshletVertex<{struct}>(view, v, thread, counts >> 16);
+    }
+    Instance stored = push.scene[0].instances[v.instance];
+    MeshEntry mesh = push.scene[0].meshes[stored.mesh & INSTANCE_MESH];
+    bool flip = mirrored(stored);
+    for (uint t = thread; t < triangleCount; t += 64)
+    {
+        uint b = mesh.indexBase + triangleOffset + t * 3;
+        triangles[t] = wound(uint3(triangleByte(triangleBytes, b), triangleByte(triangleBytes, b + 1),
+            triangleByte(triangleBytes, b + 2)), flip);
+        primitives[t].id = t;
+    }
+}
+
+/** The lean mesh path's shaded draws (fragments with barycentrics), typed. */
+[shader("mesh")]
+[outputtopology("triangle")]
+[numthreads(64, 1, 1)]
+void {name}MeshLeanMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertices LeanVertex vertices[64],
+    out indices uint3 triangles[124], out primitives LeanPrimitive primitives[124])
+{
+    View view = push.view[0];
+    uint* triangleBytes = push.scene[0].meshletTriangles;
+    ListedMeshlet found = listedTypedMeshlet(view, group.y * 65535 + group.x);
+    bool listed = found.listed;
+    uint slot = found.slot;
+    VisibleMeshlet v = listed ? push.visible[slot] : (VisibleMeshlet) 0;
+    uint w = v.meshlet * 8;
+    uint triangleOffset = push.scene[0].meshlets[w + 1];
+    uint counts = listed ? push.scene[0].meshlets[w + 2] : 0;
+    uint vertexCount = counts & 0xff;
+    uint triangleCount = (counts >> 8) & 0xff;
+    SetMeshOutputCounts(vertexCount, triangleCount);
+    if (thread < vertexCount)
+    {
+        VertexOut out = typedMeshletVertex<{struct}>(view, v, thread, counts >> 16);
+        vertices[thread].position = out.position;
+        vertices[thread].world = out.world;
+        vertices[thread].normal = out.normal;
+        vertices[thread].tangent = out.tangent;
+        vertices[thread].uv = out.uv;
+        vertices[thread].uv1 = out.uv1;
+    }
+    Instance stored = push.scene[0].instances[v.instance];
+    MeshEntry mesh = push.scene[0].meshes[stored.mesh & INSTANCE_MESH];
+    bool flip = mirrored(stored);
+    for (uint t = thread; t < triangleCount; t += 64)
+    {
+        uint b = mesh.indexBase + triangleOffset + t * 3;
+        triangles[t] = wound(uint3(triangleByte(triangleBytes, b), triangleByte(triangleBytes, b + 1),
+            triangleByte(triangleBytes, b + 2)), flip);
+        primitives[t].id = slot << 7 | t;
+    }
+}

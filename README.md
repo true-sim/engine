@@ -1096,9 +1096,122 @@ public struct Dissolve : IMaterial
 - **Pipelines by pass** (`geometryHooksCutTheSameHolesInEveryPass`, a dissolving quad drawn on both meshlet paths and
   classic LOD): 12 color pipelines of types, 18 depth (shared and dissolve's per opaque raster bin: 6 per meshlet path,
   6 for classic LOD's lists), 18 ID; with no type with hooks, depth and IDs make none beside the renderer's shared ones.
-- **Displacement joins the same way** (#68, not built): another bit (`GEOMETRY_DISPLACE`), a `displace()` with the
-  default doing nothing, run by the vertex stages of a type's pipelines (its geometry entry points take vertex stages
-  then), its bounds grown for culling.
+- **Displacement** is the second geometry hook: below.
+
+**Displacement** (step 11 of the shading hooks plan, #68): a material type may move its vertices with its own
+parameters. Its parameters' attribute names `GEOMETRY_DISPLACE`, and the type overrides `displace()`, which `IMaterial`
+gives every type as doing nothing; its materials declare how far it moves a vertex at most (`Material.displacement`,
+in mesh units; a displacing type's materials must, `Materials.add` refuses one that does not):
+
+```slang
+// grassParameters.slang: records are read before the hooks' dispatch is written, so not here
+[MaterialParameters(GEOMETRY_DISPLACE)]
+public struct GrassParameters { public float bend = 0.3; public float stiffness = 0.6; };
+
+// grass.slang
+import materials;
+import weather.wind;                                  // the hook's record: WindParameters
+__exported import grassParameters;
+extern static const uint RUN_HOOK_WEATHER_WIND_INDEX; // the hook's index, resolved when a shader links
+
+[MaterialType("grass")]
+public struct Grass : IMaterial
+{
+    public typealias Parameters = GrassParameters;
+    public static Surface surface(GrassParameters p, MaterialRef m, SurfaceInput in) { ... }
+    public override static Displaced displace(GrassParameters p, MaterialRef m, DisplacePoint in)
+    {
+        Displaced d = Displaced.of(in);
+        if (in.hookOn(RUN_HOOK_WEATHER_WIND_INDEX))
+        {
+            WindParameters* wind = in.hook<WindParameters>(RUN_HOOK_WEATHER_WIND_INDEX);
+            float h = saturate(in.uv.y);                                   // the blade's height
+            d.position += in.toMesh(wind[0].direction) * (p.bend * h * h); // mesh space in, mesh space out
+        }
+        return d;
+    }
+};
+```
+
+```java
+materials.register(Grass.TYPE);
+int grass = materials.add(new Material(GrassParameters.DEFAULTS).doubleSided(true).displacement(0.31f));
+gpuScene.geometryHooks().set("weather.wind", wind.withTime(t));     // each frame: every view reads the same
+```
+
+- **What `displace()` gets** (`DisplacePoint`): the vertex in its mesh's space as drawn before displacing (after morph
+  targets and skinning: position, normal, tangent, both UV sets, color), the instance (rotation, scale, world position in
+  two parts, id; `toWorld`, `toMesh`, `world()`, `worldFrom(anchor)` for precise world positions far out), and the
+  scene's hook block with the instance's override entry (`hook<T>(index)`, `hookOn(index)`). It returns the position,
+  normal and tangent in mesh space (`Displaced`).
+- **Global data from a hook block.** Wind, a snow depth field's slot and transform: any hook's record, typically of the
+  new **geometry hook point** (`IGeometryHook`, a hook with no function: a record and its bit). A scene has one geometry
+  hook block (`GpuScene.geometryHooks()`, `GeometryHooks`), the same for every view, so the camera, every shadow map and
+  tile, the visibility buffer's IDs and the compute pass displace alike; it is composed once a frame as the instances
+  upload from what code set (`set`, `turn`), else the scene's values (`ShadingHookValues`, a `ShadingHookComponent`),
+  else the record's defaults, and carries the per-instance override entries (`ShadingHookOverrides`) as views' blocks
+  do. The frame before's block is kept beside it (`SceneTable.previousHooks`) for motion vectors. A type's module
+  declares the index it reads as `extern static const uint RUN_HOOK_<NAME>_INDEX;`: the build reads material records
+  before it writes the dispatch, so their modules cannot import `indirect` (a link-time constant, exported by the
+  dispatch for every hook, pitfalls.md); its entry points are rebuilt with every hook of the application's listing
+  (`typeEntries` holds the `Displace` ones), so the index is the application's.
+- **Two modes, `Displacement`**: per instance (engine-scene's `DisplacementMode` component on the renderable's node),
+  else per material type (`Materials.displacementMode(type, mode)`), else the setting `render.displacement.mode`
+  (`RASTER` by default). Code drawing a `GpuScene` itself chooses by the mesh it gives the instance.
+  - **`RASTER`**: the type's own vertex and mesh stages (`material-types/entryDisplace.slang.template`: indexed, mesh
+    shaders full and lean, classic LOD) run `displace()` in every pass drawing the type: forward color, the visibility
+    buffer's IDs and its shading (the triangle rebuilt displaced), depth, every shadow technique drawing maps (cascades,
+    atlas tiles, both caster sides), the blended bin. A displacing type is a type with geometry hooks, so depth, shadow and
+    ID passes already draw it with pipelines of its own (lists split by type); only its draws pay. Motion vectors evaluate
+    the frame before's displacement too: the motion pass leaves a displacing type's pixels to a pass of that type
+    (`entryDisplaceMotion`, by tiles it lists), which displaces each triangle with this frame's block and pose and with
+    the frame before's. Ray tracing's bottom levels hold the mesh as it is: rays (traced shadows, global illumination's
+    probes, the reference) see it undisplaced.
+  - **`COMPUTE`**: the instance draws a copy of its mesh (`GeometryPool.addDeformed`, `Deformation.displace`), moved once a
+    frame in the deformation pass after morphs and skinning: the copies not skinned copied from their sources, then each
+    displacing type's pass (`entryDisplaceCompute`, a thread per vertex of every copy at once, each vertex's material
+    found by its submesh, a table built once per source), then the copies' meshlet spheres; a few dispatches a frame
+    however many copies. Every pass draws the copy as it is (the instance is marked `INSTANCE_PREDISPLACED`: no stage
+    displaces it again), its bottom level is refitted each frame (`RayTracing.addDeformed`), and its previous vertices
+    are kept for motion vectors as a skinned copy's are. engine-scene's `SceneSync` makes the copy, with ray tracing its
+    bottom level.
+- **Bounds.** Culling grows a displacing material's meshlets' spheres by its declared displacement and tests no normal
+  cone for them (displaced triangles may face anywhere); instances with a displacing material (`INSTANCE_DISPLACED`)
+  grow by the table's largest (`Materials.largestDisplacement`), the instance pass knowing no materials; classic LOD's
+  selection likewise. The detail rule keeps its spheres: the cut is the undisplaced mesh's. A copy's box grows by its
+  materials' displacement, its spheres are recomputed from the displaced vertices.
+- **Shadow caches.** A caster displaced in the stages changes every frame: the `Shadows` owner draws the tiles around it
+  again each frame and keeps it out of the still layers, as for deformed copies, unless its instance is marked static
+  (`GpuScene.setMobility(id, STATIC)`: a displacement that does not animate, snow).
+- **Tested** (`DisplacementTest`, fails without the feature): a displaced quad casts its displaced shadow by cascades on
+  forward and visibility buffer shading and is seen where displaced; an instance whose undisplaced bounds are out of view
+  is drawn through its grown bounds; motion vectors of a wind-driven swing on the visibility buffer, forward shading and
+  a copy (moving, standing, back, the hook off); a copy casts its displaced shadow by rays and maps, the same quad
+  displaced in the stages casts it undisplaced by rays; path-traced hits meet the copy where displaced. engine-scene's
+  `SceneSyncDisplacementTest` follows `DisplacementMode` and the type's mode into copies.
+
+- **What it costs** (`DisplacementBenchmark`, RX 9070 XT, 1920 x 1080, 2026-11-08, without JaCoCo): a grass field of
+  576 patches (24 x 24, 2 m each) of 1,024 blades (8 triangles each: 4.7 M triangles; test/grass.slang bent by the test
+  wind hook, its time moving every frame) over a ground plane, the sun shadowed by 4 cascades of 2048 or by rays, shaded
+  by the visibility buffer; GPU time of whole frames (timestamps around batches of 8), 6 configurations taking turns for
+  5 rounds after 3 uncounted ones, ranges of the rounds' medians; the main pass costs from the graph's pass timings:
+
+  | Configuration | GPU per frame | Where the difference goes | Memory of its own |
+  |---|---|---|---|
+  | still grass (metallic-roughness, no displacement), maps | 0.892-0.913 ms | IDs 0.57 ms, shading 0.20 ms | - |
+  | RASTER, maps | 2.611-2.620 ms | shadow atlas 1.55 ms: the displaced casters' cascade tiles drawn again every frame; IDs 0.70 ms | none |
+  | COMPUTE, maps | 4.991-5.006 ms | deformation 2.04 ms (5.9 M vertices displaced into the copies, their spheres), shadow atlas 1.76 ms | copies 96.6 MiB |
+  | still grass, rays | 1.004-1.049 ms | traced shadows 0.13 ms | - |
+  | RASTER, rays | 1.238-1.243 ms | IDs 0.70 ms, traced shadows 0.20 ms: rays meet the blades undisplaced | none |
+  | COMPUTE, rays | 6.014-6.385 ms | deformation 2.04 ms, 576 bottom level refits 1.71 ms, traced shadows 0.44 ms | copies 96.6 MiB, bottom levels 822 MiB |
+
+  A copy is the patch's 10,240 vertices, their attributes and 166 meshlet records (0.17 MiB); the owners table 40 KiB a
+  source. RASTER pays in every pass drawing the field (IDs +0.13 ms here) and in shadow caches, which cannot keep
+  animated casters; COMPUTE pays once per frame for all views but per vertex of every copy, seen or not, and with ray
+  tracing a refittable bottom level per copy and its refit. RASTER is the default; COMPUTE is for what rays must see.
+  Checked in films (scratchpad, not in the repository): the field flown through, the same 60 frames with the blades'
+  bounds grown to 10 instead of 0.31 drew the same image to the pixel (nothing culled that displacement brought into
+  view); swinging boards' ray-traced shadows stand still in RASTER and swing in COMPUTE.
 
 **Pipelines made ahead.** A renderer keeps the pipelines of material types in one store (`ShadingPipelines`, through
 the device's pipeline cache), and has those a material will draw with made on a thread of its own when the material
@@ -1218,7 +1331,8 @@ public struct AcmeFog : IMediaHook
   the back side's diffuse light. `IMediaHook.media(p, params, inout ViewRay ray)` changes the light on its way to the
   camera; the sky is a point at infinity (`p.path == SHADING_SKY`). `ShadingPoint` also gives the geometric normal, the
   pixel (`NO_PIXEL` off screen) and how the point is shaded (`SHADING_RASTER`, `SHADING_COMPOSITE`, `SHADING_RAY_HIT`,
-  `SHADING_PROBE_HIT`, `SHADING_SKY`).
+  `SHADING_PROBE_HIT`, `SHADING_SKY`). `IGeometryHook` has no function: its hook is a record and a bit, which material types'
+  `displace()` read from the scene's geometry hook block (wind, a snow depth field; "Displacement" above).
 - **Imports.** A hook imports `hooks`, `bindless`, `shading` and `lights`, and its own library's modules; never a
   shading path's (`indirect`, `meshlets.*`, `surfaces`, ...): it runs inside all of them (`ShadingHookImportsTest`).
 - **One dispatch, merged at build time.** build-logic's `truesim.slang` merges the hooks of a project and its libraries,

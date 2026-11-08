@@ -34,9 +34,11 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     Chunk chunk = push.chunks[chunkIndex];
     uint v = chunk.view;
     View view = push.views[v];
-    Instance instance = relative(push.instances[chunk.instance], view);
+    Instance stored = push.instances[chunk.instance];
+    Instance instance = relative(stored, view);
     MeshEntry mesh = push.meshes[instance.mesh];
     uint local = chunk.firstMeshlet + thread.x;
+    float displacement = 0; // its material's, where the vertex stages displace it (RASTER)
     // Uniform control flow from here: the lists are appended to a wave at a time, one atomic per wave and bin, so no
     // lane leaves before the wave operations.
     bool keep = local < mesh.meshletCount;
@@ -47,7 +49,9 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         m = mesh.meshletBase + local;
         Material material = push.materials[instance.materialBase + meshletSubmesh(push.meshlets, m)];
         bin = rasterBin(material);
-        keep = meshletVisible(view, instance, m, push.meshlets, push.clusterLod, materialDoubleSided(material));
+        displacement = displacedInStages(stored, material) ? materialDisplacement(material) : 0;
+        keep = meshletVisible(view, instance, m, push.meshlets, push.clusterLod, materialDoubleSided(material),
+            displacement);
     }
     bool late = chunk.phase == PHASE_LATE;
     if (keep && late)
@@ -56,7 +60,8 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         uint w = m * 8;
         float3 center = toWorld(instance, asfloat(uint3(push.meshlets[w + 3], push.meshlets[w + 4],
             push.meshlets[w + 5])));
-        keep = unoccluded(view, push.occlusion, center, asfloat(push.meshlets[w + 6]) * maxScale(instance));
+        keep = unoccluded(view, push.occlusion, center,
+            (asfloat(push.meshlets[w + 6]) + displacement) * maxScale(instance));
     }
     uint indices = keep ? ((push.meshlets[m * 8 + 2] >> 8) & 0xff) * 3 : 0;
     // The lists' pointers one load each: copied as one struct, the driver of an AMD Radeon(TM) Graphics read every

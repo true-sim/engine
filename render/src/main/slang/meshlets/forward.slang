@@ -73,6 +73,21 @@ public ListedMeshlet listedTypedMeshlet(View view, uint index)
     return m;
 }
 
+/**
+ * The indexed path's first triangle of visible meshlet `v` in the draw drawing it, which primitive IDs count from: in
+ * the raster bin's draw, from the bin's first index; in a typed draw (lists split by shading bin or type,
+ * push.categories set), from its part's first, as each part draws from its own range (split.slang).
+ */
+public uint drawFirstTriangle(VisibleMeshlet v)
+{
+    uint first = v.firstIndex; // in the bin
+    if (push.categories != 0)
+    {
+        first -= push.typed[splitEntry(push.bin, push.category, push.categories) + SPLIT_INDEX_BASE];
+    }
+    return first / 3;
+}
+
 // ---------------------------------------------------------------- the lean path's fragments
 
 /** The scene behind, as the push block names it, for a fragment of instance `instance`. */
@@ -231,6 +246,40 @@ public void discardHoles<M : IMaterial>(VertexOut s, float4 dx, float4 dy)
     {
         discard;
     }
+}
+
+// ---------------------------------------------------------------- a displacing type's vertex and mesh stages
+
+/**
+ * Pool vertex `vertex` of stored instance `stored` (id `id`; `instance` it relative to `view`) of `mesh`, meshlet
+ * `meshlet` of submesh `submesh`: moved by type M's displace() where its material displaces and the instance is not a
+ * copy displaced already (GEOMETRY_DISPLACE, RASTER), then transformed as transformVertex does. The vertex stages of a
+ * displacing type's pipelines (material-types/entryDisplace.slang.template), on every path and in every pass.
+ */
+public VertexOut typedVertex<M : IMaterial>(View view, Instance stored, Instance instance, uint id, MeshEntry mesh,
+    uint vertex, uint meshlet, uint submesh)
+{
+    LocalVertex local = localVertex(mesh, vertex, push.scene[0].positions, push.scene[0].attributes);
+    MaterialRef ref = { push.scene[0].materials, instance.materialBase + submesh };
+    if ((GEOMETRY & GEOMETRY_DISPLACE) != 0 && displacedInStages(stored, ref.slot()))
+    {
+        local = displacedVertex<M>(local, stored, id, ref, push.scene[0].hooks);
+    }
+    VertexOut out = transformLocal(view, instance, local, meshlet, submesh);
+    out.instance = id;
+    return out;
+}
+
+/** typedVertex for vertex `local` of visible meshlet `v` (its meshlet's submesh `submesh`). */
+public VertexOut typedMeshletVertex<M : IMaterial>(View view, VisibleMeshlet v, uint local, uint submesh)
+{
+    Instance stored = push.scene[0].instances[v.instance];
+    Instance instance = relative(stored, view);
+    MeshEntry mesh = push.scene[0].meshes[instance.mesh];
+    uint vertexOffset = push.scene[0].meshlets[v.meshlet * 8];
+    uint vertex = mesh.vertexBase
+        + push.scene[0].meshletVertices[mesh.meshletVertexBase + vertexOffset + local];
+    return typedVertex<M>(view, stored, instance, v.instance, mesh, vertex, v.meshlet, submesh);
 }
 
 // ---------------------------------------------------------------- a geometry type's depth and ID stages

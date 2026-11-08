@@ -51,6 +51,9 @@ public final class MotionVectors implements Technique {
 
     /** The motion's format: x and y in pixels. */
     public static final Format FORMAT = Format.R16G16_SFLOAT;
+    /** The most types with geometry hooks a material table may have here: motion.slang's tile lists' room. */
+    static final int MAX_GEOMETRY_TYPES = 2048;
+    private static final int TILE = 8;
 
     private final SceneGeometry geometry;
     private final SceneView view;
@@ -90,10 +93,14 @@ public final class MotionVectors implements Technique {
         return List.of(Keys.MOTION);
     }
 
-    /** The instance table's size: the copy kept of it follows it. */
+    /**
+     * The instance table's size: the copy kept of it follows it; and the types with geometry hooks the table has, the
+     * displacing ones' motion passes with them.
+     */
     @Override
     public long buildVersion() {
-        return renderer.scene().capacity();
+        Materials materials = renderer.scene().materials();
+        return renderer.scene().capacity() * 31L + (materials == null ? 0 : materials.geometryTypeCount());
     }
 
     @Override
@@ -115,22 +122,72 @@ public final class MotionVectors implements Technique {
         Pipeline motion = g.computeProgram("shaders/motion/motion.spv", "motionMain", MotionPush.BYTES);
         Image image = g.create("motion", ImageDesc.of(FORMAT, width, height));
         MotionPush push = new MotionPush();
+        // Types displacing in the vertex stages (RASTER): their pixels are left by the pass above, whose tiles it lists
+        // per type with geometry hooks (its number - 1), and written by each displacing type's own pass
+        Materials materials = renderer.scene().materials();
+        int lists = materials == null ? 0 : materials.geometryTypeCount();
+        if (lists > MAX_GEOMETRY_TYPES) {
+            throw new IllegalStateException("Motion vectors list tiles for at most " + MAX_GEOMETRY_TYPES
+                + " material types with geometry hooks, not " + lists);
+        }
+        Pipeline[] typed = new Pipeline[lists];
+        boolean anyDisplacing = false;
+        for (int number = 1; number <= lists; number++) {
+            MaterialType type = materials.geometryType(number);
+            if (type.displaces()) {
+                typed[number - 1] = g.computeProgram(type.displaceMotionShader(), type.name() + "MotionMain",
+                    MotionPush.BYTES);
+                anyDisplacing = true;
+            }
+        }
+        int stride = 4 + ((width + TILE - 1) / TILE) * ((height + TILE - 1) / TILE);
+        int listCount = anyDisplacing ? lists : 0;
+        Buffer tiles = g.createBuffer("motion tiles", 4L * stride * Math.max(1, listCount));
+        g.pass("motion tiles reset").write(tiles, BufferAccess.TRANSFER_DST).record(ctx -> {
+            for (int list = 0; list < listCount; list++) {
+                ctx.fill(tiles, 4L * stride * list, 16, 0); // its dispatch and count
+            }
+        });
         scene.read(g.pass("motion vectors"), BufferAccess.STORAGE_READ).read(ids.color(), Access.STORAGE_READ)
             .read(before.previous(), BufferAccess.STORAGE_READ).write(image, Access.STORAGE_WRITE)
+            .write(tiles, BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
-                Buffer previous = ctx.historyValid(before) ? before.previous() : scene.instances();
-                int region = ctx.regionWidth(image) | ctx.regionHeight(image) << 16;
-                // The region the view rendered the frame before (its images are the view's size)
-                int previousSize = view.port().previousRegionWidth() | view.port().previousRegionHeight() << 16;
-                ctx.dispatch(motion, push.view(this.ids.address()).scene(renderer.scene().tableAddress())
-                    .previous(ctx.address(previous)).deformed(deformation.previousTableAddress())
-                    .previousPositions(deformation.previousPositionsAddress())
-                    .classicIndices(classic == null ? ctx.absent() : classic.indicesAddress())
-                    .ids(ctx.storage(ids.color())).motion(ctx.storage(image))
-                    .size(region).previousSize(previousSize).meshCount(deformation.previousTableMeshes()),
-                    (ctx.regionWidth(image) + 7) / 8, (ctx.regionHeight(image) + 7) / 8, 1);
+                set(ctx, push, before, scene, image, ids, deformation, tiles, listCount, stride);
+                ctx.dispatch(motion, push, (ctx.regionWidth(image) + TILE - 1) / TILE,
+                    (ctx.regionHeight(image) + TILE - 1) / TILE, 1);
             });
+        if (anyDisplacing) {
+            scene.read(g.pass("displaced motion vectors"), BufferAccess.STORAGE_READ)
+                .read(ids.color(), Access.STORAGE_READ).read(before.previous(), BufferAccess.STORAGE_READ)
+                .read(tiles, BufferAccess.INDIRECT).read(tiles, BufferAccess.STORAGE_READ)
+                .write(image, Access.STORAGE_WRITE)
+                .record(ctx -> {
+                    set(ctx, push, before, scene, image, ids, deformation, tiles, listCount, stride);
+                    for (int list = 0; list < typed.length; list++) {
+                        if (typed[list] != null) {
+                            ctx.dispatchIndirect(typed[list], push.list(list), tiles, 4L * stride * list);
+                        }
+                    }
+                });
+        }
         g.provide(Keys.MOTION, image);
+    }
+
+    /** The frame's push block of the motion passes. */
+    private void set(com.truesim.engine.graph.PassContext ctx, MotionPush push, BufferHistory before,
+        SceneData.Buffers scene, Image image, SceneDraw.Targets ids, Deformation deformation, Buffer tiles, int lists,
+        int stride) {
+        Buffer previous = ctx.historyValid(before) ? before.previous() : scene.instances();
+        int region = ctx.regionWidth(image) | ctx.regionHeight(image) << 16;
+        // The region the view rendered the frame before (its images are the view's size)
+        int previousSize = view.port().previousRegionWidth() | view.port().previousRegionHeight() << 16;
+        push.view(this.ids.address()).scene(renderer.scene().tableAddress())
+            .previous(ctx.address(previous)).deformed(deformation.previousTableAddress())
+            .previousPositions(deformation.previousPositionsAddress())
+            .classicIndices(classic == null ? ctx.absent() : classic.indicesAddress())
+            .ids(ctx.storage(ids.color())).motion(ctx.storage(image))
+            .size(region).previousSize(previousSize).meshCount(deformation.previousTableMeshes())
+            .tiles(ctx.address(tiles)).lists(lists).stride(stride).list(0);
     }
 
     /**

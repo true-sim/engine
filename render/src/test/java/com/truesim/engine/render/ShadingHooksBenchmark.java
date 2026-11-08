@@ -73,8 +73,8 @@ class ShadingHooksBenchmark {
     private static final Configuration[] CONFIGURATIONS = {
         new Configuration("no hooks", false, false, 0),
         new Configuration("fog, per view", true, false, 0),
-        new Configuration("fog, union of 5", true, true, 0),
-        new Configuration("no hook on, union of 5", false, true, 0),
+        new Configuration("fog, union of 7", true, true, 0),
+        new Configuration("no hook on, union of 7", false, true, 0),
         new Configuration("fog, per view, every 10th rock 1 entry", true, false, 1),
         new Configuration("fog, per view, every 10th rock its own entry (3,000)", true, false, 3_000),
     };

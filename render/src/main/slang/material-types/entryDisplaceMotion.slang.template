@@ -1,0 +1,12 @@
+// The material type's motion vectors where it displaces in the vertex stages (GEOMETRY_DISPLACE, Displacement.RASTER;
+// motion/vectors.slang): its pixels of the tiles motion.slang listed for it, its triangles displaced as this frame and
+// the frame before drew them. Dispatched for types with GEOMETRY_DISPLACE only.
+import motion.vectors;
+import {module};
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void {name}MotionMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
+{
+    typedMotion<{struct}>(group, thread);
+}

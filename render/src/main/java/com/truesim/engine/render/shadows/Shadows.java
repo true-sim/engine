@@ -170,6 +170,7 @@ public final class Shadows implements AutoCloseable {
     // Change tracking
     private double[] spheres = new double[0]; // per instance: world x, y, z, radius (< 0: none)
     private boolean[] deformed = new boolean[0];
+    private boolean[] copies = new boolean[0]; // per instance: it draws a deformed copy
     private double[] reach = new double[0]; // per instance: how far its mesh reaches from its origin, unscaled; NaN
     private int[] deformedIds = new int[16];
     private int deformedCount;
@@ -1380,10 +1381,14 @@ public final class Shadows implements AutoCloseable {
                 + (maxZ - minZ) * (maxZ - minZ));
             dirtyAround((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2, r, split ? RELAYER : FULL);
         }
-        // Deformed copies change on the GPU every frame they are posed: the tiles around them are drawn again.
+        // Deformed copies change on the GPU every frame they are posed, and casters displaced in the vertex stages
+        // (RASTER) every frame unless marked static: the tiles around them are drawn again.
         for (int i = 0; i < deformedCount; i++) {
             int id = deformedIds[i];
             int o = 4 * id;
+            if (scene.displacedInStages(id) && !copyAt(id) && scene.mobilityHint(id) == GpuScene.STILL) {
+                continue; // displaced as it was: a still caster
+            }
             if (split) {
                 markMoving(id);
             }
@@ -1541,9 +1546,22 @@ public final class Shadows implements AutoCloseable {
         spheres[o + 1] = pose[1] + sy + qw * ty + (qz * tx - qx * tz);
         spheres[o + 2] = pose[2] + sz + qw * tz + (qx * ty - qy * tx);
         double scale = Math.max(Math.abs(pose[7]), Math.max(Math.abs(pose[8]), Math.abs(pose[9])));
-        spheres[o + 3] = scale * bounds[3];
-        reach[id] = Math.sqrt(bounds[0] * bounds[0] + bounds[1] * bounds[1] + bounds[2] * bounds[2]) + bounds[3];
-        setDeformed(id, pool.deformedFrom(mesh) >= 0);
+        // Displaced where drawn (RASTER): as far as its bounds grow in culling, the table's largest displacement
+        double displaced = scene.displacedInStages(id) ? scene.materials().largestDisplacement() : 0;
+        spheres[o + 3] = scale * (bounds[3] + displaced);
+        reach[id] = Math.sqrt(bounds[0] * bounds[0] + bounds[1] * bounds[1] + bounds[2] * bounds[2]) + bounds[3]
+            + displaced;
+        boolean copy = pool.deformedFrom(mesh) >= 0;
+        if (id >= copies.length) {
+            copies = Arrays.copyOf(copies, Math.max(2 * copies.length, id + 1));
+        }
+        copies[id] = copy;
+        setDeformed(id, copy || scene.displacedInStages(id));
+    }
+
+    /** Whether instance {@code id} draws a deformed copy (as of its last change). */
+    private boolean copyAt(int id) {
+        return id < copies.length && copies[id];
     }
 
     private void setDeformed(int id, boolean on) {

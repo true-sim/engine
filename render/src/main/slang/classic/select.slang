@@ -26,6 +26,7 @@ struct SelectPush
     uint categories;       // parts per list
     uint byType;           // a bit per list (bin, then mirrored bin past BINS): its parts are shading bins
     uint byGeometry;       // a bit per list: its parts are types with geometry hooks (materialGeometry; 0: none)
+    float displacement;    // the material table's largest displacement (mesh units): INSTANCE_DISPLACED grow by it
 };
 
 [[vk::push_constant]]
@@ -54,7 +55,7 @@ void selectMain(uint3 id : SV_DispatchThreadID)
     MeshEntry mesh = push.meshes[instance.mesh];
     float scale = maxScale(instance);
     float3 center = toWorld(instance, mesh.sphere.xyz);
-    float radius = mesh.sphere.w * scale;
+    float radius = (mesh.sphere.w + ((stored.mesh & INSTANCE_DISPLACED) != 0 ? push.displacement : 0)) * scale;
     if (!inFrustum(view, center, radius))
     {
         return;

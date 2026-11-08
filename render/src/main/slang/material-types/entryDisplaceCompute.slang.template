@@ -1,0 +1,17 @@
+// The material type's displacement into instances' copies (Displacement.COMPUTE; deformation/displace.slang): a thread
+// per vertex of every displaced copy, moving those whose material is of this type, in place, after the copies were
+// posed or copied from their sources this frame. Drawn by types with GEOMETRY_DISPLACE; never run for the others.
+import deformation.displace;
+import {module};
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void {name}DisplaceMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
+{
+    DisplacedCopy copy;
+    uint v;
+    if (chunkItem(group.y * 65535 + group.x, thread.x, copy, v, 0))
+    {
+        displaceCopyVertex<{struct}>(copy, v);
+    }
+}

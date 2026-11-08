@@ -6,8 +6,10 @@ import com.truesim.common.math.Maths;
 import com.truesim.common.math.TransformArray;
 import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.app.Clock;
+import com.truesim.engine.render.Displacement;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.InstanceMotion;
+import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.Interpolation;
 import com.truesim.engine.render.RenderSettings;
 import com.truesim.scene.assets.AssetRef;
@@ -93,6 +95,7 @@ public final class SceneSync implements AutoCloseable {
     private final SceneResources resources;
     private final ComponentStore<Renderable> renderables;
     private final ComponentStore<MorphWeights> morphs;
+    private final ComponentStore<DisplacementMode> displacementModes;
     private final SceneGraph scene;
     private final ChangeClock clock;
     private final GpuScene gpu;
@@ -110,6 +113,24 @@ public final class SceneSync implements AutoCloseable {
         @Override
         public void changed(ChangeBatch batch) { // renderables attached or removed together: one pass
             reconcileAll(batch);
+        }
+    };
+    // A node's DisplacementMode set, changed or removed: its renderable's copy made or dropped to match
+    private final NodeChange.Visitor onDisplacementModeChange = new NodeChange.Visitor() {
+        @Override
+        public void changed(long node, int changes) {
+            int item = NodeHandle.index(node);
+            if (item < itemNode.length && itemNode[item] == node && itemSlot[item] != NONE) {
+                refreshCopy(item);
+                markMoved(item);
+            }
+        }
+
+        @Override
+        public void changed(ChangeBatch batch) {
+            for (int i = 0; i < batch.size(); i++) {
+                changed(batch.node(i), batch.changes(i));
+            }
         }
     };
     private final NodeChange.Visitor onSceneChange = new NodeChange.Visitor() {
@@ -153,6 +174,7 @@ public final class SceneSync implements AutoCloseable {
     // Skinned items: the deformed copy each draws (NONE: its mesh as it is), and those that have one, densely.
     private int[] itemCopy = filled(64);
     private boolean[] itemCopySkinned = new boolean[64]; // whether its copy was made with the skin's joints
+    private boolean[] itemCopyDisplaced = new boolean[64]; // whether its copy is displaced once a frame (COMPUTE)
     private int[] skinned = new int[64];
     private int skinnedCount;
     // Copies to pose this update: those whose joints (or their ancestors in the model, or the mesh's node) moved, found
@@ -312,6 +334,7 @@ public final class SceneSync implements AutoCloseable {
         this.clock = scene.clock();
         renderables = scene.components().store(Renderable.TYPE);
         morphs = scene.components().store(MorphWeights.TYPE);
+        displacementModes = scene.components().store(DisplacementMode.TYPE);
         pickables = scene.components().store(com.truesim.scene.core.Pickable.TYPE);
         gpu.setMaterials(resources.materials()); // the resources' table: instances name its ids
         com.truesim.engine.settings.EngineSettings followed = resources.settings();
@@ -427,6 +450,10 @@ public final class SceneSync implements AutoCloseable {
         if (!started || !renderables.changesSince(since, onRenderableChange)) {
             started = true;
             rebuild(); // the first update, or fell behind the renderables' log
+        } else if (!displacementModes.changesSince(since, onDisplacementModeChange)) {
+            for (int i = 0; i < displacementModes.size(); i++) { // fell behind their log: every node that has one
+                onDisplacementModeChange.changed(displacementModes.node(i), 0);
+            }
         }
         boolean poseAll = rewriteAll; // the first update, or behind the renderables' log
         if (!rewriteAll) {
@@ -890,6 +917,7 @@ public final class SceneSync implements AutoCloseable {
         resources.releaseSet(itemSet[item]);
         itemSet[item] = pendingSet[item];
         pendingSet[item] = null;
+        refreshCopy(item); // its new materials may displace it once a frame, or no longer
         markMoved(item);
         return true;
     }
@@ -1080,6 +1108,7 @@ public final class SceneSync implements AutoCloseable {
         movedItems = Arrays.copyOf(movedItems, length);
         itemCopy = Arrays.copyOf(itemCopy, length);
         itemCopySkinned = Arrays.copyOf(itemCopySkinned, length);
+        itemCopyDisplaced = Arrays.copyOf(itemCopyDisplaced, length);
         poseDue = Arrays.copyOf(poseDue, length);
         poseItems = Arrays.copyOf(poseItems, length);
         jointsTracked = Arrays.copyOf(jointsTracked, length);
@@ -1229,20 +1258,26 @@ public final class SceneSync implements AutoCloseable {
         SkinBinding skin = renderable != null ? renderable.skin() : null;
         MeshData data = itemMesh[item].mesh.data;
         boolean skinning = skin != null && data.jointCount() > 0;
-        boolean wanted = skinning || data.morphTargetCount() > 0;
+        boolean displaced = displacedOnce(item, data);
+        boolean wanted = skinning || data.morphTargetCount() > 0 || displaced;
         int source = itemMesh[item].mesh.id;
         var pool = resources.pool();
         if (itemCopy[item] != NONE && wanted && pool.deformedFrom(itemCopy[item]) == source
-            && itemCopySkinned[item] == skinning) {
+            && itemCopySkinned[item] == skinning && itemCopyDisplaced[item] == displaced) {
             return; // the same mesh: its joints and weights are read each update
         }
         dropCopy(item);
         if (!wanted) {
             return;
         }
-        int copy = resources.addCopy(source, skinning ? data.jointCount() : 0, data);
+        int copy = resources.addCopy(source, skinning ? data.jointCount() : 0, data, displaced);
         itemCopy[item] = copy;
         itemCopySkinned[item] = skinning;
+        itemCopyDisplaced[item] = displaced;
+        if (!skinning && data.morphTargetCount() == 0) {
+            markMoved(item); // displaced alone: nothing to pose, its instance names the copy from now on
+            return;
+        }
         watch(item, skinning ? skin : null, data);
         if (skinnedCount == skinned.length) {
             skinned = Arrays.copyOf(skinned, 2 * skinnedCount);
@@ -1252,10 +1287,40 @@ public final class SceneSync implements AutoCloseable {
         markMoved(item);
     }
 
+    /**
+     * Whether drawn {@code item}'s displacing materials displace it once a frame into a copy
+     * ({@link Displacement#COMPUTE}): its node's {@link DisplacementMode}, else each displacing material's type's mode
+     * ({@code Materials.displacementMode}), else the setting {@link Displacement#MODE}; any of them COMPUTE.
+     */
+    private boolean displacedOnce(int item, MeshData data) {
+        SceneResources.MaterialSet set = itemSet[item];
+        Materials table = resources.materials();
+        int slots = Math.max(1, data.materialSlots());
+        if (set == null || !table.displaces(set.first, slots)) {
+            return false;
+        }
+        DisplacementMode own = displacementModes.get(itemNode[item]);
+        if (own != null) {
+            return own.mode() == Displacement.COMPUTE;
+        }
+        com.truesim.engine.settings.EngineSettings settings = resources.settings();
+        Displacement fallback = settings != null ? settings.get(Displacement.MODE) : Displacement.MODE.defaultValue();
+        for (int id = set.first; id < set.first + slots; id++) {
+            if (table.displaces(id)) {
+                Displacement typed = table.displacementMode(table.materialType(id));
+                if ((typed != null ? typed : fallback) == Displacement.COMPUTE) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private void dropCopy(int item) {
         if (itemCopy[item] == NONE) {
             return;
         }
+        itemCopyDisplaced[item] = false;
         if (jointsTracked[item]) {
             untrackJoints(item);
         }

@@ -33,6 +33,7 @@ import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.ClusteredForwardShading;
 import com.truesim.engine.render.GeometryPool;
+import com.truesim.engine.render.Displacement;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.Keys;
 import com.truesim.common.math.color.Color;
@@ -52,6 +53,7 @@ import com.truesim.engine.render.materials.UnlitParameters;
 import com.truesim.engine.render.TextureSampler;
 import com.truesim.engine.render.materials.ClearcoatParameters;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
+import com.truesim.engine.scene.materials.Lift;
 import com.truesim.engine.scene.materials.Tinted;
 import com.truesim.engine.scene.materials.TintedParameters;
 import com.truesim.engine.render.Materials;
@@ -601,6 +603,61 @@ class SceneSyncTest {
         frame(List.of(graph), List.of(sync), camera);
         assertThat(pool.deformation().size()).isZero();
         assertThat(sync.instanceCount()).isZero();
+    }
+
+    @Test
+    void displacingMaterialsDrawInTheStagesOrIntoACopyAsTheNodeOrTheirTypeSays() throws InterruptedException {
+        // A glowing square lifted 2 right (mesh units, its node unscaled) by the test type "lift": by default in the
+        // vertex stages (RASTER, no copy); the node's DisplacementMode COMPUTE gives it a copy displaced once a frame,
+        // the same image; the component gone, back in the stages; the type's own mode COMPUTE does as the component.
+        materials.register(Lift.TYPE);
+        MaterialData lifted = MaterialData.builder("lift").set("offset", 2f, 0f, 0f).set("displacement", 2.1f).build();
+        MaterialData undeclared = MaterialData.builder("lift").set("offset", 2f, 0f, 0f).build();
+        List<String> problems = new ArrayList<>();
+        resources.diagnostics(new SceneResources.Diagnostics() {
+            @Override
+            public void materialProblem(AssetRef<MaterialData> material, String problem) {
+                problems.add(problem);
+            }
+        });
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        ComponentStore<DisplacementMode> modes = scene.components().store(DisplacementMode.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
+        GpuBuffer[] readbacks = {readback(), readback()};
+        FrameGraph graph = graph(sync, false, readbacks);
+        long square = facing(scene, -1, 0, -3);
+        renderables.set(square, Renderable.of(SQUARE, List.of(lifted.ref())));
+        settle(List.of(graph), List.of(sync));
+        device.waitIdle();
+        assertThat(pool.deformation().displacedCount()).as("in the stages: no copy").isZero();
+        // 2 to the right at 3 deep is a third of the view's width: 21 columns right of -1's
+        double raster = litColumn(readbacks[0], 0);
+        assertThat(raster).as("drawn displaced").isCloseTo(SIZE / 2.0 + 21 * 0.5, within(4.0));
+        modes.set(square, new DisplacementMode(Displacement.COMPUTE));
+        for (int frame = 0; frame < 3; frame++) {
+            frame(List.of(graph), List.of(sync), camera);
+        }
+        device.waitIdle();
+        assertThat(pool.deformation().displacedCount()).as("a copy displaced once a frame").isOne();
+        assertThat(litColumn(readbacks[0], 0)).as("the same image").isCloseTo(raster, within(0.5));
+        modes.remove(square);
+        for (int frame = 0; frame < 3; frame++) {
+            frame(List.of(graph), List.of(sync), camera);
+        }
+        device.waitIdle();
+        assertThat(pool.deformation().displacedCount()).as("the copy dropped").isZero();
+        assertThat(litColumn(readbacks[0], 0)).isCloseTo(raster, within(0.5));
+        materials.displacementMode(Lift.TYPE, Displacement.COMPUTE);
+        renderables.set(square, Renderable.of(SMALL, List.of(lifted.ref()))); // drawn anew: the type's mode taken
+        settle(List.of(graph), List.of(sync));
+        device.waitIdle();
+        assertThat(pool.deformation().displacedCount()).as("by its type's mode").isOne();
+        // A displacing type's data without its largest displacement draws as the default, said so
+        renderables.set(facing(scene, 1, 0, -3), Renderable.of(SQUARE, List.of(undeclared.ref())));
+        settle(List.of(graph), List.of(sync));
+        assertThat(problems).anyMatch(p -> p.contains("displaces: its data needs \"displacement\""));
+        materials.displacementMode(Lift.TYPE, null);
     }
 
     @Test
