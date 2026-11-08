@@ -2444,10 +2444,20 @@ that declare how they use each image. The graph does the rest:
   maps and encodes it for the display that window is on, which its swapchain tells: SDR (sRGB), HDR10 (Rec. 2020,
   PQ) or scRGB (linear floats). `presenter.outputTransform(new DisplayTransform())` turns it on; `PresentSettings.HDR`
   asks for HDR where the display offers it, and a window moved to another display, or HDR toggled, is encoded again.
-  `DisplayTransform`'s settings change while running, without a rebuild: the tone curve (`display.toneCurve`: `off`, `reinhard`, `aces`),
-  exposure, paper white (how bright SDR white and UI show in HDR, 200 nits) and the display's peak brightness (1000
-  nits). In SDR the curve maps into 0 to 1; in HDR scene color 1.0 shows at paper white and brighter colors roll off
-  towards the peak. HDR windows tell their displays about the content (`VK_EXT_hdr_metadata`, where the GPU has it):
+  `DisplayTransform`'s settings change while running, without a rebuild: the tone curve (`display.toneCurve`: `off`,
+  `reinhard`, `aces`, `reinhard_extended`, `aces_fitted`, `agx`, `pbr_neutral`, `gt`, `hable`, each its published
+  reference code, tested against a Java port of it in SDR and HDR10; tunables `display.toneCurve.agx.look` and
+  `display.toneCurve.reinhard_extended.whitePoint`), exposure, paper white (how bright SDR white and UI show in HDR,
+  200 nits), the display's peak brightness (1000 nits) and `display.dither` (a triangular dither of one step before 8
+  or 10 bits, on; black and white stay exact). In SDR the curve maps into 0 to 1; in HDR scene color 1.0 shows at
+  paper white and brighter colors roll off towards the peak (PBR Neutral and GT by HDR forms of their own). A surface
+  offering no sRGB format gets UNORM images (`DisplayEncoding.SDR_UNORM`), which the output pass encodes by the exact
+  sRGB curve. Hooks for post-processing plugins (effects-post): a technique of the view providing
+  `DisplayTransform.EXPOSURE_INPUT` (a buffer holding a float, auto exposure's) replaces `display.exposure`; and
+  `new DisplayTransform().displayEffects()` splits the output pass in two (`OutputTransform.transforms`), tone mapping
+  into `DisplayTransform.DISPLAY_COLOR` (display light, 1 at paper white, without the UI) and then compositing the UI
+  and encoding it, so techniques modifying `DISPLAY_COLOR` (at `Anchor.TONE_MAP`) run in display light between them.
+  HDR windows tell their displays about the content (`VK_EXT_hdr_metadata`, where the GPU has it):
   the peak as its brightest and paper white as its frame average, followed as the settings change
   (`OutputTransform.metadata`, `target.metadata()`).
 - **UI composition:** a view's UI is an image under `Keys.UI` (premultiplied alpha, linear, 1.0 paper white, at the

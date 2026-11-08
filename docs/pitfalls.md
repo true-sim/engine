@@ -171,6 +171,19 @@ passed.
 - Rule: views whose lists a technique sizes follow `overflowed()` and grow; a screenshot of a dense scene against a
   method with no lists (rays) is part of checking a shadow technique.
 
+**A switched-off modifier that provides a new version of a key leaves its consumers an unwritten image.**
+`technique.when(setting)` skips the technique's passes. A modifier writing its key in place then leaves the image as
+the producer made it, but one that writes a new image and provides it under the key (`g.modify`, then `g.provide`)
+leaves everything after it reading that image, never written. `Switch.fallback` does not cover it: fallbacks are for
+keys the technique provides, not new versions of keys it modifies. On the unpushed post effects branch
+(true-sim/engine#447) a post material providing a new scene color showed black (0) instead of the scene while
+switched off.
+- Proof: that branch's `PostMaterialTest.materialsChainInTheirOrderAndSwitchOff` read 0 where the scene's 0.5 was
+  expected with `when(setting)`, and passed with the material switched off at build time (recorded in
+  [#447](https://github.com/true-sim/engine/issues/447)); `Switch` and `GraphBuilder.provide` on main still behave so.
+- Rule: effects providing a new image switch off at build time (a technique slot's `off`, read with `g.technique`, or
+  `g.setting`: a rebuild leaving the key as it was); `when` is for effects writing in place.
+
 ## Shaders and the GPU
 
 **An instance's `mesh` word holds flag bits.** Indexing the mesh table with it unmasked read out of bounds and lost the
@@ -252,6 +265,14 @@ without any visibility modifier make everything public, which is what the genera
   fixed the build.
 - Rule: in shader files that are entry points rather than modules (no `module` line), use no visibility modifiers; in
   modules, mark everything other files use `public`.
+
+**`[shader(...)]` in a comment makes truesim.slang compile a module as an entry point.** A post material module
+(`module` line) showed an example entry point in its header comment; the build compiled the file on its own and failed
+with E57004 "SPIR-V output contains no exported symbols".
+- Proof: reproduced on the post effects branch ([#447](https://github.com/true-sim/engine/issues/447)); rewording the
+  comment fixed it. build-logic's `CompileSlang` (v0.19.1, `CompileSlang.kt` line 104) still picks entry-point files by
+  their text containing `[shader(`, comments included.
+- Rule: never write the `[shader(` attribute in a module's comments.
 
 **A `[HostLayout]` struct named through a pointer before it is declared broke the layout generator.** `ParticleFrame`
 held a `ParticleSource*` declared after it in particle.slang; `generateSlangRecords` failed with "class

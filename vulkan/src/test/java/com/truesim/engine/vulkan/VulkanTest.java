@@ -297,12 +297,17 @@ class VulkanTest {
             assertThat(Swapchain.chooseFormat(hdr.position(3).slice(), true)).as("the other HDR10 format").isZero();
             assertThat(Swapchain.chooseFormat(hdr.position(0).limit(2).slice(), true)).as("scRGB").isEqualTo(1);
             assertThat(Swapchain.chooseFormat(formats.position(0).limit(4), true)).as("none offered: SDR").isEqualTo(2);
-            assertThat(Swapchain.encoding(EXTSwapchainColorspace.VK_COLOR_SPACE_HDR10_ST2084_EXT))
+            assertThat(Swapchain.encoding(VK10.VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+                EXTSwapchainColorspace.VK_COLOR_SPACE_HDR10_ST2084_EXT))
                 .isEqualTo(DisplayEncoding.HDR10_PQ);
-            assertThat(Swapchain.encoding(EXTSwapchainColorspace.VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT))
+            assertThat(Swapchain.encoding(VK10.VK_FORMAT_R16G16B16A16_SFLOAT,
+                EXTSwapchainColorspace.VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT))
                 .isEqualTo(DisplayEncoding.SCRGB_LINEAR);
-            assertThat(Swapchain.encoding(KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR))
+            assertThat(Swapchain.encoding(VK10.VK_FORMAT_B8G8R8A8_SRGB, KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR))
                 .isEqualTo(DisplayEncoding.SDR_SRGB);
+            assertThat(Swapchain.encoding(VK10.VK_FORMAT_B8G8R8A8_UNORM, KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR))
+                .as("no sRGB format: the output pass encodes").isEqualTo(DisplayEncoding.SDR_UNORM);
+            assertThat(DisplayEncoding.SDR_UNORM.hdr()).isFalse();
             assertThat(DisplayEncoding.SDR_SRGB.hdr()).isFalse();
             assertThat(DisplayEncoding.HDR10_PQ.hdr()).isTrue();
         }

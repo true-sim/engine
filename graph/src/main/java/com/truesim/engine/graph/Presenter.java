@@ -142,6 +142,9 @@ public final class Presenter implements AutoCloseable {
             });
         }
         for (Target target : targets) {
+            if (target.transform != null) {
+                target.removeTransform(); // the one made by the transform before
+            }
             target.swapchain.setHdr(target.wantsHdr());
             target.sync();
         }
@@ -215,7 +218,7 @@ public final class Presenter implements AutoCloseable {
         private EngineSettings display = graph.settings(); // what the output transform reads
         private EngineSettings.Subscription watch; // of the settings it follows, or null
         private final Key<Image> shown; // the transformed result the window shows, with an output transform
-        private Technique transform; // the output transform's technique in the view, or null
+        private List<Technique> transform; // the output transform's techniques in the view, or null
         private DisplayEncoding transformed; // the encoding it was made for
         private long presented;
         private boolean removed;
@@ -276,16 +279,29 @@ public final class Presenter implements AutoCloseable {
             tellMetadata();
             image.reformat(Format.of(swapchain.format()));
             if (transform != null && (outputTransform == null || transformed != swapchain.encoding())) {
-                view.remove(transform).removeOutput(shown, image);
-                transform = null;
+                removeTransform();
             }
             if (outputTransform != null && transform == null) {
                 transformed = swapchain.encoding();
-                transform = outputTransform.transform(key, shown, transformed, display);
-                view.removeOutput(key, image).add(transform).output(shown, image);
+                transform = List.copyOf(outputTransform.transforms(key, shown, transformed, display));
+                view.removeOutput(key, image);
+                for (Technique each : transform) {
+                    view.add(each);
+                }
+                view.output(shown, image);
             } else if (outputTransform == null) {
                 view.output(key, image);
             }
+        }
+
+        /** Takes the output transform's techniques and result out of the view. */
+        @AllowAllocation("when the swapchain changes")
+        private void removeTransform() {
+            for (Technique each : transform) {
+                view.remove(each);
+            }
+            view.removeOutput(shown, image);
+            transform = null;
         }
 
         /**
@@ -369,8 +385,7 @@ public final class Presenter implements AutoCloseable {
             if (value != display) {
                 display = value;
                 if (transform != null) {
-                    view.remove(transform).removeOutput(shown, image);
-                    transform = null;
+                    removeTransform();
                 }
                 sync();
             }
@@ -415,7 +430,9 @@ public final class Presenter implements AutoCloseable {
             window.detach(this);
             view.removeOutput(key, image).removeOutput(shown, image);
             if (transform != null) {
-                view.remove(transform);
+                for (Technique each : transform) {
+                    view.remove(each);
+                }
             }
             swapchain.close();
             surface.close();
