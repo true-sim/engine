@@ -5,14 +5,23 @@ import static org.lwjgl.util.vma.Vma.VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BI
 import static org.lwjgl.util.vma.Vma.VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
 import static org.lwjgl.util.vma.Vma.VMA_ALLOCATION_CREATE_MAPPED_BIT;
 import static org.lwjgl.util.vma.Vma.VMA_MEMORY_USAGE_AUTO;
+import static org.lwjgl.util.vma.Vma.VMA_MEMORY_USAGE_UNKNOWN;
+import static org.lwjgl.util.vma.Vma.vmaAllocateMemory;
+import static org.lwjgl.util.vma.Vma.vmaBindBufferMemory;
 import static org.lwjgl.util.vma.Vma.vmaCreateBuffer;
 import static org.lwjgl.util.vma.Vma.vmaDestroyBuffer;
+import static org.lwjgl.util.vma.Vma.vmaFindMemoryTypeIndexForBufferInfo;
+import static org.lwjgl.util.vma.Vma.vmaFreeMemory;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_CONCURRENT;
 import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_EXCLUSIVE;
+import static org.lwjgl.vulkan.VK10.VK_SUCCESS;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyBuffer;
+import static org.lwjgl.vulkan.VK10.vkCreateBuffer;
+import static org.lwjgl.vulkan.VK10.vkDestroyBuffer;
+import static org.lwjgl.vulkan.VK10.vkGetBufferMemoryRequirements;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
 import static org.lwjgl.vulkan.VK12.vkGetBufferDeviceAddress;
@@ -21,6 +30,7 @@ import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 import com.truesim.annotations.AllowAllocation;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
@@ -29,6 +39,7 @@ import org.lwjgl.util.vma.VmaAllocationInfo;
 import org.lwjgl.vulkan.VkBufferCopy;
 import org.lwjgl.vulkan.VkBufferCreateInfo;
 import org.lwjgl.vulkan.VkBufferDeviceAddressInfo;
+import org.lwjgl.vulkan.VkMemoryRequirements;
 
 /**
  * A buffer in GPU memory, allocated by VMA. A host-visible buffer stays mapped: {@link #memory()} is a
@@ -38,6 +49,13 @@ import org.lwjgl.vulkan.VkBufferDeviceAddressInfo;
  */
 @AllowAllocation("created rarely")
 public final class GpuBuffer implements AutoCloseable, DeviceBuffer {
+
+    /**
+     * Where every buffer with a device address starts: a multiple of 16 bytes, so that any load shaders make through
+     * its pointers is as aligned as the SPIR-V says (Slang marks a pointer's or a 64-bit value's load
+     * {@code Aligned 8}, a vector's up to 16). Drivers may place small buffers at 4 bytes; the RX 9070 XT did.
+     */
+    public static final long ADDRESS_ALIGNMENT = 16;
 
     private final VulkanDevice device;
     private final long handle;
@@ -82,8 +100,12 @@ public final class GpuBuffer implements AutoCloseable, DeviceBuffer {
             LongBuffer buffer = stack.mallocLong(1);
             PointerBuffer allocated = stack.mallocPointer(1);
             VmaAllocationInfo result = VmaAllocationInfo.calloc(stack);
-            Vulkan.check(vmaCreateBuffer(device.allocator(), info, allocationInfo, buffer, allocated, result),
-                "Could not allocate a buffer of " + size + " bytes");
+            if ((usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) == 0) {
+                Vulkan.check(vmaCreateBuffer(device.allocator(), info, allocationInfo, buffer, allocated, result),
+                    "Could not allocate a buffer of " + size + " bytes");
+            } else {
+                createAligned(device, info, allocationInfo, buffer, allocated, result, stack);
+            }
             this.handle = buffer.get(0);
             this.allocation = allocated.get(0);
             this.memoryCategory = GpuMemory.buffer(usage, hostVisible);
@@ -98,6 +120,40 @@ public final class GpuBuffer implements AutoCloseable, DeviceBuffer {
                     .buffer(handle));
         }
         device.track(this);
+    }
+
+    /**
+     * vmaCreateBuffer with the buffer's start aligned to {@link #ADDRESS_ALIGNMENT} at least (VMA's own
+     * vmaCreateBufferWithAlignment, which LWJGL does not offer): the memory type VMA would choose, memory allocated for
+     * the raised alignment, then bound.
+     */
+    private static void createAligned(VulkanDevice device, VkBufferCreateInfo info,
+        VmaAllocationCreateInfo allocationInfo, LongBuffer buffer, PointerBuffer allocated, VmaAllocationInfo result,
+        MemoryStack stack) {
+        long allocator = device.allocator();
+        IntBuffer type = stack.mallocInt(1);
+        Vulkan.check(vmaFindMemoryTypeIndexForBufferInfo(allocator, info, allocationInfo, type),
+            "Could not find memory for a buffer of " + info.size() + " bytes");
+        Vulkan.check(vkCreateBuffer(device.handle(), info, null, buffer),
+            "Could not create a buffer of " + info.size() + " bytes");
+        VkMemoryRequirements requirements = VkMemoryRequirements.calloc(stack);
+        vkGetBufferMemoryRequirements(device.handle(), buffer.get(0), requirements);
+        requirements.alignment(Math.max(requirements.alignment(), ADDRESS_ALIGNMENT));
+        // The type is chosen: the host access flags are only for VMA_MEMORY_USAGE_AUTO, mapping stays.
+        VmaAllocationCreateInfo exact = VmaAllocationCreateInfo.calloc(stack).usage(VMA_MEMORY_USAGE_UNKNOWN)
+            .flags(allocationInfo.flags() & VMA_ALLOCATION_CREATE_MAPPED_BIT)
+            .requiredFlags(allocationInfo.requiredFlags()).memoryTypeBits(1 << type.get(0));
+        int made = vmaAllocateMemory(allocator, requirements, exact, allocated, result);
+        if (made != VK_SUCCESS) {
+            vkDestroyBuffer(device.handle(), buffer.get(0), null);
+        }
+        Vulkan.check(made, "Could not allocate a buffer of " + info.size() + " bytes");
+        int bound = vmaBindBufferMemory(allocator, allocated.get(0), buffer.get(0));
+        if (bound != VK_SUCCESS) {
+            vmaFreeMemory(allocator, allocated.get(0));
+            vkDestroyBuffer(device.handle(), buffer.get(0), null);
+        }
+        Vulkan.check(bound, "Could not bind a buffer of " + info.size() + " bytes");
     }
 
     /** A buffer the CPU writes and reads directly, e.g. for uploads, readbacks and per-frame data. */
