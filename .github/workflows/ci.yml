@@ -132,15 +132,15 @@ jobs:
 
   # GPU-assisted validation (TRUESIM_GPU_ASSISTED_VALIDATION, README "Building"): the layer instruments the shaders
   # and reports reads and writes through buffer device addresses outside every buffer, unaligned pointer loads and bad
-  # bindless indices, which plain validation cannot see. On lavapipe the instrumented shaders of several tests crash the
-  # JVM (MeshletRendererTest, CameraViewGpuTest, ray-traced ShadowsTest: SIGSEGV in lavapipe's JIT'd code, runs
-  # 42513422506 and 42512115646), so this runs the tests that ran there, and only reports: it is not among the jobs
-  # `build` requires. Run GPU-AV on a GPU for the rest.
+  # bindless indices, which plain validation cannot see. Several times slower: a subset, failing on any validation
+  # error. Left out until #458 explains them, as they crash the JVM under GPU-AV on lavapipe only (SIGSEGV in its JIT'd
+  # code; clean under GPU-AV on an RX 9070 XT): MeshletRendererTest and CameraViewGpuTest (run 42513422506), the
+  # ray-traced ShadowsTest cases (an invalid acceleration structure reference, then the crash; run 42512115646), and,
+  # not tried here yet, MotionVectorsTest, GpuPickingTest, SegmentTracingTest, ProbeVolumeTest, RadianceCascadesTest.
   gpu-av:
     needs: changes
     if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
     runs-on: ubuntu-26.04
-    continue-on-error: true
     env:
       TRUESIM_GPU_ASSISTED_VALIDATION: true
     steps:
@@ -166,7 +166,7 @@ jobs:
             */hs_err_pid*.log
 
   build:
-    needs: [changes, modules, shard]
+    needs: [changes, modules, shard, gpu-av]
     if: always()
     runs-on: ubuntu-26.04
     steps:
@@ -174,7 +174,7 @@ jobs:
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          echo "changes, modules, shards: $RESULTS"
+          echo "changes, modules, shards, gpu-av: $RESULTS"
           for result in $RESULTS; do
             if [ "$result" != success ] && [ "$result" != skipped ]; then
               exit 1

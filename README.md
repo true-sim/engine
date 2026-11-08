@@ -2885,8 +2885,8 @@ the SPIR-V says, and bindless indices out of range or unwritten, with the pass (
 SPIR-V instruction; ordinary validation sees none of these, since the engine reaches its data through pointers. Its
 other settings come from the layer's own (`VK_LAYER_SETTINGS_PATH`, vkconfig). `TRUESIM_SYNCHRONIZATION_VALIDATION=true`
 turns on synchronization validation the same way. Run it on a GPU, on the tests of what you changed: on lavapipe the
-instrumented shaders of several tests crash the JVM, so CI's `gpu-av` job runs only a few tests with it, and only
-reports. Effects and plugins building on the engine's `TestGpu` get the switch too.
+instrumented shaders of several tests crash the JVM (#458), so CI's required `gpu-av` job runs the tests that do not.
+Effects and plugins building on the engine's `TestGpu` get the switch too.
 
 **GPU test fixtures** are published with the modules (Gradle `testFixtures`), for the tests of any repo building on the
 engine (effects-*, plugins-*, samples) as for the engine's own:
