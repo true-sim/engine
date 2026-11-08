@@ -117,6 +117,7 @@ class UiCompositionTest {
     void sdrShowsTheUisColoursOverTheToneMappedScene() {
         GpuUiRenderer[] ui = new GpuUiRenderer[1];
         try (GpuRig rig = rig(DisplayEncoding.SDR_SRGB, ui)) {
+            rig.graph.settings().set(DisplayTransform.DITHER, false); // exact values, compared to a few thousandths
             UiTextures textures = new UiTextures();
             rig.frame(ui[0], textures, hud(textures));
             assertThat(rig.at(60, 56)).as("the white panel: white, not tone mapped")

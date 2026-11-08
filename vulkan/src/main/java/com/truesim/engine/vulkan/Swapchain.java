@@ -22,6 +22,7 @@ import static org.lwjgl.vulkan.KHRSwapchain.vkDestroySwapchainKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkGetSwapchainImagesKHR;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_A2B10G10R10_UNORM_PACK32;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_A8B8G8R8_SRGB_PACK32;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_B8G8R8A8_SRGB;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R16G16B16A16_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_SRGB;
@@ -131,7 +132,7 @@ public final class Swapchain implements AutoCloseable {
             }
             VkSurfaceFormatKHR chosen = chooseFormat(stack);
             this.format = chosen.format();
-            this.encoding = encoding(chosen.colorSpace());
+            this.encoding = encoding(chosen.format(), chosen.colorSpace());
             this.presentMode = supportedPresentModes().contains(requested) ? requested : PresentMode.FIFO;
             int count = Math.max(capabilities.minImageCount() + 1, 3);
             if (capabilities.maxImageCount() > 0) {
@@ -301,7 +302,7 @@ public final class Swapchain implements AutoCloseable {
 
     /** Tells the display the metadata, where there is some, the swapchain is HDR and the device can. */
     private void applyMetadata() {
-        if (metadata == null || handle == 0 || encoding == DisplayEncoding.SDR_SRGB || !device.hdrMetadata()) {
+        if (metadata == null || handle == 0 || !encoding.hdr() || !device.hdrMetadata()) {
             return;
         }
         try (MemoryStack stack = stackPush()) {
@@ -321,12 +322,16 @@ public final class Swapchain implements AutoCloseable {
         return encoding;
     }
 
-    /** The encoding of images in color space {@code colorSpace}. */
-    static DisplayEncoding encoding(int colorSpace) {
+    /**
+     * The encoding of images of {@code format} in color space {@code colorSpace}: SDR in an sRGB format, or in another
+     * (a UNORM format, where the surface offers no sRGB one), which the output pass then encodes itself.
+     */
+    static DisplayEncoding encoding(int format, int colorSpace) {
         return switch (colorSpace) {
             case VK_COLOR_SPACE_HDR10_ST2084_EXT -> DisplayEncoding.HDR10_PQ;
             case VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT -> DisplayEncoding.SCRGB_LINEAR;
-            default -> DisplayEncoding.SDR_SRGB;
+            default -> format == VK_FORMAT_B8G8R8A8_SRGB || format == VK_FORMAT_R8G8B8A8_SRGB
+                || format == VK_FORMAT_A8B8G8R8_SRGB_PACK32 ? DisplayEncoding.SDR_SRGB : DisplayEncoding.SDR_UNORM;
         };
     }
 
