@@ -131,7 +131,7 @@ public struct View
     public float3 eye;             // where the view looks from, relative to its position (0 but for shadow views)
     public uint flags;             // VIEW_*
     public ViewLists lists;        // where culling lists what the view draws
-    public uint* visibility;       // per instance: 1 if the view saw it the last time its late phase looked; or null
+    public uint* visibility;       // per instance: 1 if the view saw it the last time its late phase looked; or absent
     public uint binIndices;        // the indexed path's room in each raster bin but the first, after maxIndices
     public uint highlightCount;    // VIEW_(UN)HIGHLIGHTED_ONLY: how many instance ids the flags hold
     public float4x4 previousViewProjection; // the frame before's, from positions relative to this frame's camera
@@ -139,7 +139,7 @@ public struct View
     public float2 previousJitter;  // the frame before's
     public uint2 outputSize;       // the pixels it renders to
     public uint* highlights;       // VIEW_(UN)HIGHLIGHTED_ONLY: the highlight flags (2 bits per instance id)
-    public uint* ids;              // or null: the instances it culls, by id, instead of every one (a shadow tile's movers)
+    public uint* ids;              // or absent: the instances it culls, by id, instead of every one (a shadow tile's movers)
     public uint idCount;           // how many ids there are
     public uint pad2;
     public ShadingHookBlock* hooks; // the view's shading hooks' block (hooks.slang; RenderView writes it each frame)
@@ -817,7 +817,7 @@ public Surface typedSurface<M : IMaterial>(MaterialRef ref, SurfaceInput input, 
  * The surface color at `pixel`, with texture coordinate gradients `dx`, `dy` (per pixel), of material type M's surface
  * showing the features of `features` (FEATURE_*; where it is a constant, the code of the others is left out): the
  * fragment stage of every geometry path, and of anything shading the same surfaces. The lighting is the same for every
- * type: by the lights `lights` gives it (the frame's light list) and the sky or, without a light list (null), by the
+ * type: by the lights `lights` gives it (the frame's light list) and the sky or, without a light list (absent), by the
  * sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
  */
 public float4 shadeMaterial<M : IMaterial>(View view, VertexOut in, Material* materials,
@@ -861,10 +861,10 @@ public float4 shadeMaterialSurface<M : IMaterial>(View view, VertexOut in,
     // Light from all around: the view's indirect-light table (an environment, later GI), or the constant sky
     float3 reflectance;
     float3 diffuseWeight;
-    float3 color = (indirect != nullptr ? indirectLightWeights(indirect, site, s, toViewer, in.world, input.normal,
+    float3 color = (given(indirect) ? indirectLightWeights(indirect, site, s, toViewer, in.world, input.normal,
         reflectance, diffuseWeight)
         : ambientWeights(s, toViewer, SKY_IRRADIANCE, reflectance, diffuseWeight)) + emissive;
-    if (lights == nullptr)
+    if (!given(lights))
     {
         color += reflected(s, toViewer, SUN, SUN_IRRADIANCE);
     }

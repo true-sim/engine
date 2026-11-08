@@ -88,9 +88,9 @@ public struct PathPush
     public View* view;
     public SceneTable* scene;
     public uint64_t rays;              // RayScene*: the top level and its triangles
-    public LightListHeader* lights;    // the view's light list; null: the sun
-    public IndirectLight* indirect;    // the view's indirect-light table (its environment); null: the constant sky
-    public WorldLightGrid* world;      // the lights by world grid (lights/world.slang); null: every light of the list
+    public LightListHeader* lights;    // the view's light list; absent: the sun
+    public IndirectLight* indirect;    // the view's indirect-light table (its environment); absent: the constant sky
+    public WorldLightGrid* world;      // the lights by world grid (lights/world.slang); absent: every light of the list
     public float3 offset;              // the camera's position less the top level's origin
     public uint accumulation;          // storage slot: the radiance added up (rgb)
     public uint size;                  // the region: width, height in the high 16 bits (PATH_INTERVALS: see there)
@@ -284,7 +284,7 @@ float3 rotateByQuaternion(float4 q, float3 v)
 public float3 environment(float3 direction)
 {
     IndirectLight* t = push.indirect;
-    if (t == nullptr)
+    if (!given(t))
     {
         return SKY_IRRADIANCE / PI;
     }
@@ -517,12 +517,12 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
  */
 public float3 directLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uint rng)
 {
-    if (push.world != nullptr)
+    if (given(push.world))
     {
         return worldLight(s, p, ng, v, view, rng);
     }
     LightListHeader* list = push.lights;
-    if (list == nullptr)
+    if (!given(list))
     {
         Light sun;
         sun.type = DIRECTIONAL;
@@ -949,7 +949,7 @@ public void recordProbeMiss(PathState path)
 public float3 probeEnvironment(float3 direction)
 {
     IndirectLight* t = push.indirect;
-    if (t == nullptr || (t[0].flags & INDIRECT_ENVIRONMENT) == 0)
+    if (!given(t) || (t[0].flags & INDIRECT_ENVIRONMENT) == 0)
     {
         return environment(direction);
     }

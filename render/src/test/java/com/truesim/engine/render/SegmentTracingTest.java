@@ -96,6 +96,11 @@ class SegmentTracingTest {
             FrameGraph graph = new FrameGraph(device, 2);
             GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(16, 1, 1), graph.frameSlots());
             GpuScene scene = new GpuScene(device, pool, 16, graph.frameSlots());
+            // The material ids below are only numbers the crossings report, yet the top level's instance pass reads
+            // each instance's materials (masked or not): they must be in the table, or it reads past it (GPU-assisted
+            // validation: reads in no buffer, past the default table of one material).
+            Materials table = new Materials(device, 32, graph.frameSlots());
+            scene.setMaterials(table);
             MeshletRenderer renderer = new MeshletRenderer(device, scene, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_FORMAT_D32_SFLOAT, graph.frameSlots());
             RayTracing rayTracing = new RayTracing(device, pool, 16);
@@ -203,6 +208,7 @@ class SegmentTracingTest {
                 rayTracing.close();
                 renderer.close();
                 scene.close();
+                table.close();
                 pool.close();
             }
         }

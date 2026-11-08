@@ -69,7 +69,7 @@ public record BlendedTargets(Kind kind, Image color, Image accumulated, Image re
 
     /** The indirect light's table address in a pass with context {@code ctx}; 0 without. Allocates nothing. */
     public long indirectAddress(com.truesim.engine.graph.PassContext ctx) {
-        return indirect == null ? 0 : ctx.address(indirect.table());
+        return indirect == null ? ctx.absent() : ctx.address(indirect.table());
     }
 
     /** {@code pass}, drawing within the render region of {@link #region} where there is one. */

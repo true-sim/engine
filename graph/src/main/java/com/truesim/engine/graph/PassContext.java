@@ -93,6 +93,20 @@ public final class PassContext {
         return graph.bufferAddress(declared(buffer).id);
     }
 
+    /**
+     * {@link #address(Buffer)} of {@code buffer}, or for none (null) the device's
+     * {@link com.truesim.engine.vulkan.VulkanDevice#absentAddress() absent address}, never 0: shaders test it with
+     * bindless.slang's {@code present(p)}.
+     */
+    public long addressOrAbsent(Buffer buffer) {
+        return buffer == null ? graph.device().absentAddress() : address(buffer);
+    }
+
+    /** The device's {@link com.truesim.engine.vulkan.VulkanDevice#absentAddress() address for none}, never 0. */
+    public long absent() {
+        return graph.device().absentAddress();
+    }
+
     /** Whether {@code history}'s last frame image holds what that frame wrote: not on its first frame. */
     public boolean historyValid(History history) {
         return graph.historyValid(history.index);

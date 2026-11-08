@@ -322,7 +322,7 @@ public final class ReferencePathTracer implements Technique {
                 if (single != null) { // every hit by one shader
                     ctx.dispatch(single, push(shadePush, ctx, color, accumulation, current, next, binTables, counts,
                         lights, indirect, table, tablesBytes, bounce, bins, 0, settings)
-                        .world(world == null ? 0 : ctx.address(world.grid())).lightRays(lightWords)
+                        .world(world == null ? ctx.absent() : ctx.address(world.grid())).lightRays(lightWords)
                         .emitters(ctx.address(emitters)), ROW,
                         groupRows(ctx, color), 1);
                     return;
@@ -331,8 +331,8 @@ public final class ReferencePathTracer implements Technique {
                     if (shade[bin] != null) {
                         ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, color, accumulation, current, next,
                             binTables, counts, lights, indirect, table, tablesBytes, bounce, bins, bin, settings)
-                            .world(world == null ? 0 : ctx.address(world.grid())).lightRays(lightWords)
-                            .emitters(ctx.address(emitters)), binTables,
+                            .world(world == null ? ctx.absent() : ctx.address(world.grid()))
+                            .lightRays(lightWords).emitters(ctx.address(emitters)), binTables,
                             table + 16L * bin);
                     }
                 }
@@ -423,13 +423,13 @@ public final class ReferencePathTracer implements Technique {
         int bounce, int bins, int bin, EngineSettings settings) {
         GpuScene scene = renderer.scene();
         int index = sampleIndex(ctx, color, settings);
-        return push.paths(paths == null ? 0 : ctx.address(paths)).next(next == null ? 0 : ctx.address(next))
-            .bins(binTables == null ? 0 : ctx.address(binTables) + table)
-            .counts(counts == null ? 0 : ctx.address(counts))
+        return push.paths(ctx.addressOrAbsent(paths)).next(ctx.addressOrAbsent(next))
+            .bins(ctx.addressOrAbsent(binTables) + table)
+            .counts(ctx.addressOrAbsent(counts))
             .view(view.view().address()).scene(scene.tableAddress())
             .rays(rayTracing.sceneAddress(scene))
-            .lights(lights == null ? 0 : ctx.address(lights))
-            .indirect(indirect == null ? 0 : ctx.address(indirect.table())).world(0)
+            .lights(ctx.addressOrAbsent(lights))
+            .indirect(indirect == null ? ctx.absent() : ctx.address(indirect.table())).world(ctx.absent())
             .offset((float) (view.view().position(0) - rayTracing.origin(0)),
                 (float) (view.view().position(1) - rayTracing.origin(1)),
                 (float) (view.view().position(2) - rayTracing.origin(2)))

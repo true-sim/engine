@@ -31,7 +31,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     View view = push.views[v];
     // A view listing its instances culls those alone (the rest of the row's threads leave at once)
     uint instanceId = id.x;
-    if (view.ids != nullptr)
+    if (given(view.ids))
     {
         if (id.x >= view.idCount)
         {

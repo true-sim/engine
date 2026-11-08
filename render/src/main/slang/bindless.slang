@@ -29,8 +29,11 @@ public RWTexture2D<float4> images[];
 
 // The same storage images, for those of unsigned integer formats (e.g. the visibility buffer's IDs).
 // Two views of one binding, on purpose: each image is read through the one matching its format (the build allows
-// the overlap: render/build.gradle.kts).
+// the overlap: render/build.gradle.kts). Its format is unknown, as the float images' are: without the attribute Slang
+// declares Rg32ui, which every R32_UINT image (the normals, the IDs) does not match, and accesses through a view of
+// another format are undefined for the whole image (GPU-assisted validation reports each).
 [[vk::binding(2, 0)]]
+[[vk::image_format("unknown")]]
 public RWTexture2D<uint2> uintImages[];
 
 // The same storage images, for 2D arrays: a cube's level, its six faces as layers.
@@ -40,6 +43,17 @@ public RWTexture2DArray<float4> imageArrays[];
 // The same storage images, for 3D ones (dynamic 3D textures GPU passes write: Textures.dynamic).
 [[vk::binding(2, 0)]]
 public RWTexture3D<float4> volumeImages[];
+
+/**
+ * Whether a pointer the host handed over names data (is given). For none (absent) the host hands
+ * VulkanDevice.absentAddress(), a buffer of zeros with its lowest bit set, never 0: lavapipe performs loads in branches
+ * no invocation takes and crashed on address 0 there (docs/pitfalls.md). A pointer made null in a shader is not given.
+ */
+public bool given<T>(T* p)
+{
+    uint64_t a = (uint64_t)p;
+    return a != 0 && (a & 1) == 0;
+}
 
 /** Sampler slots. */
 public static const uint LINEAR_CLAMP = 0;

@@ -567,14 +567,14 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
         GpuScene scene = renderer.scene();
         RenderView view = anchor.view();
         float interval = settings.get(INTERVAL) * settings.get(SPACING);
-        return push.paths(paths == null ? 0 : ctx.address(paths)).next(next == null ? 0 : ctx.address(next))
-            .bins(binTables == null ? 0 : ctx.address(binTables) + binTable)
-            .counts(counts == null ? 0 : ctx.address(counts))
+        return push.paths(ctx.addressOrAbsent(paths)).next(ctx.addressOrAbsent(next))
+            .bins(ctx.addressOrAbsent(binTables) + binTable)
+            .counts(ctx.addressOrAbsent(counts))
             .view(view.address()).scene(scene.tableAddress())
             .rays(rayTracing.sceneAddress(scene))
-            .lights(0)
-            .indirect(table == null ? 0 : ctx.address(table))
-            .world(world == null ? 0 : ctx.address(world.grid()))
+            .lights(ctx.absent())
+            .indirect(ctx.addressOrAbsent(table))
+            .world(world == null ? ctx.absent() : ctx.address(world.grid()))
             .offset((float) cameraFromScene(0), (float) cameraFromScene(1), (float) cameraFromScene(2))
             .accumulation(rayImage == null ? 0 : ctx.storage(rayImage))
             .size(Float.floatToRawIntBits(interval))
@@ -698,8 +698,8 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
             GpuScene scene = renderer.scene();
             int flags = (settings.get(VISIBILITY) ? VISIBILITY_FLAG : 0) | (settings.get(CLASSIFY) ? CLASSIFY_FLAG : 0);
             return push.volume(ctx.address(data)).levels(ctx.address(levels))
-                .rays(paths == null ? 0 : ctx.address(paths)).counts(counts == null ? 0 : ctx.address(counts))
-                .inside(inside == null ? 0 : ctx.address(inside))
+                .rays(ctx.addressOrAbsent(paths)).counts(ctx.addressOrAbsent(counts))
+                .inside(ctx.addressOrAbsent(inside))
                 .scene(rayTracing.sceneAddress(scene))
                 .toAnchor((float) (volumeFromScene(camera, coarsest, 0) - cameraFromScene(0)),
                     (float) (volumeFromScene(camera, coarsest, 1) - cameraFromScene(1)),

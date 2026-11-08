@@ -528,7 +528,7 @@ final class CullPasses implements AutoCloseable {
                     memPutLong(push + ExpandPush.INDICES, v.frameIndices().deviceAddress());
                     memPutInt(push + ExpandPush.BIN, bin);
                     memPutInt(push + ExpandPush.LATE, early == null ? 1 : 0);
-                    memPutLong(push + ExpandPush.TYPED, split ? v.split().deviceAddress() : 0);
+                    memPutLong(push + ExpandPush.TYPED, split ? v.split().deviceAddress() : device.absentAddress());
                     memPutInt(push + ExpandPush.CATEGORIES, v.splitCategories());
                     expand.push(commands, push, ExpandPush.BYTES);
                     Commands.dispatchIndirect(commands, v.expandCommand().handle(), 16L * bin);

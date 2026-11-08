@@ -2937,7 +2937,16 @@ system property `truesim.gpu`) chooses another, for the tests too: a type (`disc
 
 A lost device's `DeviceLostException` says what the driver saw, where the GPU has `VK_EXT_device_fault`: the kind of
 fault, its address and the buffer that holds it. To have the validation layer check shader reads and writes as they
-run, build the instance with `gpuAssistedValidation(true)` (much slower).
+run, build the instance with `gpuAssistedValidation(true)` (much slower), or set `TRUESIM_GPU_ASSISTED_VALIDATION=true`
+for every validated instance, the tests' included: `TRUESIM_GPU_ASSISTED_VALIDATION=true ./gradlew :engine-render:test
+--tests '*ShadowsTest'`. GPU-assisted validation instruments the shaders and reports, as validation errors (so the
+tests fail), reads and writes through buffer device addresses outside every buffer, pointer loads less aligned than
+the SPIR-V says, and bindless indices out of range or unwritten, with the pass (debug region), the invocation and the
+SPIR-V instruction; ordinary validation sees none of these, since the engine reaches its data through pointers. Its
+other settings come from the layer's own (`VK_LAYER_SETTINGS_PATH`, vkconfig). `TRUESIM_SYNCHRONIZATION_VALIDATION=true`
+turns on synchronization validation the same way. Run it on a GPU, on the tests of what you changed: on lavapipe the
+instrumented shaders of several tests crash the JVM (#458), so CI's required `gpu-av` job runs the tests that do not.
+Effects and plugins building on the engine's `TestGpu` get the switch too.
 
 **GPU test fixtures** are published with the modules (Gradle `testFixtures`), for the tests of any repo building on the
 engine (effects-*, plugins-*, samples) as for the engine's own:
