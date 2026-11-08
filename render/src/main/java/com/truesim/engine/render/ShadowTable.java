@@ -24,7 +24,11 @@ public final class ShadowTable implements AutoCloseable {
     private static final int SHADOW_MAP = LightsConstants.SHADOW_MAP;
     private static final int SHADOW_MASK = LightsConstants.SHADOW_MASK;
     private static final int SHADOW_NONE = LightsConstants.SHADOW_NONE;
-    private static final int PCF = LightsConstants.PCF;
+    /** Shadow map filters (lights.slang): percentage-closer filtering over a tent of fixed width. */
+    public static final int PCF = LightsConstants.PCF;
+    /** Percentage-closer soft shadows: the tent as wide as the light's penumbra. */
+    public static final int PCSS = LightsConstants.PCSS;
+    private static final int DEFAULT_FILTER = filterWord(PCF, 1.5f, 1.5f);
 
     private FrameBuffer shadows; // replaced by a bigger one as the lights grow
     private final int capacity;
@@ -105,10 +109,10 @@ public final class ShadowTable implements AutoCloseable {
     }
 
     /**
-     * Entry {@code entry}, a shadow map filtered by 3 x 3 PCF: the depth map in sampled slot {@code map},
-     * {@code size} texels across, drawn from {@code camera} (its view-projection and world position: the map serves
-     * every view, and stays valid while the light camera stays), compared with {@code bias}; a cascade covers view
-     * depths up to {@code split} (others: any). Allocates nothing.
+     * Entry {@code entry}, a shadow map filtered by PCF over 1.5 texels ({@link #filter}): the depth map in sampled
+     * slot {@code map}, {@code size} texels across, drawn from {@code camera} (its view-projection and world
+     * position: the map serves every view, and stays valid while the light camera stays), compared with {@code bias};
+     * a cascade covers view depths up to {@code split} (others: any). Allocates nothing.
      */
     public ShadowTable shadowMap(int entry, Camera camera, int map, int size, float bias, float split) {
         return shadowMap(entry, camera, map, size, bias, split, 0);
@@ -121,7 +125,7 @@ public final class ShadowTable implements AutoCloseable {
      */
     public ShadowTable shadowMap(int entry, Camera camera, int map, int size, float bias, float split,
         float normalOffset) {
-        long o = shadow(entry, SHADOW_MAP, PCF, map);
+        long o = shadow(entry, SHADOW_MAP, DEFAULT_FILTER, map);
         shadows.putFloat(o + 88, normalOffset);
         float[] toShadow = camera.viewProjection();
         for (int i = 0; i < 16; i++) {
@@ -135,7 +139,7 @@ public final class ShadowTable implements AutoCloseable {
     }
 
     /**
-     * Entry {@code entry}, a tile of a shadow atlas filtered by 3 x 3 PCF: {@code size} texels per side at
+     * Entry {@code entry}, a tile of a shadow atlas filtered as {@link #shadowMap}: {@code size} texels per side at
      * ({@code x}, {@code y}) of the depth atlas in sampled slot {@code atlas}, {@code atlasSize} texels per side, drawn
      * from {@code camera} (its view-projection and world position). An orthographic camera's tile is compared with
      * {@code bias} in its depth units and looked up {@code normalOffset} units along the surface's normal, as
@@ -151,6 +155,27 @@ public final class ShadowTable implements AutoCloseable {
         shadows.putInt(o + 108, x | y << 16);
         shadows.putInt(o + 124, atlasSize);
         return this;
+    }
+
+    /**
+     * How map entry {@code entry} is filtered: {@code kind} ({@link #PCF} or {@link #PCSS}) over a tent of
+     * {@code radius} texels' half-width (PCSS: its narrowest), PCSS's penumbrae at most {@code widest} texels wide
+     * (half-width). Set after the entry's map; a map's filter is PCF over 1.5 texels until then. Allocates nothing.
+     */
+    public ShadowTable filter(int entry, int kind, float radius, float widest) {
+        Objects.checkIndex(entry, capacity);
+        if (kind != PCF && kind != PCSS) {
+            throw new IllegalArgumentException("Not a shadow map filter: " + kind);
+        }
+        shadows.putInt((long) SHADOW_BYTES * entry + 68, filterWord(kind, radius, widest));
+        return this;
+    }
+
+    /** A filter word: the kind, the kernel's half-width and PCSS's widest, in sixteenths of a texel (lights.slang). */
+    static int filterWord(int kind, float radius, float widest) {
+        int least = Math.clamp(Math.round(radius * 16), 1, 0xfff);
+        int most = Math.clamp(Math.round(widest * 16), least, 0xfff);
+        return kind | least << 8 | most << 20;
     }
 
     /**

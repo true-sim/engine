@@ -704,6 +704,28 @@ memory, in those scenes; which one was not found.
 - Rule: an image comparison across a change that allocates differently is checked against the base itself with an
   unrelated allocation before a difference is put down to the change.
 
+**Shadow maps compared 3 x 3 texels and weighed them equally: edges stepped a texel at a time.** `PcfShadow` counted
+the lit texels of the 3 x 3 around a lookup: the lit share jumped by a ninth whenever the lookup crossed into another
+texel, so an edge drawn across the map's texels showed nested stair steps a texel wide, as wide whatever the light's
+size, and crawling as the texels turned with a moving sun (effects-atmosphere's room: the sun's patch on the wall).
+- Proof: `SoftShadowMapsTest` on the code before: an edge 30 degrees off the texel rows wavered 2.4 cm (0.61 of a
+  texel) off straight, and a light 0.03 radians in radius cast a penumbra of 0.103 against a disc's 0.330; weighing
+  each texel by a tent's integral over it, 1.1 cm (0.23 of a texel, as modelled) and, with PCSS, 0.314. In
+  effects-atmosphere's close-up film of the patch, the top edge's stair steps went from 2.3 to 0.12 pixels (rms)
+  ([#455](https://github.com/true-sim/engine/pull/455)).
+- Rule: a filter's weights must change smoothly with the lookup's position (integrate the kernel over each texel);
+  equal weights over whole texels make steps whatever the kernel's width. A light with a size needs its penumbra
+  (PCSS), and a fixed kernel narrower than a few texels still shows the texels' shape: resolution has to come from the
+  cascades' fit.
+
+**A blocker search per froxel cost more than the froxels' light.** With PCSS for every lookup, effects-atmosphere's
+froxels (160 x 90 x 64, the sun's cascades) took 0.42 ms against 0.08 with the narrowest kernel and no search (1920 x
+1080, RX 9070 XT, effects-atmosphere's room): a froxel is coarser than a penumbra, and its jittered samples cover it
+over frames.
+- Proof: the froxel light pass's GPU median in effects-atmosphere's room
+  ([#455](https://github.com/true-sim/engine/pull/455)).
+- Rule: a lookup without a surface (a point in a volume) takes the narrowest kernel and no search.
+
 ## Tests and measurements
 
 **A still scene's benchmark hides what motion costs.** 200 shadowed point lights over the rocks cost 0.98 ms against

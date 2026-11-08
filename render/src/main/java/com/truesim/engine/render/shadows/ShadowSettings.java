@@ -103,6 +103,39 @@ public final class ShadowSettings {
     /** AUTO maps: beyond this distance from every view (units; 0: none), a light casts no shadow. */
     public static final Setting<Float> AUTO_CUTOFF = Setting.decimal("shadows.auto.cutoff", 0, 0, 1.0e7f,
         "AUTO shadow maps: the distance from the views beyond which a light casts none (0: no cutoff)");
+    /** How shadow maps are filtered ({@link #MAP_FILTER}). */
+    public enum Filter {
+        /**
+         * Percentage-closer filtering over a tent of {@link #MAP_FILTER_RADIUS} texels: every map's penumbra a fixed
+         * width in its texels, whatever the light's size. The cheaper: 4 gathers a lookup at 1.5 texels.
+         */
+        PCF,
+        /**
+         * Percentage-closer soft shadows (Fernando 2005): blockers searched over {@link #MAP_PENUMBRA} texels (16
+         * gathers), their depth giving the penumbra a light of its spec's softness casts there (the sun's angular
+         * radius: half a degree across), filtered over a tent that wide, from {@link #MAP_FILTER_RADIUS} up. Shadows
+         * harden where they touch their casters and widen away from them. Lights without softness filter as PCF;
+         * a lookup with no blocker in reach ends after the search.
+         */
+        PCSS
+    }
+
+    /** How shadow maps are filtered: {@link Filter}. */
+    public static final Setting<Filter> MAP_FILTER = Setting.choice("shadows.maps.filter", Filter.PCSS,
+        "how shadow maps are filtered: PCSS (penumbrae as wide as the light's size makes them) or PCF (a fixed "
+            + "kernel, cheaper)");
+    /**
+     * The half-width of maps' filter kernel, in texels: PCF's, and PCSS's narrowest. A tent's integral weighs each
+     * texel, so edges stay smooth down to half a texel; under about one, texels' stair steps show through.
+     */
+    public static final Setting<Float> MAP_FILTER_RADIUS = Setting.decimal("shadows.maps.filterRadius", 1.5f, 0.5f, 32,
+        "half-width of shadow maps' filter in texels: PCF's kernel, PCSS's narrowest penumbra");
+    /**
+     * PCSS: the widest penumbra's half-width in texels, which the blocker search covers: the lookup's cost grows with
+     * its square where penumbrae reach it (about (width + 1)^2 / 4 gathers).
+     */
+    public static final Setting<Float> MAP_PENUMBRA = Setting.decimal("shadows.maps.penumbra", 8, 1, 64,
+        "PCSS: the widest penumbra's half-width in shadow map texels, which the blocker search covers");
     /** Spot and point lights' maps: the near plane, in units. */
     public static final Setting<Float> MAP_NEAR = Setting.decimal("shadows.maps.near", 0.05f, 1.0e-4f, 100,
         "the near plane of spot and point lights' shadow maps, in units");
@@ -232,7 +265,8 @@ public final class ShadowSettings {
     /** Every shadow setting. */
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
         CASTER_DETAIL, ATLAS_SIZE, ATLAS_UPDATES, ATLAS_DRAWS, ATLAS_URGENT, ATLAS_LAG, TILE_DRAWS, TILE_TRIANGLES,
-        AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF, MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, CASTER_FACES, CASTER_LAYERS,
+        AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF, MAP_FILTER, MAP_FILTER_RADIUS, MAP_PENUMBRA, MAP_NEAR, MAP_DISTANCE,
+        CHANGE_TESTS, CASTER_FACES, CASTER_LAYERS,
         CASTER_SETTLE, CASTER_MOBILITY, LIGHT_MOBILITY, LIGHT_MOVING_WEIGHT, SOFT_RAYS, SOFT_DENOISER, SOFT_PASSES, RAY_QUEUE, KEEP_ROUNDS, RAY_LIGHTS, SOFT_LIGHTS);
 
     private ShadowSettings() {

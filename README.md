@@ -1968,6 +1968,39 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   share all of them: `shadows.view(right, leftPart, margin)`), AUTO rays (fewer, or hard for soft far away: no
   correct rule per light without knowing where the blocker is).
 
+### Filtering shadow maps
+
+`shadows.maps.filter` chooses how maps (cascades, spot and point tiles) are filtered; both weigh each texel of the
+kernel by a tent's integral over it, so the light changes smoothly with the position: no texel's edge shows as a step,
+and edges do not crawl as a moving sun turns the map's texels.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `shadows.maps.filter` | `PCSS` | `PCSS`: blockers searched over the widest penumbra (16 gathers), their depth giving the penumbra the light's size (its spec's softness: the sun's angular radius, 0.27 degrees) casts there; `PCF`: a fixed kernel |
+| `shadows.maps.filterRadius` | 1.5 | the kernel's half-width in texels: PCF's, PCSS's narrowest |
+| `shadows.maps.penumbra` | 8 | PCSS: the widest penumbra's half-width in texels, which the search covers |
+
+- **A light without softness** filters as PCF with either. A lookup with no blocker in reach ends after the search, one
+  with blockers all over it (the umbra) too; a point in a volume (no normal: fog froxels) takes the narrowest kernel
+  without a search.
+- **Wide kernels compare each texel at the receiver's plane** (receiver plane depth bias, from the surface's normal),
+  so they do not shadow a sloped surface by itself.
+- **Measured** (`SoftShadowMapsTest`): a light 0.03 radians in radius, a caster 8 units up, texels of about 4 cm: PCSS
+  casts a penumbra of 0.314 (10 to 90 %) against a disc's 0.330; the old 3 x 3 texels weighed alike cast 0.103 and
+  stepped 2.4 cm off a straight line, PCSS 2.4 mm, a hard light's edge 1.1 cm (0.23 of a texel: a kernel of 1.5 texels
+  keeps the texels' shape faintly; finer cascades are the cure, `shadows.cascades.lambda`).
+- **Cost** (RX 9070 XT, 1920 x 1080, effects-atmosphere's scene, cascades 3 x 4096; GPU medians of 240 frames after
+  120, two rounds, 2026-11-08):
+
+  | Filter | Shading in the room (the sun through a window) | Shading outdoors, noon |
+  |---|---|---|
+  | 3 x 3 texels weighed alike (before) | 0.70-0.72 ms | 0.35 ms |
+  | `PCF` (1.5 texels) | 0.69-0.74 ms | 0.38 ms |
+  | `PCSS` (the sun's 0.27 degrees) | 0.82-0.89 ms | 0.42-0.45 ms |
+
+  Fog froxels' light (a lookup each, no normal): 0.068 ms before, 0.080 after. PCSS for every froxel took 0.42 ms
+  before volume lookups skipped the search (docs/pitfalls.md).
+
 ### The shadow table
 
 The owner writes each view's shadow table, which shading reads; plugins can write it too. A light names consecutive
@@ -1975,7 +2008,7 @@ entries; each entry has a **kind**, evaluated in shading by an implementation of
 
 | Kind | Written by | Evaluated by |
 |---|---|---|
-| shadow map (filter: PCF; PCSS, VSM, ESM fit the same slot) | the owner's atlas tiles (`ShadowTable.atlasMap`): orthographic (cascades) or perspective (spot, point faces: bias and normal offset growing with the distance from the light) | `PcfShadow`: 3 x 3 percentage-closer filtering within the tile |
+| shadow map (filter: PCF or PCSS, `ShadowTable.filter`; VSM, ESM fit the same slot) | the owner's atlas tiles (`ShadowTable.atlasMap`): orthographic (cascades) or perspective (spot, point faces: bias and normal offset growing with the distance from the light) | `PcfShadow`: percentage-closer filtering over a tent (each texel weighed by the tent's integral over it), as wide as the light's penumbra with PCSS, within the tile |
 | screen-space mask | the owner's traced masks, or a plugin's own (`ShadowTable.shadowMask`) | `MaskShadow`: the mask's texel |
 
 - **Shadow parts modify `Keys.LIGHT_LIST`**, so they go in the shading's view and run whenever shading requires the
