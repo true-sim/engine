@@ -390,6 +390,7 @@ public final class VulkanDevice implements AutoCloseable {
             this.absent = GpuBuffer.hostVisible(this, ABSENT_BYTES,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
             absent.memory().fill((byte) 0);
+            untrack(absent); // the device's own, as the bindless set's: not among what callers made and must close
         } catch (RuntimeException | Error e) {
             if (made != null) {
                 made.close(); // made before what failed
