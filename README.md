@@ -1154,7 +1154,7 @@ gpuScene.geometryHooks().set("weather.wind", wind.withTime(t));     // each fram
   declares the index it reads as `extern static const uint RUN_HOOK_<NAME>_INDEX;`: the build reads material records
   before it writes the dispatch, so their modules cannot import `indirect` (a link-time constant, exported by the
   dispatch for every hook, pitfalls.md); its entry points are rebuilt with every hook of the application's listing
-  (`typeEntries` holds `Displace`), so the index is the application's.
+  (`typeEntries` holds the `Displace` ones), so the index is the application's.
 - **Two modes, `Displacement`**: per instance (engine-scene's `DisplacementMode` component on the renderable's node),
   else per material type (`Materials.displacementMode(type, mode)`), else the setting `render.displacement.mode`
   (`RASTER` by default). Code drawing a `GpuScene` itself chooses by the mesh it gives the instance.
