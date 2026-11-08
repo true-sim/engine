@@ -134,7 +134,9 @@ public final class ProbeVolumeLighting implements Technique {
         @Tunable(value = "how long the first radiance cascade's intervals are, of its spacing", min = 0.25, max = 64)
         float interval,
         @Tunable(value = "radiance cascades merge only from intervals that continue a probe's") boolean visibility,
-        @Tunable(value = "radiance cascade probes inside geometry are not sampled") boolean classify)
+        @Tunable(value = "radiance cascade probes inside geometry are not sampled") boolean classify,
+        @Tunable(value = "how far from the camera radiance cascades' light reaches, in meters, horizontally: probes "
+            + "beyond the last cascade where it does not (0: none)", min = 0, max = 1000) float reach)
         implements TechniqueConfig {
     }
 
@@ -143,7 +145,7 @@ public final class ProbeVolumeLighting implements Technique {
      * and anchor; no history: every probe's light found anew each frame; devices with ray tracing, elsewhere none).
      */
     public static final TechniqueKind<Cascades, ProbeVolumeLighting, Technique> CASCADES = TechniqueKind.of(SLOT,
-        "cascades", new Cascades(4, 32, 16, 0.5f, 8, 2f, true, true), "radiance cascades in world space",
+        "cascades", new Cascades(4, 32, 16, 0.5f, 8, 2f, true, true, 28f), "radiance cascades in world space",
         (lighting, config) -> lighting.new Engine(true));
 
     private final SceneView view;

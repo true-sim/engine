@@ -611,7 +611,14 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                         memPutInt(header + ProbeVolumeDataLayout.BASE + 16L * c + 4L * axis, (int) base);
                     }
                     memPutFloat(header + ProbeVolumeDataLayout.CASCADE + 16L * c + 12, (float) s);
+                    // Every cascade's probes alike, its tiles the rows after the one before's
+                    for (int axis = 0; axis < 3; axis++) {
+                        memPutInt(header + ProbeVolumeDataLayout.GRID + 16L * c + 4L * axis, probes[axis]);
+                    }
+                    memPutInt(header + ProbeVolumeDataLayout.GRID + 16L * c + 12, up * c);
                 }
+                memPutInt(header + ProbeVolumeDataLayout.TILES, across * across);
+                memPutInt(header + ProbeVolumeDataLayout.TILES + 4, up * cascades);
                 Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(data), 0,
                     ProbeVolumeDataLayout.BYTES, header);
                 // The volume's own table, for its rays' hits: the environment, and the volume itself

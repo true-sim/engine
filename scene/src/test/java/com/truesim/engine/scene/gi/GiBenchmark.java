@@ -93,6 +93,8 @@ class GiBenchmark {
             g -> g.settings().set(ProbeVolume.ASYNC, false)));
         techniques.add(gi("cascades, graphics queue", ProbeVolumeLighting.CASCADES,
             g -> g.settings().set(ProbeVolume.ASYNC, false)));
+        techniques.add(gi("cascades, no reach", ProbeVolumeLighting.CASCADES,
+            g -> g.settings().set(RadianceCascades.REACH, 0f)));
         for (float budget : new float[] {0.5f, 0.25f}) {
             techniques.add(gi("probes, budget " + budget, ProbeVolumeLighting.PROBES,
                 g -> g.settings().set(ProbeVolume.BUDGET, budget)));
@@ -128,6 +130,7 @@ class GiBenchmark {
                                 .set(ProbeVolume.CASCADES, ProbeVolume.CASCADES.defaultValue())
                                 .set(RadianceCascades.SPACING, RadianceCascades.SPACING.defaultValue())
                                 .set(RadianceCascades.DIRECTIONS, RadianceCascades.DIRECTIONS.defaultValue())
+                                .set(RadianceCascades.REACH, RadianceCascades.REACH.defaultValue())
                                 .set(ProbeVolume.ASYNC, true).set(ProbeVolume.BUDGET, 1f);
                             sponza.graph.settings().techniques().set(sponza.graph.settings(), AmbientOcclusion.SLOT,
                                 "denoiser", Denoiser.Mode.SVGF);

@@ -2194,36 +2194,53 @@ intervals (`PATH_INTERVALS`: a ray ends at its interval; meeting nothing there, 
 everywhere else. Every frame the cascades merge from the last to the first: a direction that met nothing takes the
 next cascade's light around the probe in the four directions refining it, trilinearly over the probes not inside
 geometry whose intervals continue this one (`visibility`: nothing between where it ends and where theirs start, nor
-between a coarser and a finer direction's starts; without that, light came through walls: `docs/pitfalls.md`). The
-first cascade becomes a probe volume of one cascade (irradiance with sky visibility, distance moments), sampled by
-every shading path exactly as the probe volume is; beyond its grid, the probes at the border nearest to the point
-light it (`PROBE_VOLUME_CLAMP`), not the environment. Fixed directions and no history: a still scene's light does not
-move, changes show in the frame they happen, further bounces a frame each (the first cascade of the frame before
-lights the hits). Tested (`RadianceCascadesTest`): the white furnace within 2.1 % (3 % allowed), a light changing
-color in 3 frames, two views one update, no allocation.
+between a coarser and a finer direction's starts; without that, light came through walls: `docs/pitfalls.md`).
 
-Against the references (as above; RX 9070 XT, 2026-11-04; the probe volume at its new default budget of one half):
+Every cascade becomes a cascade of a probe volume (irradiance with sky visibility, distance moments), sampled by every
+shading path exactly as the probe volume is. A point takes the finest cascade whose probes enclose it wherever the
+camera is (the box each reaches from the camera however its grid has snapped: 7.25, 7.75, 8.25 and 9.25 m across,
+3.25 to 5.25 m up), handing over to the next near that box's edges (`render.gi.probes.blend`'s share of it) and from
+the last to the environment: its light follows the camera continuously, not the 0.5 m steps the grids snap by
+(`PROBE_VOLUME_ANCHORED`). A coarser cascade's intervals start away from its probes, so each of them also traces the
+first cascade's 8 x 8 directions up to where its intervals start (`PATH_NEAR`; a surface met there hides what the
+intervals found beyond it), and its own directions are gathered into those 8 x 8 for shading. The cascades all cover
+about the first one's region (radiance cascades' cost: an eighth of the probes, four times the directions each), so
+`reach` (28 m; vertically as the first grid's probes up to across, 14 m) adds a level beyond the last: probes as
+finely spaced as 32 along an axis allow (2 m: 31 x 17 x 31), each tracing the first cascade's 64 directions on to the
+environment; past it the environment alone (`reach` 0: past the last cascade). Before, shading had the first cascade
+alone and the probes at its border lit every point past it: streaks outdoors, a lamp's light far past its reach, and
+steps each time the camera crossed 0.5 m (`docs/pitfalls.md`). Fixed directions and no history: a still scene's light
+does not move, changes show in the frame they happen, further bounces a frame each (the cascades of the frame before
+light the hits). Tested (`RadianceCascadesTest`): the white furnace within 2.1 % (3 % allowed), a light changing
+color in 3 frames, two views one update, no allocation; ground past the reach takes exactly the environment's light,
+and ground lit beyond the first cascade changes as little moving 2 cm across a grid's step as elsewhere.
+
+Against the references (as above; RX 9070 XT, the probe volume's columns 2026-11-04 at its new default budget of one
+half, the cascades' 2026-11-07; toggle and mover run alone, `-PgiScenes=toggle,mover`: after the other scenes they
+start from a state left over, before this change as after):
 
 | Scene | Probes | Probes + BITMASK | Cascades | Cascades + BITMASK |
 |---|---|---|---|---|
-| sun-room | 7.3 %, 29.0 %, +1.0 % | 6.7 %, 26.0 %, -0.4 % | 7.3 %, 32.3 %, +3.0 % | 6.8 %, 27.0 %, +2.0 % |
+| sun-room | 7.3 %, 29.0 %, +1.0 % | 6.7 %, 26.0 %, -0.4 % | 7.4 %, 33.0 %, +3.3 % | 6.9 %, 27.5 %, +2.3 % |
 | leak-5cm (absolute) | 0.0001 | 0.0001 | 0.0000 | 0.0000 |
 | leak-25cm, leak-50cm (absolute) | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
-| bleeding | 22.5 %, 96.0 %, +17.4 % | 20.5 %, 74.3 %, +15.8 % | 22.8 %, 142 %, +19.9 % | 21.2 %, 124 %, +17.1 % |
-| screens | 17.4 %, 68.6 %, -14.4 % | 16.2 %, 66.9 %, -13.7 % | 14.1 %, 70.3 %, -6.4 % | 12.7 %, 60.8 %, -6.3 % |
-| toggle (light on) | 8.2 %, 18.8 %, -6.8 % | 7.5 %, 17.7 %, -6.0 % | 6.7 %, 15.0 %, -5.9 % | 6.8 %, 15.2 %, -6.2 % |
+| bleeding | 22.5 %, 96.0 %, +17.4 % | 20.5 %, 74.3 %, +15.8 % | 22.8 %, 142 %, +19.9 % | 21.2 %, 124 %, +17.2 % |
+| screens | 17.4 %, 68.6 %, -14.4 % | 16.2 %, 66.9 %, -13.7 % | 14.0 %, 70.3 %, -6.3 % | 12.7 %, 60.8 %, -6.2 % |
+| toggle (light on) | 8.2 %, 18.8 %, -6.8 % | 7.5 %, 17.7 %, -6.0 % | 6.7 %, 15.0 %, -5.9 % | 6.9 %, 15.3 %, -6.3 % |
 | door (shut, absolute) | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
-| door (open) | 8.1 %, 31.5 %, -1.5 % | 7.3 %, 27.5 %, -1.5 % | 6.4 %, 23.3 %, -2.3 % | 6.2 %, 21.1 %, -3.2 % |
-| mover (moved) | 5.6 %, 16.7 %, -4.5 % | 4.4 %, 12.9 %, -2.3 % | 4.9 %, 13.6 %, -0.3 % | 4.9 %, 13.7 %, -1.2 % |
+| door (open) | 8.1 %, 31.5 %, -1.5 % | 7.3 %, 27.5 %, -1.5 % | 6.5 %, 23.4 %, -2.8 % | 6.3 %, 21.3 %, -3.7 % |
+| mover (moved) | 5.6 %, 16.7 %, -4.5 % | 4.4 %, 12.9 %, -2.3 % | 4.9 %, 13.6 %, -0.3 % | 4.9 %, 13.7 %, -1.3 % |
 | cornell | 35.3 %, 200 %, +19.6 % | 22.7 %, 109 %, +4.2 % | 18.2 %, 82.1 %, -9.5 % | 17.5 %, 82.3 %, -11.8 % |
-| Sponza, view 1 | 18.0 %, 119 %, -2.0 % | 18.5 %, 87.6 %, -5.4 % | 18.7 %, 123 %, -2.0 % | 18.3 %, 93.5 %, -4.0 % |
-| Sponza, view 2 | 25.9 %, 145 %, -3.0 % | 26.2 %, 122 %, -6.3 % | 22.6 %, 114 %, -0.0 % | 22.1 %, 98.7 %, +1.1 % |
-| Sponza, view 3 | 79.5 %, 293 %, +32.5 % | 78.4 %, 224 %, +25.2 % | 60.2 %, 114 %, +7.0 % | 58.5 %, 99.9 %, +0.4 % |
+| Sponza, view 1 | 18.0 %, 119 %, -2.0 % | 18.5 %, 87.6 %, -5.4 % | 17.4 %, 108 %, -2.8 % | 16.9 %, 90.5 %, -4.9 % |
+| Sponza, view 2 | 25.9 %, 145 %, -3.0 % | 26.2 %, 122 %, -6.3 % | 28.2 %, 236 %, +6.4 % | 27.0 %, 197 %, +4.9 % |
+| Sponza, view 3 | 79.5 %, 293 %, +32.5 % | 78.4 %, 224 %, +25.2 % | 66.3 %, 158 %, +6.1 % | 64.4 %, 138 %, -1.1 % |
 
-Closer than the probe volume in most views and as close in the rest, with a lag of the bounces alone (frames to
-90 %: toggle 5, door 5, mover 3; no noise at all; the probe volume's below). It costs about 4 times as much (6.7 ms at
-any resolution, against 1.6 ms for every probe), and its first grid spans 16 x 8 x 16 m (sampled past it from its
-border): a trade-off, so both stay, and `probes` remains the default. Tuning, measured on these scenes: 4 x 4 or
+Closer than the probe volume in most views and as close in the rest but Sponza's second (where the first grid's
+border probes had come closer, 22.6 %, by chance: the far end of the gallery took the light of probes near the camera;
+with the environment past the last cascade and no reach, views 2 and 3 were 119 % and 124 %), with a lag of the
+bounces alone (frames to 90 %: toggle 6, door 5, mover 3; no noise at all; the probe volume's below). It costs about
+5 times as much (8.2 ms at any resolution, 6.7 without the reach, against 1.6 ms for every probe): a trade-off, so both
+stay, and `probes` remains the default. Tuning, measured on these scenes: 4 x 4 or
 6 x 6 first directions alias small bright emitters (the Cornell box's lamp: 25 % and 48 %), a 1 m spacing loses the
 small rooms (sun-room 17 %), other first intervals leak or blur more. Many lights shaded through the world grid's
 reservoirs pick one at random: the only noise it can have.
@@ -2266,22 +2283,30 @@ What it costs (as above, with the frame's GPU span over every queue; 2026-11-04)
 | 1920 x 1080 | probes, budget 0.5 | 2.132-2.174 ms | 2.264-2.274 ms | 0 | 0.973-1.003 ms | 0.901-0.915 ms |
 | 1920 x 1080 | probes, budget 0.25 | 1.863-1.892 ms | 1.969-2.015 ms | 0 | 0.711-0.723 ms | 0.906-0.910 ms |
 | 1920 x 1080 | probes, graphics queue | 2.625-2.669 ms | 2.689-2.746 ms | 0 | 1.433-1.449 ms | 0.944-0.964 ms |
-| 1920 x 1080 | cascades | 7.955-7.959 ms | 8.225-8.231 ms | 0 | 6.869-6.872 ms | 0.862-0.863 ms |
-| 1920 x 1080 | cascades, 4 x 4 directions | 3.222-3.227 ms | 3.383-3.427 ms | 0 | 2.128-2.131 ms | 0.855-0.859 ms |
-| 1920 x 1080 | cascades, 6 x 6 directions | 5.255-5.268 ms | 5.462-5.524 ms | 0 | 4.179-4.191 ms | 0.847-0.852 ms |
+| 1920 x 1080 | cascades | 9.160-9.237 ms | 9.313-9.359 ms | 0 | 8.137-8.193 ms | 0.602-0.610 ms |
+| 1920 x 1080 | cascades, no reach | 7.717-7.764 ms | 7.846-7.890 ms | 0 | 6.715-6.747 ms | 0.574-0.579 ms |
+| 1920 x 1080 | cascades, 4 x 4 directions | 3.724-4.149 ms | 3.837-4.285 ms | 0 | 2.689-3.008 ms | 0.598-0.656 ms |
+| 1920 x 1080 | cascades, 6 x 6 directions | 6.194-6.315 ms | 6.336-6.478 ms | 0 | 5.168-5.264 ms | 0.598-0.615 ms |
 | 1920 x 1080 | gtao, half | 1.525-1.534 ms | 1.581-1.590 ms | 0.541-0.543 ms | 0 | 0.746-0.749 ms |
 | 1920 x 1080 | bitmask, half | 1.567-1.629 ms | 1.622-1.657 ms | 0.626-0.628 ms | 0 | 0.709-0.751 ms |
 | 1920 x 1080 | rays-svgf, half | 1.741-1.824 ms | 1.801-1.855 ms | 0.809-0.824 ms | 0 | 0.712-0.754 ms |
 | 1920 x 1080 | rays-reblur, half | 1.611-1.646 ms | 1.665-1.702 ms | 0.682-0.695 ms | 0 | 0.705-0.725 ms |
 | 3840 x 2160 | probes (budget 1) | 6.426-6.440 ms | 6.383-6.399 ms | 0 | 1.765-1.770 ms | 3.688-3.697 ms |
 | 3840 x 2160 | probes, budget 0.5 | 5.878-5.891 ms | 5.812-5.839 ms | 0 | 1.201-1.213 ms | 3.697-3.701 ms |
-| 3840 x 2160 | cascades | 11.115-11.119 ms | 11.276-11.340 ms | 0 | 6.928-6.936 ms | 3.286-3.291 ms |
+| 3840 x 2160 | cascades | 12.024-12.034 ms | 12.136-12.161 ms | 0 | 8.244-8.247 ms | 2.328-2.336 ms |
+| 3840 x 2160 | cascades, no reach | 10.478-10.549 ms | 10.591-10.664 ms | 0 | 6.794-6.833 ms | 2.230-2.259 ms |
 | 3840 x 2160 | gtao, half | 5.862-6.047 ms | 5.913-6.104 ms | 2.312-2.317 ms | 0 | 2.699-2.844 ms |
 | 3840 x 2160 | bitmask, half | 6.313-6.330 ms | 6.364-6.378 ms | 2.554-2.560 ms | 0 | 2.876-2.885 ms |
 | 3840 x 2160 | rays-svgf, half | 6.875-6.883 ms | 6.934-6.944 ms | 3.098-3.106 ms | 0 | 2.888-2.892 ms |
 | 3840 x 2160 | rays-reblur, half | 6.643-6.655 ms | 6.697-6.718 ms | 3.016-3.024 ms | 0 | 2.760-2.763 ms |
 
-The cascades' 6.7 ms: merges 3.3 (a ray per continuation), tracing 1.4, hit shading 0.8, binning 0.7, rays 0.4.
+The cascades' rows (2026-11-07; the others 2026-11-04): 8.2 ms, of which merges 2.6 (a ray per continuation, and every
+cascade's probes into the volume), the reach's probes 0.5, tracing 1.7, hit shading 1.8, binning 0.9, rays 0.6. Before
+every cascade was shaded (the same day): 6.9 ms (1080p 6.83-6.92, 4K 6.87-6.91), of which merges 3.4, tracing 1.3, hit
+shading 1.0, binning 0.8, rays 0.45; gathering a probe's directions by a table of them in shared memory, its distance
+kernel by squaring, took the merges from 4.5 to 2.6 ms and the reach's 16,337 probes from 2.6 to 0.5. Memory: the
+atlases and states 25 to 67 MiB (40 without the reach), the ray image 52 to 86 MiB (57), the paths 572 to 774 MiB
+(614; 5.1 million rays a frame, 4.0 million without the reach, 3.7 million before).
 `GiBenchmark` takes `-PgiSetups=a;b` and `-PgiPasses=true` (each pass's median); `GiEvaluation` takes `-PgiVariants`,
 `-PgiParts=errors,ao,lag`, `-PgiSettings=name=value,...`, `-PgiTrials` and `-PgiCurves=true`.
 

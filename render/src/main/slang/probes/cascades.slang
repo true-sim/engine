@@ -3,22 +3,29 @@
 // directions, each direction a ray along an interval four times as long as the one before's and starting where it
 // ended. No history: every frame finds every probe's light anew, and merges the cascades from the last (whose rays go
 // on to the environment) to the first, each direction of a probe that met nothing within its interval taking what the
-// next cascade's probes around it found beyond, in its four finer directions. The first cascade's merged light becomes
-// a probe volume of one cascade, as probes/volume.slang's probeLight samples it (irradiance / pi with the sky's visibility,
-// and distance moments), so every shading path reads it as it reads the ray-traced probe volume. A frame's passes:
+// next cascade's probes around it found beyond, in its four finer directions. Every cascade's merged light becomes a
+// cascade of a probe volume, as probes/volume.slang's probeLight samples it (irradiance / pi with the sky's visibility,
+// and distance moments), so every shading path reads it as it reads the ray-traced probe volume: the finest cascade
+// where it reaches, the next coarser ones beyond, the environment past the last. A coarser cascade's intervals start
+// away from its probes; what lies nearer, each probe finds by rays of its own along the first cascade's directions,
+// ending where its intervals start. Where RadianceCascades' reach goes beyond the last cascade, a level of probes past
+// it has no intervals: its probes' own rays go on to the environment (and no cascade merges from it). A frame's passes:
 //
 // - generateMain, a dispatch per cascade, a thread per probe and direction: the interval's ray as a path of the
 //   reference path tracer's wavefront (pathtracing/paths.slang's probe mode with PATH_INTERVALS), hits shaded by their
-//   material type, the further bounces from the first cascade's probes of the frame before; the first cascade's slots
-//   that scrolled to another probe stop being sampled until they hold its light.
+//   material type, the further bounces from the cascades of the frame before; and from a coarser cascade's probes, the
+//   rays to where its intervals start (PATH_NEAR). Slots that scrolled to another probe stop being sampled until they
+//   hold its light.
 // - mergeMain, a dispatch per cascade, last to first, a group per probe: each direction's light, or where its ray met
 //   nothing within its interval, the next cascade's merged light around the probe in the four directions refining it,
 //   weighed trilinearly over the eight probes around it not inside geometry whose intervals continue this one: a ray
 //   from where this interval ends to where theirs start meets nothing (CASCADES_VISIBILITY; no light from the far side
 //   of a wall), and of their finer directions those whose start a surface separates from the coarser one's are left
-//   out (each cascade marks them as it merges); written in place. For the first cascade, the merged light into the
-//   probe's irradiance and sky visibility per octahedral texel (cosine and solid angle weighted), its rays' distances
-//   into mean and mean square, and its state (inside geometry: not sampled).
+//   out (each cascade marks them as it merges); written in place. Then the probe as shading samples it: its merged
+//   light gathered into the first cascade's directions (each standing for the 4^c of this cascade's within its
+//   octahedral texel; a coarser cascade's own ray along it where that met a surface before the intervals start), into
+//   irradiance and sky visibility per octahedral texel (cosine and solid angle weighted), the distances into mean and
+//   mean square, and its state (inside geometry: not sampled).
 import probes.volume;
 import surfaces;
 import bindless;
@@ -49,12 +56,15 @@ struct CascadeLevel
     int4 base;         // xyz: that probe's world grid coordinate; w: directions along each side of a probe's tile
     uint4 probes;      // xyz: probes along each axis; w: the cascade's first probe in the list of every cascade's
     float4 interval;   // x: how far from its probe a ray starts; y: how long it is (0: on to the environment)
-    uint4 layout;      // x: the cascade's first row in the ray image
+    uint4 layout;      // x: the cascade's first row in the ray image; y, z: the column and row its probes' own
+                       // rays to where its intervals start begin at there (a tile of the first cascade's size each);
+                       // w: 1 for the reach beyond the last cascade, whose probes' own rays go on to the environment
+                       // and which has no intervals
 };
 
 struct CascadePush
 {
-    ProbeVolumeData* volume;  // the first cascade as a probe volume of one cascade: what shading samples
+    ProbeVolumeData* volume;  // the cascades as a probe volume: what shading samples
     CascadeLevel* levels;
     ProbePath* rays;          // generateMain: the paths appended
     uint* counts;             // generateMain: counts[0] the paths
@@ -63,7 +73,7 @@ struct CascadePush
     float3 toAnchor;          // the volume's origin less the anchor camera (rays start relative to its camera)
     uint rayImage;            // storage slot: per probe and direction, the light found (rgb) and the distance (a)
     float3 offset;            // the anchor camera less the top level's origin
-    uint irradiance;          // storage slots of the first cascade's atlases
+    uint irradiance;          // storage slots of the volume's atlases
     uint depth;
     uint cascade;             // this dispatch's
     uint cascades;
@@ -81,10 +91,11 @@ static const uint CASCADES_CLASSIFY = 2;
 /** pathtracing/paths.slang's flags of an interval's ray (PATH_INTERVALS). */
 static const uint PATH_CASCADE_SHIFT = 16;
 static const uint PATH_BOUNDED = 1u << 24;
+static const uint PATH_NEAR = 1u << 25;
 static const uint NO_BIN = 0xffffffffu;
 static const float MISSED = 10000; // a ray's distance where it met nothing
 
-/** The most directions of a first-cascade probe (8 x 8). */
+/** The most directions of a first-cascade probe (8 x 8): of every probe as shading samples it. */
 static const uint MAX_FIRST = 64;
 
 uint seed(uint2 pixel)
@@ -127,35 +138,48 @@ uint2 rayTexel(uint c, int3 p, uint2 uv)
     return uint2((uint(p.x) + n.x * uint(p.z)) * side + uv.x, row + uint(p.y) * side + uv.y);
 }
 
+/** The ray image's texel of coarser cascade `c`'s probe `p`'s own ray to where its intervals start, direction `uv`. */
+uint2 nearTexel(uint c, int3 p, uint2 uv)
+{
+    uint side = uint(push.levels[0].base.w);
+    uint3 n = push.levels[c].probes.xyz;
+    uint4 layout = push.levels[c].layout;
+    return uint2(layout.y + (uint(p.x) + n.x * uint(p.z)) * side + uv.x, layout.z + uint(p.y) * side + uv.y);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void generateMain(uint3 id : SV_DispatchThreadID)
 {
     uint c = push.cascade;
     uint side = uint(push.levels[c].base.w);
+    uint first = uint(push.levels[0].base.w);
     uint3 n = push.levels[c].probes.xyz;
     uint k = id.x;
     uint index = id.y + id.z * 65535;
-    if (k >= side * side || index >= n.x * n.y * n.z)
+    // A coarser cascade's probe's own rays, along the first cascade's directions, after its intervals'; the reach's
+    // probes' alone
+    bool far = push.levels[c].layout.w != 0;
+    uint intervals = far ? 0 : side * side;
+    uint near = c > 0 ? first * first : 0;
+    if (k >= intervals + near || index >= n.x * n.y * n.z)
     {
         return;
     }
     int3 p = probeOf(index, n);
     float4 level = push.levels[c].position;
     float3 position = level.xyz + float3(p) * level.w;
-    uint2 uv = uint2(k % side, k / side);
-    float3 d = tileDirection(uv, side);
     float start = push.levels[c].interval.x;
     float length = push.levels[c].interval.y;
-    if (c == 0 && k == 0)
+    if (k == 0)
     {
         // A slot that scrolled to another probe holds another's light: not sampled (the hits' further bounces read
         // the frame before's) until this frame's merge
-        int3 probes = int3(n);
-        int3 coordinate = push.levels[0].base.xyz + p;
-        int3 slot = wrapProbe(coordinate, probes);
+        int3 coordinate = push.levels[c].base.xyz + p;
+        int3 slot = wrapProbe(coordinate, int3(n));
         ProbeState* states = push.volume[0].states;
-        uint s = indexOf(slot, n);
+        uint s;
+        probeTile(push.volume, c, slot, s);
         if (any(states[s].coordinates != coordinate))
         {
             states[s].coordinates = coordinate;
@@ -164,14 +188,33 @@ void generateMain(uint3 id : SV_DispatchThreadID)
             states[s].frames = 0;
         }
     }
+    uint2 texel;
+    float3 d;
+    uint flags;
+    float3 origin;
+    if (k < intervals)
+    {
+        uint2 uv = uint2(k % side, k / side);
+        d = tileDirection(uv, side);
+        texel = rayTexel(c, p, uv);
+        origin = position + d * start;
+        flags = (c << PATH_CASCADE_SHIFT) | (length > 0 ? PATH_BOUNDED : 0);
+    }
+    else
+    {
+        uint2 uv = uint2((k - intervals) % first, (k - intervals) / first);
+        d = tileDirection(uv, first);
+        texel = nearTexel(c, p, uv);
+        origin = position;
+        flags = (c << PATH_CASCADE_SHIFT) | (far ? 0 : PATH_BOUNDED | PATH_NEAR);
+    }
     uint slot;
     InterlockedAdd(push.counts[0], 1, slot);
-    uint2 texel = rayTexel(c, p, uv);
     ProbePath path;
-    path.origin = position + d * start + push.toAnchor;
+    path.origin = origin + push.toAnchor;
     path.direction = d;
     path.pixel = texel.x | texel.y << 16;
-    path.flags = (c << PATH_CASCADE_SHIFT) | (length > 0 ? PATH_BOUNDED : 0);
+    path.flags = flags;
     path.throughput = 1;
     path.rng = seed(texel); // the same each frame: no history to average a changing one
     path.instance = 0;
@@ -186,8 +229,12 @@ void generateMain(uint3 id : SV_DispatchThreadID)
 
 groupshared float weights[8];      // per probe of the next cascade around this one: trilinear, not inside geometry
 groupshared uint insideRays;
-groupshared float4 merged[MAX_FIRST];
-groupshared float distances[MAX_FIRST];
+groupshared uint insideNear;
+groupshared float4 chunkLight[64]; // a chunk of directions: light and sky visibility, solid angle weighted
+groupshared float3 chunkDepth[64]; // and the distance, its square, the solid angle
+groupshared float4 merged[MAX_FIRST];  // per direction of the first cascade's: the probe's light, sky visibility
+groupshared float2 moments[MAX_FIRST]; // and the mean distance, mean squared
+groupshared float4 gathered[MAX_FIRST]; // and its direction (xyz), the solid angle of its octahedral texel (w)
 groupshared float4 newIrradiance[36];
 groupshared float2 newDepth[196];
 
@@ -234,7 +281,8 @@ void mergeMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     }
     uint t = thread.x;
     uint side = uint(push.levels[c].base.w);
-    uint directions = side * side;
+    bool far = push.levels[c].layout.w != 0; // the reach: no intervals, its probes' own rays alone
+    uint directions = far ? 0 : side * side;
     int3 p = probeOf(index, n);
     float4 level = push.levels[c].position;
     float3 position = level.xyz + float3(p) * level.w;
@@ -265,6 +313,7 @@ void mergeMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     if (t == 0)
     {
         insideRays = 0;
+        insideNear = 0;
     }
     GroupMemoryBarrierWithGroupSync();
     float w[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -273,161 +322,221 @@ void mergeMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         w[j] = weights[j];
     }
     float spacingNext = last ? 0.0 : push.levels[c + 1].position.w;
-    float end = push.levels[c].interval.x + push.levels[c].interval.y;
+    float start = push.levels[c].interval.x;
+    float end = start + push.levels[c].interval.y;
     bool connect = (push.flags & CASCADES_VISIBILITY) != 0;
     RayScene* scene = (RayScene*)push.scene;
     float maxDistance = push.volume[0].maxDistance * level.w;
-    for (uint k = t; k < directions; k += 64)
+    // The directions in the order of the first cascade's they lie within (fine x fine of this one's each), so that a
+    // chunk of 64 holds whole ones or a part of one
+    uint first = uint(push.levels[0].base.w);
+    uint fine = side / first;
+    uint within = fine * fine;
+    float4 binLight = 0;
+    float3 binDepth = 0;
+    for (uint chunk = 0; chunk < directions; chunk += 64)
     {
-        uint2 uv = uint2(k % side, k / side);
-        uint2 texel = rayTexel(c, p, uv);
-        float4 ray = images[push.rayImage][texel];
-        float4 light;
-        if (ray.a < 0)
+        uint k = chunk + t;
+        float4 shade = 0;
+        float3 depth = 0;
+        if (k < directions)
         {
-            // A back face: the interval starts behind a surface, what it found is not light along the direction (its
-            // texel marked so for the cascade before's merge, which leaves it out)
-            InterlockedAdd(insideRays, 1u);
-            light = c == 0 ? float4(0) : float4(0, 0, 0, -1);
-        }
-        else if (ray.a < MISSED * 0.5)
-        {
-            light = float4(ray.rgb, 0);
-        }
-        else if (last)
-        {
-            light = float4(ray.rgb, 1); // the environment
-        }
-        else
-        {
-            // Beyond the interval: the next cascade's light around the probe, in the four directions refining this one,
-            // from the probes whose intervals continue this one's (nothing between where it ends and where theirs
-            // start: no light from beyond a wall the ray would have met); none: the probes around as they are
-            float3 d = tileDirection(uv, side);
-            float3 from = position + d * end + push.toAnchor + push.offset;
-            int3 m = int3(push.levels[c + 1].probes.xyz);
-            float4 sum = 0;
-            float total = 0;
-            float4 all = 0;
-            float allTotal = 0;
-            for (uint j = 0; j < 8; j++)
+            uint bin = k / within;
+            uint inner = k % within;
+            uint2 uv = uint2((bin % first) * fine + inner % fine, (bin / first) * fine + inner / fine);
+            uint2 texel = rayTexel(c, p, uv);
+            float4 ray = images[push.rayImage][texel];
+            float4 light;
+            if (ray.a < 0)
             {
-                if (w[j] <= 0)
+                // A back face: the interval starts behind a surface, what it found is not light along the direction
+                // (its texel marked so for the cascade before's merge, which leaves it out)
+                InterlockedAdd(insideRays, 1u);
+                light = float4(0, 0, 0, -1);
+            }
+            else if (ray.a < MISSED * 0.5)
+            {
+                light = float4(ray.rgb, 0);
+            }
+            else if (last)
+            {
+                light = float4(ray.rgb, 1); // the environment
+            }
+            else
+            {
+                // Beyond the interval: the next cascade's light around the probe, in the four directions refining
+                // this one, from the probes whose intervals continue this one's (nothing between where it ends and
+                // where theirs start: no light from beyond a wall the ray would have met); none: the probes around
+                // as they are
+                float3 d = tileDirection(uv, side);
+                float3 from = position + d * end + push.toAnchor + push.offset;
+                float4 sum = 0;
+                float total = 0;
+                for (uint j = 0; j < 8; j++)
                 {
-                    continue;
-                }
-                int3 o = int3(j & 1, (j >> 1) & 1, j >> 2);
-                int3 q = lower + o;
-                float4 children = 0;
-                float valid = 0;
-                for (uint i = 0; i < 4; i++)
-                {
-                    float4 child = images[push.rayImage][rayTexel(c + 1, q, uv * 2 + uint2(i & 1, i >> 1))];
-                    if (child.a >= 0)
-                    {
-                        children += child;
-                        valid += 1;
-                    }
-                }
-                if (valid <= 0)
-                {
-                    continue; // its intervals start behind a surface here
-                }
-                children /= valid;
-                all += w[j] * children;
-                allTotal += w[j];
-                if (connect)
-                {
-                    float3 between = toNext + float3(o) * spacingNext;
-                    float distance = length(between);
-                    if (distance > 1.0e-4 && occluded(scene, from, between / distance, 0, distance))
+                    if (w[j] <= 0)
                     {
                         continue;
                     }
+                    int3 o = int3(j & 1, (j >> 1) & 1, j >> 2);
+                    int3 q = lower + o;
+                    float4 children = 0;
+                    float valid = 0;
+                    for (uint i = 0; i < 4; i++)
+                    {
+                        float4 child = images[push.rayImage][rayTexel(c + 1, q, uv * 2 + uint2(i & 1, i >> 1))];
+                        if (child.a >= 0)
+                        {
+                            children += child;
+                            valid += 1;
+                        }
+                    }
+                    if (valid <= 0)
+                    {
+                        continue; // its intervals start behind a surface here
+                    }
+                    children /= valid;
+                    if (connect)
+                    {
+                        float3 between = toNext + float3(o) * spacingNext;
+                        float distance = length(between);
+                        if (distance > 1.0e-4 && occluded(scene, from, between / distance, 0, distance))
+                        {
+                            continue;
+                        }
+                    }
+                    sum += w[j] * children;
+                    total += w[j];
                 }
-                sum += w[j] * children;
-                total += w[j];
+                light = total > 0 ? sum / total : float4(0);
             }
-            light = total > 0 ? sum / total : float4(0);
-        }
-        if (c > 0 && connect && light.a >= 0)
-        {
-            // The cascade before continues its directions here along the one this refines: where this interval
-            // starts out of reach of where that one's would (a surface between), it is no continuation of it (left out
-            // by that merge, as a back face is)
-            float3 d = tileDirection(uv, side);
-            float3 coarse = tileDirection(uv / 2, side / 2);
-            float start = push.levels[c].interval.x;
-            float3 between = (d - coarse) * start;
-            float distance = length(between);
-            if (distance > 1.0e-4 && occluded(scene, position + coarse * start + push.toAnchor + push.offset,
-                between / distance, 0, distance))
+            // As shading sees it from the probe: a back face no light, nor sky
+            shade = light.a < 0 ? float4(0) : light;
+            float reach = ray.a >= MISSED * 0.5 ? maxDistance : min(start + abs(ray.a), maxDistance);
+            if (c > 0 && connect && light.a >= 0)
             {
-                light = float4(0, 0, 0, -1);
+                // The cascade before continues its directions here along the one this refines: where this interval
+                // starts out of reach of where that one's would (a surface between), it is no continuation of it
+                // (left out by that merge, as a back face is)
+                float3 d = tileDirection(uv, side);
+                float3 coarse = tileDirection(uv / 2, side / 2);
+                float3 between = (d - coarse) * start;
+                float distance = length(between);
+                if (distance > 1.0e-4 && occluded(scene, position + coarse * start + push.toAnchor + push.offset,
+                    between / distance, 0, distance))
+                {
+                    light = float4(0, 0, 0, -1);
+                }
+            }
+            if (c > 0)
+            {
+                images[push.rayImage][texel] = light;
+            }
+            float weight = solidAngle(tileDirection(uv, side));
+            shade *= weight;
+            depth = float3(reach, reach * reach, 1) * weight;
+        }
+        chunkLight[t] = shade;
+        chunkDepth[t] = depth;
+        GroupMemoryBarrierWithGroupSync();
+        // Each of the first cascade's directions gathers this one's within it
+        uint begin = max(t * within, chunk);
+        uint finish = min((t + 1) * within, chunk + 64);
+        for (uint e = begin; e < finish && t < first * first; e++)
+        {
+            binLight += chunkLight[e - chunk];
+            binDepth += chunkDepth[e - chunk];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    bool inside = insideRays * 4 > directions;
+    if (t < first * first)
+    {
+        float4 light = binDepth.z > 0 ? binLight / binDepth.z : float4(0);
+        float2 depth = binDepth.z > 0 ? binDepth.xy / binDepth.z : float2(maxDistance, maxDistance * maxDistance);
+        if (c > 0)
+        {
+            // Nearer than its intervals start: the probe's own ray along the direction (a surface there hides what
+            // the intervals found beyond it)
+            float4 near = images[push.rayImage][nearTexel(c, p, uint2(t % first, t / first))];
+            if (near.a < 0)
+            {
+                InterlockedAdd(insideNear, 1u);
+                light = 0;
+                float distance = min(abs(near.a), maxDistance);
+                depth = float2(distance, distance * distance);
+            }
+            else if (near.a < MISSED * 0.5)
+            {
+                light = float4(near.rgb, 0);
+                float distance = min(near.a, maxDistance);
+                depth = float2(distance, distance * distance);
+            }
+            else if (far)
+            {
+                light = float4(near.rgb, 1); // the environment
             }
         }
-        if (c == 0)
-        {
-            merged[k] = light;
-            distances[k] = ray.a >= MISSED * 0.5 ? maxDistance : min(abs(ray.a), maxDistance);
-        }
-        else
-        {
-            images[push.rayImage][texel] = light;
-        }
+        merged[t] = light;
+        moments[t] = depth;
+        float3 d = tileDirection(uint2(t % first, t / first), first);
+        gathered[t] = float4(d, solidAngle(d));
     }
     GroupMemoryBarrierWithGroupSync();
-    bool inside = insideRays * 4 > directions;
     if (c > 0)
     {
         if (t == 0)
         {
             push.inside[push.levels[c].probes.w + index] = inside ? 1 : 0;
         }
-        return;
+        // As shading samples it, inside geometry where most of its own rays met back faces
+        inside = insideNear * 4 > first * first;
     }
-    // The first cascade: the probe's irradiance / pi and sky visibility per texel, its distance moments
+    // The probe's irradiance / pi and sky visibility per texel, its distance moments
+    uint count = first * first;
     if (t < 36)
     {
         uint2 texel = uint2(t % 6, t / 6);
         float3 normal = texelDirection(texel, 6);
         float4 sum = 0;
         float total = 0;
-        for (uint k = 0; k < directions; k++)
+        for (uint k = 0; k < count; k++)
         {
-            float3 d = tileDirection(uint2(k % side, k / side), side);
-            float weight = max(dot(normal, d), 0.0) * solidAngle(d);
+            float4 d = gathered[k];
+            float weight = max(dot(normal, d.xyz), 0.0) * d.w;
             sum += weight * merged[k];
             total += weight;
         }
         newIrradiance[t] = total > 0 ? sum / total : 0;
     }
-    // A kernel about as wide as the directions are apart (DDGI's cos^50 for 128 rays)
-    float power = 50.0;
+    // A kernel about as wide as the directions are apart (DDGI's cos^50 for 128 rays), by squaring
     for (uint e = t; e < 196; e += 64)
     {
         uint2 texel = uint2(e % 14, e / 14);
         float3 normal = texelDirection(texel, 14);
         float2 sum = 0;
         float total = 0;
-        for (uint k = 0; k < directions; k++)
+        for (uint k = 0; k < count; k++)
         {
-            float3 d = tileDirection(uint2(k % side, k / side), side);
-            float weight = pow(max(dot(normal, d), 0.0), power) * solidAngle(d);
-            float distance = distances[k];
-            sum += weight * float2(distance, distance * distance);
+            float4 d = gathered[k];
+            float c = max(dot(normal, d.xyz), 0.0);
+            float c2 = c * c;
+            float c16 = c2 * c2;
+            c16 *= c16;
+            c16 *= c16;
+            float weight = c16 * c16 * c16 * c2 * d.w; // c^50
+            sum += weight * moments[k];
             total += weight;
         }
         newDepth[e] = total > 0 ? sum / total : float2(maxDistance, maxDistance * maxDistance);
     }
     GroupMemoryBarrierWithGroupSync();
-    int3 probes = int3(n);
-    int3 coordinate = push.levels[0].base.xyz + p;
-    int3 slot = wrapProbe(coordinate, probes);
-    uint column = uint(slot.x + probes.x * slot.z);
-    uint row = uint(slot.y);
-    uint2 irradianceTile = uint2(column, row) * PROBE_IRRADIANCE_TEXELS;
-    uint2 depthTile = uint2(column, row) * PROBE_DEPTH_TEXELS;
+    int3 coordinate = push.levels[c].base.xyz + p;
+    int3 slot = wrapProbe(coordinate, int3(n));
+    uint s;
+    uint2 tile = probeTile(push.volume, c, slot, s);
+    uint2 irradianceTile = tile * PROBE_IRRADIANCE_TEXELS;
+    uint2 depthTile = tile * PROBE_DEPTH_TEXELS;
     {
         uint2 texel = uint2(t % 8, t / 8);
         uint2 source = borderSource(texel, 6) - 1;
@@ -442,7 +551,6 @@ void mergeMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     if (t == 0)
     {
         ProbeState* states = push.volume[0].states;
-        uint s = indexOf(slot, n);
         bool sampled = !inside || (push.flags & CASCADES_CLASSIFY) == 0;
         states[s].coordinates = coordinate;
         states[s].offset = 0;
