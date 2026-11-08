@@ -375,6 +375,39 @@ class FrameGraphTest {
     }
 
     @Test
+    void everyBufferAShaderReachesStartsAtSixteenBytes() {
+        // Pooled, persistent and history buffers, of sizes that are no multiple of 8: shaders load pointers and 64-bit
+        // values from them with Aligned 8 (and vectors with 16), so their addresses keep GpuBuffer.ADDRESS_ALIGNMENT,
+        // which the RX 9070 XT does not give small buffers by itself (pitfalls.md).
+        List<Long> addresses = new java.util.ArrayList<>();
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Image color = g.create("color", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            List<Buffer> buffers = new java.util.ArrayList<>();
+            for (int i = 0; i < 6; i++) {
+                buffers.add(g.createBuffer("pooled " + i, 4 + 12L * i));
+            }
+            buffers.add(g.persistentBuffer("kept", 20));
+            BufferHistory history = g.historyBuffer("history", 36);
+            buffers.add(history.current());
+            g.pass("clear").attach(color, Clear.color(0, 0, 1, 1)).record(ctx -> { });
+            GraphBuilder.PassBuilder pass = g.pass("addresses").sideEffects();
+            for (Buffer buffer : buffers) {
+                pass.write(buffer, BufferAccess.TRANSFER_DST);
+            }
+            pass.record(ctx -> {
+                for (Buffer buffer : buffers) {
+                    addresses.add(ctx.address(buffer));
+                    ctx.fill(buffer, 0);
+                }
+            });
+            g.provide(OUT, color);
+        })).output(OUT, output);
+        frame();
+        assertThat(addresses).hasSize(8).allSatisfy(address -> assertThat(address % GpuBuffer.ADDRESS_ALIGNMENT)
+            .as("0x%x", address).isZero());
+    }
+
+    @Test
     void passesRenderIntoLayersAndBlitThem() {
         graph.add(new Lambda(List.of(OUT), g -> {
             Image layers = g.create("layers", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE).layers(2));
