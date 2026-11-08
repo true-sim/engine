@@ -8,8 +8,8 @@ struct ClassicPush
 {
     View* view;               // the shaded fields at the same bytes in every raster block: draw.slang's fragment
     SceneTable* scene;        // shader serves them all (common.slang's SceneTable: the frame's scene buffers)
-    LightListHeader* lights;  // at 16: the light list, or null: the sun
-    IndirectLight* indirect;  // at 24: the view's indirect-light table (indirect.slang), or null: the constant sky
+    LightListHeader* lights;  // at 16: the light list, or absent: the sun
+    IndirectLight* indirect;  // at 24: the view's indirect-light table (indirect.slang), or absent: the constant sky
     ClassicDraw* records;
     uint64_t unused;
     uint unusedBin;

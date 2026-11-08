@@ -305,7 +305,7 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
         int width = ctx.regionWidth(color);
         int height = ctx.regionHeight(color);
         return push.view(view.view().address())
-            .indirect(indirect == null ? 0 : ctx.address(indirect.table()))
+            .indirect(indirect == null ? ctx.absent() : ctx.address(indirect.table()))
             .depth(ctx.sampled(depth))
             .normal(ctx.storage(normal))
             .material(ctx.storage(material))

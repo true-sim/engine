@@ -536,7 +536,7 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
             case BOUNCE -> AO_SHOW_BOUNCE;
         };
         push.view(view.view().address())
-            .indirect(indirect == null ? 0 : ctx.address(indirect.table()))
+            .indirect(indirect == null ? ctx.absent() : ctx.address(indirect.table()))
             .depth(ctx.sampled(depth))
             .normal(ctx.storage(normal))
             .ao(ctx.storage(ao))

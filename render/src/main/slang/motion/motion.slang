@@ -23,9 +23,9 @@ struct MotionPush
     View* view;
     SceneTable* scene;
     Instance* previous;          // the instances as the frame before drew them (this frame's on the first)
-    DeformedBefore* deformed;    // per pool mesh; or null: no deformed copies kept
+    DeformedBefore* deformed;    // per pool mesh; or absent: no deformed copies kept
     uint2* previousPositions;    // the skinned copies' previous vertices, quantized
-    uint* classicIndices;        // the classic LOD path's indices (null: no such path)
+    uint* classicIndices;        // the classic LOD path's indices (absent: no such path)
     uint ids;                    // storage slot of the IDs (uint2)
     uint motion;                 // storage slot of the motion (two floats)
     uint size;                   // the region: width, height in the high 16 bits
@@ -55,7 +55,7 @@ float3 barycentrics(float3 direction, float3 a, float3 b, float3 c)
 /** Pool vertex `vertex` of `mesh` (number `meshIndex`) in its mesh's space as the frame before drew it. */
 float3 previousLocal(MeshEntry mesh, uint meshIndex, uint vertex)
 {
-    if (push.deformed != nullptr && meshIndex < push.meshCount)
+    if (given(push.deformed) && meshIndex < push.meshCount)
     {
         DeformedBefore* d = push.deformed + meshIndex;
         if (d[0].valid != 0)

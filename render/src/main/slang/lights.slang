@@ -587,12 +587,12 @@ public float3 lightAll<L : ILightList>(L list, LightListHeader h, Surface s, flo
 
 /**
  * What the lights of light list `h` add to the surface at `pixel` and `depth` (from the viewer, along the view
- * direction): the layout's ILightList opened there. Without a light list (null), nothing.
+ * direction): the layout's ILightList opened there. Without a light list (absent, `given` false), nothing.
  */
 public float3 lightList(LightListHeader* h, Surface s, float3 world, float3 toViewer,
     uint2 pixel, float depth)
 {
-    if (h == nullptr)
+    if (!given(h))
     {
         return 0;
     }

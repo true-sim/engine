@@ -186,6 +186,49 @@ switched off.
 
 ## Shaders and the GPU
 
+**A buffer's device address was only 4-byte aligned.** VMA places a buffer at the alignment the driver asks for, and
+the RX 9070 XT (Windows, Vulkan 1.4.359 driver) asks small buffers for 4 bytes: a 16-byte buffer started at `0x200e80004`.
+Slang marks a pointer's or a 64-bit value's load `Aligned 8` (a vector's up to 16), so every such load from these
+buffers broke the SPIR-V's promise: the probe volume's header (536 bytes, at `...b34`) in probe invalidation and
+preparation, the cascades' rays, the light clusters and visibility shading. The GPU read the right values anyway;
+plain validation sees nothing of it.
+- Proof: GPU-assisted validation on the RX 9070 XT reported VUID-RuntimeSpirv-PhysicalStorageBuffer64-06315 ("Unaligned
+  pointer access") in those passes, failing `ProbeVolumeTest.twoViewsShareOneVolume` and three
+  `RadianceCascadesTest`s with 10 validation errors each; `VulkanTest.addressedBuffersStartWhereEveryShaderLoadMayBeAligned`
+  fails without the fix on that GPU and passes with it, and so do those tests under GPU-assisted validation
+  (true-sim/engine, GPU-AV PR).
+- Rule: a buffer with a device address starts at `GpuBuffer.ADDRESS_ALIGNMENT` (16) at least; a suballocation that
+  shaders reach through a pointer keeps that alignment too.
+
+**A storage image array typed `uint2` declared the format Rg32ui.** bindless.slang's `uintImages` gave every image read
+through it the format `Rg32ui`, while the images behind it are `R32_UINT` (normals, visibility IDs): the spec leaves
+reads and writes through a view of another format undefined, for the whole image. The float arrays were declared
+`Unknown` already.
+- Proof: GPU-assisted validation warned in ambient occlusion composite, temporal and filter and in visibility shading
+  ("the storage image descriptor ... Format operand Rg32ui ... doesn't match the VkImageView format
+  (VK_FORMAT_R32_UINT)"); with `[[vk::image_format("unknown")]]` the SPIR-V declares `Unknown` and the warnings are
+  gone (true-sim/engine, GPU-AV PR).
+- Rule: bindless storage image arrays declare `[[vk::image_format("unknown")]]` unless every image behind them has the
+  one format the element type implies.
+
+**Lavapipe performs a load in a branch no invocation takes.** A compute shader reading through a push constant's
+pointer behind a uniform condition (`mode == 1 ? push.maybe[0] : 7`) crashed lavapipe when the condition was false and
+the pointer 0: the SPIR-V puts the load in its own block behind the branch, yet the JIT'd shader read address 0. With a
+valid address it ran, and the RX 9070 XT runs every variant. Mesa 26.0.8 and the Windows build of 26.2.6 crashed only
+when the shader returned early before the branch; CI's 26.2.6 (Linux, LLVM 21) also without. The display transform
+had this shape: encode.slang returns outside the image, then reads `exposureAt[0]` only with EXPOSURE_FROM_BUFFER, and
+`exposureAt` was 0 without an exposure technique. CI's lavapipe crashed with SIGSEGV at address 0 in JIT'd code on the
+first frame of `DisplayTransformTest` (whose only shader is encode) and of `CameraViewGpuTest`, at the same code offset
+(`...95f`) each time (#456); why only some runs crashed there was not found.
+- Proof: `SkippedLoadTest` with `TRUESIM_SKIPPED_LOAD_NULL=true` crashes the test JVM on lavapipe every run and passes
+  with a valid address; a standalone reproducer (GLSL and a Python ctypes program, no engine) crashed 3 of 3 runs on
+  CI's Ubuntu 26.04 with Mesa 26.2.6~kisak1 and with Ubuntu's 26.0.8 (run 42512115646) and on Windows' 26.2.6. The CI
+  crash logs: runs 42476978807 (render shard 1), 42475903054 and 42505521825 (ui shard 5), `si_addr: 0x0`, all from
+  `libvulkan_lvp.so+0x460d2b`.
+- Rule: never hand a shader the address 0, even behind a branch that skips the read. A pointer that names no data
+  gets `VulkanDevice.absentAddress()` (64 KiB of zeros, its lowest bit set; `ctx.absent()`, `ctx.addressOrAbsent(b)`)
+  and shaders test it with bindless.slang's `given(p)`, never `!= nullptr`; encode reads a stand-in buffer of its own.
+
 **An instance's `mesh` word holds flag bits.** Indexing the mesh table with it unmasked read out of bounds and lost the
 device.
 - Proof: reproduced in [#144](https://github.com/true-sim/engine/pull/144) (every renderer test lost the device);

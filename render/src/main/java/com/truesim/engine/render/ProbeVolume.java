@@ -513,14 +513,14 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         int bounce, int bins, int bin, int layers) {
         GpuScene scene = renderer.scene();
         RenderView view = anchor.view();
-        return push.paths(paths == null ? 0 : ctx.address(paths)).next(next == null ? 0 : ctx.address(next))
-            .bins(binTables == null ? 0 : ctx.address(binTables) + binTable)
-            .counts(counts == null ? 0 : ctx.address(counts))
+        return push.paths(ctx.addressOrAbsent(paths)).next(ctx.addressOrAbsent(next))
+            .bins(ctx.addressOrAbsent(binTables) + binTable)
+            .counts(ctx.addressOrAbsent(counts))
             .view(view.address()).scene(scene.tableAddress())
             .rays(rayTracing.sceneAddress(scene))
-            .lights(0)
-            .indirect(table == null ? 0 : ctx.address(table))
-            .world(world == null ? 0 : ctx.address(world.grid()))
+            .lights(ctx.absent())
+            .indirect(ctx.addressOrAbsent(table))
+            .world(world == null ? ctx.absent() : ctx.address(world.grid()))
             .offset((float) (view.position(0) - rayTracing.origin(0)), (float) (view.position(1)
                 - rayTracing.origin(1)), (float) (view.position(2) - rayTracing.origin(2)))
             .accumulation(rayImage == null ? 0 : ctx.storage(rayImage))
@@ -694,8 +694,8 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             int flags = (settings.get(ADAPTIVE) ? ADAPTIVE_FLAG : 0) | (now == resetFrame ? RESET_ALL : 0)
                 | (settings.get(RELOCATE) ? RELOCATE_FLAG : 0) | (settings.get(CLASSIFY) ? CLASSIFY_FLAG : 0);
             RenderView view = anchor.view();
-            push.volume(ctx.address(data)).rays(paths == null ? 0 : ctx.address(paths))
-                .counts(counts == null ? 0 : ctx.address(counts)).status(status == null ? 0 : ctx.address(status))
+            push.volume(ctx.address(data)).rays(ctx.addressOrAbsent(paths))
+                .counts(ctx.addressOrAbsent(counts)).status(ctx.addressOrAbsent(status))
                 .toAnchor((float) (Volume.origin(camera.position(0), coarsest) - view.position(0)),
                     (float) (Volume.origin(camera.position(1), coarsest) - view.position(1)),
                     (float) (Volume.origin(camera.position(2), coarsest) - view.position(2)))
