@@ -239,12 +239,6 @@ final class CullPasses implements AutoCloseable {
         return droppedChunks;
     }
 
-    /** Whether a frame wanted more chunks than the limit allows ({@link MeshletSettings#CHUNK_LIMIT}). */
-    boolean limitReached() {
-        int wanted = wantedChunks();
-        return wanted < 0 || wanted > chunkLimit;
-    }
-
     /** The most rounds a cull ran since the culls settled last. */
     int roundsUsed() {
         return Math.max(Math.max(1, roundsSeen), stat(2));
