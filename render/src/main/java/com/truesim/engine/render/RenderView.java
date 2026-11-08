@@ -502,6 +502,89 @@ public final class RenderView implements AutoCloseable {
         return false;
     }
 
+    /** {@link #grow}: the lists hold what the last finished frame wanted. */
+    public static final int FITTED = 0;
+    /** {@link #grow}: the lists grew. */
+    public static final int GROWN = 1;
+    /** {@link #grow}: the lists are at the limits and still hold less than the last finished frame wanted. */
+    public static final int AT_LIMIT = 2;
+
+    /**
+     * Grows the lists that held less than the last finished frame wanted ({@link #overflowed}), each part on its own
+     * (the opaque bin's meshlets and triangles, the other bins'): to twice the room or half again what was wanted,
+     * whichever is more, at most {@code drawLimit} meshlets and {@code triangleLimit} triangles a bin. Returns
+     * {@link #FITTED}, {@link #GROWN} or {@link #AT_LIMIT}. The counts read are the old lists' until the view culls
+     * again. Allocates when it grows.
+     */
+    @AllowAllocation("growing, rarely")
+    public int grow(int drawLimit, int triangleLimit) {
+        if (!overflowed()) {
+            return FITTED;
+        }
+        int draws = options.draws();
+        int binDraws = options.binDraws();
+        int triangles = options.triangles();
+        int binTriangles = options.binTriangles();
+        int drawCap = Math.min(drawLimit, 1 << 22);
+        int newDraws = grown(draws, mostListed(0, 1), drawCap);
+        int newBinDraws = grown(binDraws, mostListed(1, MeshletRenderer.BINS), drawCap);
+        int newTriangles = triangles;
+        int newBinTriangles = binTriangles;
+        if (frameIndices != null) {
+            newTriangles = grown(triangles, wantedTriangles(0), triangleLimit);
+            long most = 0;
+            for (int bin = 1; bin < MeshletRenderer.BINS; bin++) {
+                most = Math.max(most, wantedTriangles(bin));
+            }
+            newBinTriangles = grown(binTriangles, most, triangleLimit);
+            // The index buffer's three words per triangle within an int: the other bins give way first.
+            long room = (Integer.MAX_VALUE - 3L * newTriangles) / (3L * (MeshletRenderer.BINS - 1));
+            if (newBinTriangles > room) {
+                newBinTriangles = (int) Math.max(binTriangles, Math.min(newBinTriangles, room));
+            }
+        }
+        if (newDraws == draws && newBinDraws == binDraws && newTriangles == triangles
+            && newBinTriangles == binTriangles) {
+            return AT_LIMIT;
+        }
+        resize(newDraws, newTriangles, newBinDraws, newBinTriangles);
+        return GROWN;
+    }
+
+    /** The most meshlets a phase of bins {@code from} to {@code to - 1} wanted in the last finished frame. */
+    private long mostListed(int from, int to) {
+        long most = 0;
+        for (int bin = from; bin < to; bin++) {
+            most = Math.max(most, Integer.toUnsignedLong(drawCount.memory().get(U32, 8L * bin)));
+            most = Math.max(most, Integer.toUnsignedLong(drawCount.memory().get(U32, 8L * bin + 4)));
+        }
+        return most;
+    }
+
+    /** Room {@code room} grown for {@code wanted} as {@link #grow} does, at most {@code limit}; unchanged if enough. */
+    private static int grown(int room, long wanted, int limit) {
+        if (wanted <= room || room >= limit) {
+            return room;
+        }
+        return (int) Math.min(limit, Math.max(2L * room, wanted + wanted / 2));
+    }
+
+    /**
+     * Has the view's owner grow its lists ({@link #grow}) rather than the renderer as frames end: an owner redrawing
+     * what overflowed once grown (the shadow atlas's tiles).
+     */
+    public RenderView grownByOwner(boolean on) {
+        grownByOwner = on;
+        return this;
+    }
+
+    boolean grownByOwner() {
+        return grownByOwner;
+    }
+
+    private volatile boolean grownByOwner;
+    long growCheckFrom; // the renderer's frame end from which its overflow is read again (MeshletRenderer)
+
     /**
      * Gives the view lists for {@code draws} meshlets and {@code triangles} triangles (as {@link ViewOptions}), the
      * other raster bins a quarter of that, e.g. once it {@link #overflowed}: the old lists go once no frame in flight

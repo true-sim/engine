@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.app.profile.Counters;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.vulkan.FrameBuffer;
@@ -61,7 +62,8 @@ public final class MeshletRenderer implements AutoCloseable {
 
     /**
      * Chunks of 64 meshlets the views culled together share, to start with: the buffer grows between frames when a frame
-     * wanted more (those past it are dropped that frame, and {@link #chunksOverflowed()} says so).
+     * wanted more ({@link #chunksOverflowed()}), up to {@link MeshletSettings#CHUNK_LIMIT}; until then culls run in
+     * rounds ({@link MeshletSettings#CULL_ROUNDS}), so nothing is left out.
      */
     public static final int MAX_CHUNKS = 65_535;
     /** The most chunks the buffer grows to: 16 bytes each. */
@@ -106,6 +108,15 @@ public final class MeshletRenderer implements AutoCloseable {
     private static final boolean[] EARLY = {true};
     private Path path = Path.AUTO;
     private boolean closed;
+    // Views' lists grown as frames end, to the limits the last graph built with (MeshletSettings).
+    private final Runnable growViews = this::growViews;
+    private volatile int viewDrawLimit = MeshletSettings.VIEW_DRAW_LIMIT.defaultValue();
+    private volatile int viewTriangleLimit = MeshletSettings.VIEW_TRIANGLE_LIMIT.defaultValue();
+    private long ends; // frame ends seen: a single frame slot counts none (pitfalls.md)
+    private volatile int viewsGrown;
+    private volatile int viewsAtLimit;
+    private boolean limitLogged;
+    private Counters.Source counters;
 
     /**
      * A renderer of {@code scene} into {@code colorFormat} and {@code depthFormat} attachments, its views keeping a copy
@@ -144,6 +155,7 @@ public final class MeshletRenderer implements AutoCloseable {
         views = new RenderViews(device, slots, retiring);
         culling = new CullPasses(device, scene, slots, views, retiring, chunks);
         scene.onGrow(followScene);
+        slots.onEnd(growViews);
         scene.onMaterials(followTable);
         followTable(scene.materials());
     }
@@ -281,9 +293,156 @@ public final class MeshletRenderer implements AutoCloseable {
         return culling.capacity();
     }
 
-    /** Whether a frame wanted more chunks than there was room for: instances were left out of it, until it grew. */
+    /**
+     * Whether a frame wanted more chunks than there was room for: its culls ran in rounds (or, past
+     * {@link MeshletSettings#CULL_ROUNDS}, left instances out: {@link #droppedInstances()}), until the room grew.
+     */
     public boolean chunksOverflowed() {
         return wantedChunks() > chunkCapacity();
+    }
+
+    /**
+     * Instances (one in one view each) culling left out for want of room since the renderer was made: every round of a
+     * cull full, or the room at {@link MeshletSettings#CHUNK_LIMIT}. Counted by the GPU, read as frames end (a frame or
+     * more late); the first drop is reported in the log.
+     */
+    public long droppedInstances() {
+        return culling.droppedInstances();
+    }
+
+    /** The most rounds a cull ran since culls last settled into one ({@link MeshletSettings#CULL_ROUNDS}). */
+    public int cullRounds() {
+        return culling.roundsUsed();
+    }
+
+    /** Whether culls run in one round: frames fitted their chunks with room to spare. */
+    public boolean cullsSettled() {
+        return culling.settled();
+    }
+
+    /**
+     * Views whose lists were at {@link MeshletSettings#VIEW_DRAW_LIMIT} or {@link MeshletSettings#VIEW_TRIANGLE_LIMIT}
+     * and still too small, counted at each check that found one so: what did not fit was not drawn. The first is
+     * reported in the log.
+     */
+    public int viewsAtLimit() {
+        return viewsAtLimit;
+    }
+
+    /** How often a view's lists grew as a frame ended, since the renderer was made. */
+    public int viewsGrown() {
+        return viewsGrown;
+    }
+
+    /**
+     * Takes the limits of a graph's build ({@link MeshletSettings}): the chunks' and the views' lists', and the rounds a
+     * cull runs. Allocates nothing.
+     */
+    public void limits(int chunkLimit, int cullRounds, int viewDraws, int viewTriangles) {
+        culling.configure(Math.max(chunkLimit, chunkCapacity()), cullRounds);
+        viewDrawLimit = viewDraws;
+        viewTriangleLimit = viewTriangles;
+    }
+
+    /**
+     * As a frame ends: grows the lists of the views (but those their owners grow, {@link RenderView#grownByOwner}) that
+     * held less than the last finished frame wanted, each read again once the frames in flight culled with its new
+     * lists. A view at the limits is counted, the first reported.
+     */
+    @AllowAllocation("growing, rarely")
+    private void growViews() {
+        if (closed) {
+            return;
+        }
+        ends++;
+        for (int i = 0; i < views.openCount(); i++) { // closing views (rarely) happens on this thread too
+            RenderView view = views.open(i);
+            if (view.grownByOwner() || ends < view.growCheckFrom) {
+                continue;
+            }
+            int grown = view.grow(viewDrawLimit, viewTriangleLimit);
+            if (grown == RenderView.GROWN) {
+                viewsGrown++;
+            } else if (grown == RenderView.AT_LIMIT) {
+                viewLimited(view);
+            }
+            if (grown != RenderView.FITTED) { // its counts are the old lists' until frames culled with the new
+                view.growCheckFrom = ends + scene.frameSlots().count() + 2;
+            }
+        }
+    }
+
+    /** Counts {@code view} at its limits, reporting the first in the log. */
+    public void viewLimited(RenderView view) {
+        viewsAtLimit++;
+        if (!limitLogged) {
+            limitLogged = true;
+            ViewOptions options = view.options();
+            org.slf4j.LoggerFactory.getLogger(MeshletRenderer.class).warn("View {}'s lists hold {} meshlets and {} "
+                    + "triangles ({} and {} in the other bins), at the limits (render.meshlets.viewDrawLimit {}, "
+                    + "render.meshlets.viewTriangleLimit {}), and frames want more: what does not fit is not drawn",
+                view.index(), options.draws(), options.triangles(), options.binDraws(), options.binTriangles(),
+                viewDrawLimit, viewTriangleLimit);
+        }
+    }
+
+    /** The most meshlets views' lists grow to, per raster bin (owners growing their views' read it too). */
+    public int viewDrawLimit() {
+        return viewDrawLimit;
+    }
+
+    /** Like {@link #viewDrawLimit()}, of triangles. */
+    public int viewTriangleLimit() {
+        return viewTriangleLimit;
+    }
+
+    /**
+     * The culling's counters for the profiler ({@code profiling.counters().add(renderer.counters())}):
+     * {@code meshlets.chunks} (room) and {@code meshlets.chunksWanted} (the most a frame wanted) in chunks of 64
+     * meshlets, {@code meshlets.cullRounds}, {@code meshlets.dropped} instances, {@code meshlets.viewsGrown} and
+     * {@code meshlets.viewsAtLimit}.
+     */
+    @AllowAllocation("made once")
+    public synchronized Counters.Source counters() {
+        if (counters == null) {
+            counters = new CullCounters(this);
+        }
+        return counters;
+    }
+
+    /** The culling's counters, read on the profiler's sampling thread. */
+    private static final class CullCounters implements Counters.Source {
+        private final MeshletRenderer renderer;
+        private int chunks;
+        private int wanted;
+        private int rounds;
+        private int dropped;
+        private int grown;
+        private int limited;
+
+        CullCounters(MeshletRenderer renderer) {
+            this.renderer = renderer;
+        }
+
+        @Override
+        public void declare(Counters into) {
+            chunks = into.counter("meshlets.chunks", "chunks");
+            wanted = into.counter("meshlets.chunksWanted", "chunks");
+            rounds = into.counter("meshlets.cullRounds", "rounds");
+            dropped = into.counter("meshlets.dropped", "instances");
+            grown = into.counter("meshlets.viewsGrown", "views");
+            limited = into.counter("meshlets.viewsAtLimit", "views");
+        }
+
+        @Override
+        public void sample(Counters into) {
+            into.set(chunks, renderer.chunkCapacity());
+            into.set(wanted, Integer.toUnsignedLong(renderer.wantedChunks()));
+            into.set(rounds, renderer.cullRounds());
+            into.set(dropped, renderer.droppedInstances());
+            into.set(grown, renderer.viewsGrown());
+            into.set(limited, renderer.viewsAtLimit());
+        }
     }
 
     /** Grows the views' per-instance buffers as the scene grows. */
@@ -787,6 +946,7 @@ public final class MeshletRenderer implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
+            scene.frameSlots().removeOnEnd(growViews);
             scene.stopFollowing(followScene);
             scene.stopOnMaterials(followTable);
             synchronized (this) {

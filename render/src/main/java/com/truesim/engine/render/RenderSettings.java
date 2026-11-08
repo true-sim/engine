@@ -128,6 +128,7 @@ public final class RenderSettings {
         registry.addHiddenSlots(INTERPOLATION_SLOT, Transparency.SLOT, SelectionOutline.SLOT, DisplayTransform.SLOT)
             .addHidden(OCCLUSION, CHANGE_LIST, CHANGE_LIST_CHUNK, STREAM_BUDGET, TEXTURE_UPDATE_BUDGET, STREAM_FRAME_BUDGET,
                 MESH_SPARES, Transparency.SORTED_RUNS, Displacement.MODE)
+            .addHidden(MeshletSettings.ALL.toArray(new Setting<?>[0]))
             .addHidden(ClusteredLights.ALL.toArray(new Setting<?>[0]))
             .addHidden(ShadowSettings.ALL.toArray(new Setting<?>[0]))
             .addHidden(Denoiser.ALL.toArray(new Setting<?>[0]))

@@ -899,6 +899,11 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
   its own ("Every color pass by material type" below).
 - **Textures** live in the bindless set and are sampled by slot, trilinear and anisotropic (`Bindless.MATERIAL`, up to
   16x where the GPU allows).
+- **Buffers:** a parameter `T*` names a buffer (`withTint(buffer)`, `materials.update(id, TintedParameters.TINT,
+  buffer)`, a frame graph's `ExternalBuffer` too), its address followed as it changes. One left unset holds the
+  device's absent address (`VulkanDevice.absentAddress()`), never 0: shaders test it with bindless.slang's `given(p)`,
+  never `!= nullptr` or a cast compared with 0 (lavapipe loads through a pointer in branches no invocation takes,
+  docs/pitfalls.md).
 - **One shading model** (`shading.slang`): Lambert diffuse and a GGX specular lobe with height-correlated Smith
   visibility and Schlick Fresnel, under an optional coat, with explicit texture gradients so passes without hardware
   derivatives use it too. The vertex stage decodes normals, tangents, texture coordinates and vertex colors from the

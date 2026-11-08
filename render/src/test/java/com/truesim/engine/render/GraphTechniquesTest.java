@@ -802,6 +802,209 @@ class GraphTechniquesTest {
         }
     }
 
+    /**
+     * {@code columns} x {@code rows} quads facing the camera of {@link #cellCamera}, each in a cell of its own: cells of
+     * {@code SIZE / columns} pixels, the quad filling a little less.
+     */
+    private void quadGrid(GpuScene into, int columns, int rows) {
+        float cell = 8f / columns; // the view at distance 4 is 8 units across
+        for (int j = 0; j < rows; j++) {
+            for (int i = 0; i < columns; i++) {
+                into.set(j * columns + i, quad, -4 + cell * (i + 0.5f), 4 - cell * (j + 0.5f), -4, HALF, 0, 0, HALF,
+                    0.48f * cell, 0.48f * cell, 0.48f * cell);
+            }
+        }
+    }
+
+    /** A camera at the origin looking down -z, 90 degrees across: 8 units across at distance 4. */
+    private static Camera cellCamera() {
+        return new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+    }
+
+    /** The cells of a {@code cells} x {@code cells} grid over {@code readback} whose first pixel is lit. */
+    private static int litCells(GpuBuffer readback, int cells) {
+        int step = SIZE / cells;
+        int lit = 0;
+        for (int j = 0; j < cells; j++) {
+            for (int i = 0; i < cells; i++) {
+                int x = i * step + step / 2;
+                int y = j * step + step / 2;
+                lit += (readback.memory().getAtIndex(ValueLayout.JAVA_INT, y * SIZE + x) & 0xff) > 128 ? 1 : 0;
+            }
+        }
+        return lit;
+    }
+
+    /** One frame, waited for: returns the readback of its slot. */
+    private GpuBuffer frame(GpuBuffer[] readbacks) {
+        graph.beginFrame();
+        int slot = graph.frameSlots().current();
+        graph.submit(0, 0);
+        device.waitIdle();
+        return readbacks == null ? null : readbacks[slot];
+    }
+
+    @Test
+    void aViewOfFarMoreInstancesThanTheChunksHoldDrawsEveryOneFromTheFirstFrame() {
+        // 70,000 quads, a chunk each, against room for MAX_CHUNKS (65,535) to start with: the first frame's cull runs
+        // in rounds and lists every one (it left 4,465 out, issue #464); the room grows as frames end, culls settle
+        // into one round, and frames then allocate nothing.
+        int columns = 280;
+        int rows = 250;
+        int count = columns * rows;
+        assertThat(count).isGreaterThan(MeshletRenderer.MAX_CHUNKS);
+        try (GpuScene many = new GpuScene(device, pool, count, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, many, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots())) {
+            quadGrid(many, columns, rows);
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            ViewPort port = graph.addView("main").size(SIZE, SIZE);
+            SceneView manyView = geometry.createView(port, cellCamera(), ViewOptions.of(1 << 17, 1 << 18));
+            port.add(new ClusteredForwardShading(geometry, manyView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output); // no readback: its region struct allocates
+            manyView.set(1, MeshletRenderer.MODE_WHITE);
+            assertThat(drawing.chunkCapacity()).isEqualTo(MeshletRenderer.MAX_CHUNKS);
+            frame(null);
+            assertThat(drawing.wantedChunks()).as("a chunk per quad").isEqualTo(count);
+            assertThat(manyView.view().visibleMeshlets()).as("every quad listed in the first frame").isEqualTo(count);
+            assertThat(drawing.cullRounds()).as("in two rounds").isEqualTo(2);
+            for (int f = 0; f < 6; f++) {
+                frame(null);
+                assertThat(manyView.view().visibleMeshlets()).as("every quad, frame %d", f).isEqualTo(count);
+            }
+            assertThat(drawing.chunkCapacity()).as("grown").isGreaterThanOrEqualTo(count);
+            assertThat(drawing.chunksOverflowed()).isFalse();
+            assertThat(drawing.cullsSettled()).as("one round once grown").isTrue();
+            assertThat(drawing.droppedInstances()).isZero();
+            // The steady state: one round, nothing allocated per frame (a frame in a few hundred is the compiler)
+            ReferencePathTracerTest.framesAllocating(device, graph, 200);
+            assertThat(ReferencePathTracerTest.framesAllocating(device, graph, 200)).as("frames allocating")
+                .isLessThan(8);
+            assertThat(manyView.view().visibleMeshlets()).isEqualTo(count);
+        } finally {
+            device.waitIdle();
+        }
+    }
+
+    @Test
+    void cullRoundsDrawEveryInstanceFromTheFirstFrameAndReportWhatTheLastRoundDropped() {
+        // A grid of 32 x 32 quads, each in a cell of its own, culled with room for 64 chunks: sixteen rounds of 64, so
+        // every quad shows in the first frame. With two rounds and the room at its limit, 128 show, the rest is
+        // counted dropped; raising the limit, the room grows and every quad shows again.
+        GpuBuffer[] readbacks = {GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
+        int cells = 32;
+        try (GpuScene grid = new GpuScene(device, pool, cells * cells, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, grid, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots(), 64)) {
+            quadGrid(grid, cells, cells);
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            ViewPort port = graph.addView("main").size(SIZE, SIZE);
+            SceneView gridView = geometry.createView(port, cellCamera(), ViewOptions.of(2048, 1 << 13));
+            port.add(new ClusteredForwardShading(geometry, gridView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+            gridView.set(1, MeshletRenderer.MODE_WHITE);
+            assertThat(litCells(frame(readbacks), cells)).as("every quad in the first frame").isEqualTo(cells * cells);
+            assertThat(drawing.cullRounds()).isEqualTo(16);
+            // Two rounds, and no room to grow into: what the last round has no room for is dropped, and counted.
+            graph.settings().set(MeshletSettings.CULL_ROUNDS, 2).set(MeshletSettings.CHUNK_LIMIT, 64);
+            try (GpuScene few = new GpuScene(device, pool, cells * cells, graph.frameSlots());
+                 MeshletRenderer limited = new MeshletRenderer(device, few, VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_FORMAT_D32_SFLOAT, graph.frameSlots(), 64)) {
+                quadGrid(few, cells, cells);
+                SceneGeometry fewGeometry = SceneGeometry.meshlets(limited);
+                ViewPort fewPort = graph.addView("limited").size(SIZE, SIZE);
+                SceneView fewView = fewGeometry.createView(fewPort, cellCamera(), ViewOptions.of(2048, 1 << 13));
+                GpuBuffer[] fewReadbacks = {
+                    GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+                    GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
+                try {
+                    graph.removeView(port);
+                    fewPort.add(new ClusteredForwardShading(fewGeometry, fewView, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0))
+                        .add(new Readback(graph, fewReadbacks)).output(Keys.SCENE_COLOR, output);
+                    fewView.set(1, MeshletRenderer.MODE_WHITE);
+                    assertThat(litCells(frame(fewReadbacks), cells)).as("two rounds of 64").isEqualTo(128);
+                    for (int f = 0; f < 4; f++) {
+                        frame(fewReadbacks);
+                    }
+                    assertThat(limited.droppedInstances()).as("counted").isGreaterThanOrEqualTo(cells * cells - 128);
+                    assertThat(limited.chunkCapacity()).as("at the limit").isEqualTo(64);
+                    // The limit raised: the room grows as a frame ends, and every quad shows.
+                    graph.settings().set(MeshletSettings.CHUNK_LIMIT, 1 << 20);
+                    for (int f = 0; f < 4; f++) {
+                        frame(fewReadbacks);
+                    }
+                    assertThat(limited.chunkCapacity()).isGreaterThanOrEqualTo(cells * cells);
+                    assertThat(litCells(frame(fewReadbacks), cells)).isEqualTo(cells * cells);
+                } finally {
+                    device.waitIdle();
+                    for (GpuBuffer readback : fewReadbacks) {
+                        readback.close();
+                    }
+                }
+            }
+        } finally {
+            device.waitIdle();
+            for (GpuBuffer readback : readbacks) {
+                readback.close();
+            }
+        }
+    }
+
+    @Test
+    void viewListsThatOverflowGrowAsFramesEndUpToTheirLimit() {
+        // 32 x 32 quads into a view with room for 256 meshlets: the first frame draws a quarter, the lists grow as it
+        // ends and every quad shows. A second view limited to 512 meshlets stays at the limit, counted.
+        GpuBuffer[] readbacks = {GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
+        int cells = 32;
+        try (GpuScene grid = new GpuScene(device, pool, cells * cells, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, grid, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots())) {
+            quadGrid(grid, cells, cells);
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            ViewPort port = graph.addView("main").size(SIZE, SIZE);
+            SceneView gridView = geometry.createView(port, cellCamera(), ViewOptions.of(256, 512));
+            port.add(new ClusteredForwardShading(geometry, gridView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+            gridView.set(1, MeshletRenderer.MODE_WHITE);
+            assertThat(litCells(frame(readbacks), cells)).as("room for 256").isEqualTo(256);
+            for (int f = 0; f < 6; f++) {
+                frame(readbacks);
+            }
+            assertThat(gridView.view().options().draws()).as("grown").isGreaterThanOrEqualTo(cells * cells);
+            assertThat(gridView.view().overflowed()).isFalse();
+            assertThat(drawing.viewsGrown()).isPositive();
+            assertThat(drawing.viewsAtLimit()).isZero();
+            assertThat(litCells(frame(readbacks), cells)).as("every quad").isEqualTo(cells * cells);
+            // At the limit: counted, and drawing what fits
+            graph.settings().set(MeshletSettings.VIEW_DRAW_LIMIT, 512);
+            RenderView capped = drawing.createView(ViewOptions.of(256, 512));
+            graph.removeView(port);
+            ViewPort cappedPort = graph.addView("capped").size(SIZE, SIZE);
+            SceneView cappedView = new SceneView(cappedPort, cappedPort.own(capped), cellCamera());
+            cappedPort.add(new ClusteredForwardShading(geometry, cappedView, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0))
+                .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+            cappedView.set(1, MeshletRenderer.MODE_WHITE);
+            for (int f = 0; f < 8; f++) {
+                frame(readbacks);
+            }
+            assertThat(capped.options().draws()).isEqualTo(512);
+            assertThat(drawing.viewsAtLimit()).as("counted at the limit").isPositive();
+            assertThat(litCells(frame(readbacks), cells)).isEqualTo(512);
+        } finally {
+            device.waitIdle();
+            for (GpuBuffer readback : readbacks) {
+                readback.close();
+            }
+        }
+    }
+
     @Test
     void meshesAddedWhileFramesAreInFlightDrawTheirFirstFrame() {
         // Every frame a mesh is added (and the one from two frames before removed) while frames are in flight, and the
@@ -1889,11 +2092,21 @@ class GraphTechniquesTest {
             assertThat(graph.builds()).as("rebuilt to import it").isEqualTo(builds + 1);
             assertThat(tinted(0xffff0000)).as("blue, the graph's").isGreaterThan(SIZE * SIZE / 40);
             assertThat(graph.passes()).containsSubsequence("visibility shading", "tint");
-            // Set anew without it: no longer imported.
+            // Set anew without it: no longer imported. Unset, the field holds the absent address, never 0 (#461): the
+            // shader tests it with given(), and lavapipe, which loads in branches no invocation takes, reads zeros.
             materials.set(quadMaterial, new Material(TintedParameters.DEFAULTS));
             assertThat(materials.graphBuffers()).isEmpty();
+            assertThat(materials.bufferAddress(quadMaterial, TintedParameters.TINT)).as("unset")
+                .isEqualTo(device.absentAddress()).isNotZero();
             frame();
             assertThat(tinted(0xffff0000)).as("no buffer: black").isZero();
+            materials.update(quadMaterial, TintedParameters.TINT, green);
+            assertThat(materials.bufferAddress(quadMaterial, TintedParameters.TINT)).isEqualTo(green.deviceAddress());
+            materials.update(quadMaterial, TintedParameters.TINT, (com.truesim.engine.vulkan.DeviceBuffer) null);
+            assertThat(materials.bufferAddress(quadMaterial, TintedParameters.TINT)).as("unset by update")
+                .isEqualTo(device.absentAddress());
+            frame();
+            assertThat(tinted(0xffff0000)).as("unset again: black").isZero();
             assertThatIllegalArgumentException().as("not a buffer field")
                 .isThrownBy(() -> materials.update(quadMaterial, TintedParameters.STRENGTH, tint));
             scene.setMaterials(null);

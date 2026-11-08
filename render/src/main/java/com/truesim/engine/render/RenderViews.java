@@ -94,6 +94,16 @@ final class RenderViews {
         return Collections.unmodifiableList(open);
     }
 
+    /** How many views are open: {@link #open(int)} takes them by place, allocating nothing. */
+    int openCount() {
+        return open.size();
+    }
+
+    /** The open view at {@code place}, in the order they were made. */
+    RenderView open(int place) {
+        return open.get(place);
+    }
+
     /** The GPU memory of all views ({@link RenderView#bytes}), in bytes. */
     long bytes() {
         long bytes = 0;
