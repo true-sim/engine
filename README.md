@@ -1493,7 +1493,10 @@ Transparency.SLOT.choose(graph.settings(), Transparency.WEIGHTED);      // or So
 - **`OPAQUE`** (`OpaqueTransparency`): drawn as opaque, into the color and depth.
 
 Transmissive surfaces sample the opaque scene behind them (`SceneBehind`, copied before transparency), refracted; under
-`SORTED` a transmissive layer covers the blended ones behind it as far as it is opaque. Particles (`ParticleDraw`) are
+`SORTED` a transmissive layer covers the blended ones behind it as far as it is opaque. With `render.ssr.transparent`
+on, blended and transmissive surfaces also reflect the opaque scene, each fragment tracing its mirror ray as it is
+drawn, under `SORTED` and `WEIGHTED` alike (below, "Transparent surfaces" under screen-space reflections); `OPAQUE`
+draws them without. Particles (`ParticleDraw`) are
 drawn after the blended surfaces, emitter by emitter back to front, or before glass (`ParticleDraw.beforeGlass`), not
 interleaved with them: emitters as entries of the meshlet sort would need their pipelines in its runs.
 
@@ -1547,7 +1550,8 @@ shading as storage images (its variants with `SURFACES` set). Only when a techni
 (`SurfaceOutputs.Consumer.wantsSurfaces`, read while the graph builds through `GraphBuilder.techniquesInView`): without
 one, no image, attachment, pipeline or shader write exists (the keys get images nothing writes, which take no memory
 and fail a build that reads them). Post materials (decals, fog by normal, outlines) will take them the same way: a
-technique implementing the consumer interface and requiring the keys. Blended and transmissive surfaces write none.
+technique implementing the consumer interface and requiring the keys. Blended and transmissive surfaces write none
+(their reflections are traced as they are drawn: below).
 
 **Screen-space reflections** (`ScreenSpaceReflections`, one per view under `ScreenSpaceReflections.ID`, at
 `Order.SCREEN_SPACE_LIGHTING`: after the background and ambient occlusion, before transparency), as the kind `render.ssr` (`ScreenSpaceReflections.SLOT`)
@@ -1585,13 +1589,13 @@ averages the hits and misses of the pixels within the cone's radius on the refle
 Where trust falls (the image's edges over `edgeFade`, the last fifth of `maxDistance`, a ray leaving the image or
 finding nothing or passing behind what it finds, roughness from three quarters of `roughnessCutoff`) the environment's reflection
 takes over smoothly. No history, no temporal accumulation: no added latency, no ghosting. Each view (each eye, each
-window) has its own, within its render region under dynamic resolution. Blended and transmissive surfaces get none and
-are not seen in reflections (drawn after it).
+window) has its own, within its render region under dynamic resolution. Blended and transmissive surfaces are not
+seen in reflections (drawn after it); they get their own with `render.ssr.transparent` (below).
 
 Settings: `render.ssr` (`off`, `linear`, `hiz`, default `hiz`; rebuilds), and each kind's tunables
 (`ScreenSpaceReflections.March`, under `render.ssr.linear.*` and `render.ssr.hiz.*`): `maxSteps` (64), `thickness`
 (0.25 m), `maxDistance` (100 m), `roughnessCutoff` (0.6), `edgeFade` (0.1 of the image), read as frames record, and
-`resolutionScale` (1; rebuilds).
+`resolutionScale` (1; rebuilds); `render.ssr.transparent` (`ScreenSpaceReflections.TRANSPARENT`, off; rebuilds).
 
 What it costs (`ReflectionsBenchmark`, RX 9070 XT, 2026-11-03, after the outline and contact fixes): 30,000 rocks of glossy metal (roughness 0.35) on a
 glossy terrain (0.2), so nearly every pixel traces a ray, under a uniform environment, half-float color, 64 steps;
@@ -1649,6 +1653,73 @@ the nearest-depth pyramid. "surface outputs only": a technique asking for them a
   Hence `HIZ` by default; `LINEAR` stays for scenes where rays must pass behind thick surfaces to find what is
   behind them. Half-resolution tracing (`resolutionScale` 0.5) takes HIZ to 0.42-0.45 ms at 1080p and 1.59-1.68 ms at
   4K.
+
+**Transparent surfaces** (`render.ssr.transparent`, `ScreenSpaceReflections.TRANSPARENT`, off by default; the graph
+rebuilds when it changes): water, glass and other blended or transmissive surfaces reflect the opaque scene around them
+(a river the cliffs, trees and houses on its banks), not only the environment. They are drawn after the reflections
+pass, by the view's transparency technique, so there is no surface image to trace from; each of their fragments traces
+its own mirror ray, inline in its fragment shader, as it is shaded (`TransparentReflections`,
+`reflections/transparent.slang`):
+
+```java
+graph.settings().set(ScreenSpaceReflections.TRANSPARENT, true);  // every view's transparency, while render.ssr is on
+```
+
+- **What it traces through**: the opaque scene as transparency finds it, which both exist by then: a copy of its depth
+  (`DepthCopy`, one compute pass: the blended draw tests the depth itself as its attachment), its nearest-depth pyramid
+  (`DepthPyramid` with `nearest`, the one `HIZ` already makes, shared) and its color with the mip chain (`SceneBehind`,
+  the scene behind transmissive surfaces, made for blended ones too while this is on).
+- **How**: `HIZ`'s hierarchical march, from the fragment's point along `reflect(-v, n)` of its shading normal (normal
+  maps, a double-sided back face turned), whichever engine kind `render.ssr` names, with that kind's tunables
+  (`maxSteps`, `thickness`, `maxDistance`, `roughnessCutoff`, `edgeFade`; `resolutionScale` does not apply), read as
+  frames record. The thickness test's normal at the pixel the ray went behind is rebuilt from the depth (the surface
+  outputs need not exist). Off: no reflection of its own (`render.ssr=off` or a game's own kind).
+- **What it adds**: as the opaque composite, color + reflectance x trust x (scene at the hit - environment along the
+  ray), the reflectance being the environment's weight shading gave the fragment (Fresnel, the split sum, occlusion,
+  sheen and coat, the media in front), the environment the view's indirect-light table with its indirect hooks (or the
+  constant sky); trust falls at the image's edges, over the last fifth of the distance, from three quarters of the
+  cutoff in roughness and with how far behind the depth the ray went, so energy stays as shading had it. Rough
+  surfaces take the scene at the hit blurred by the GGX lobe's cone there. Then blended by alpha (sorted) or weighed
+  (weighted) as before: what a half-transparent layer lets through is unchanged.
+- **Everywhere blended surfaces are drawn**: `SORTED` and `WEIGHTED`, forward shading on both meshlet paths (indexed
+  and mesh shaders, lean or not), the visibility buffer's blended draw and classic LOD. The blended bin's pipelines are
+  made with the fragment stage's `REFLECTIONS` specialization constant set (`ShadingPipelines.REFLECTING`): off, the
+  pipelines are those of before, and the image is the same pixel for pixel (`TransparentReflectionsTest`, and compared
+  against the engine before the change on every path and kind). A material type of a library built against an engine
+  without it (an older engine-render's templates) has no reflections and no failure: its shader has no such constant.
+- **Limits**: one ray per fragment, no reconstruction from neighbors' rays or spatial filter (a fragment cannot see
+  them): the outlines of reflected objects are not antialiased by it, and a rough surface's reflection of an object
+  against the sky keeps a sharper outline than the opaque one's. Only the opaque scene is reflected: not other blended
+  surfaces, particles, or what is off screen or behind what the camera sees (the environment then). Each layer of
+  blended surfaces traces its own rays, so overdraw multiplies the cost. Planar water stays clean of its own bed: a
+  mirror ray from the plane stays above it, in front of everything under it.
+
+What it costs (`TransparentReflectionsBenchmark`, RX 9070 XT, 2026-11-09): a lake (a transmissive plane, roughness
+0.05) filling most of the view below the horizon among 30,000 glossy rocks on the terrain, partly under water, which it
+reflects; opaque reflections `hiz` on in both (their pyramid shared), a uniform environment, half-float color, 64
+steps; 4 rounds after 2 uncounted ones, ranges of the rounds' medians, JaCoCo off. Blended draw: the transparency
+pass's draw ("meshlets blended"), where the rays are traced. Depth copy: `DepthCopy`'s pass (timed 0.000 ms at 1080p,
+below what the pass timings resolved). Other GPU work ran alongside during the measurement and spread the frames'
+ranges (up to 38 ms); the fastest round of each is given, and the pass times, which stayed tight, are the cost.
+
+| Size | Path | Way | Blended draw, off | Blended draw, on | Depth copy | Frame, off (fastest round) | Frame, on (fastest round) |
+|---|---|---|---|---|---|---|---|
+| 1080p | forward, mesh shaders | sorted | 0.049-0.050 ms | 0.118-0.120 ms | 0.000 ms | 2.084 ms | 2.142 ms |
+| 1080p | forward, mesh shaders | weighted | 0.053-0.054 ms | 0.123-0.125 ms | 0.000 ms | 2.049 ms | 2.154 ms |
+| 1080p | forward, indexed | sorted | 0.046-0.047 ms | 0.117-0.137 ms | 0.000 ms | 1.707 ms | 1.771 ms |
+| 1080p | forward, indexed | weighted | 0.050-0.057 ms | 0.120-0.121 ms | 0.000 ms | 1.661 ms | 1.766 ms |
+| 1080p | visibility buffer | sorted | 0.050-0.052 ms | 0.119-0.120 ms | 0.000 ms | 1.712 ms | 1.813 ms |
+| 1080p | visibility buffer | weighted | 0.053-0.059 ms | 0.124-0.125 ms | 0.000 ms | 1.686 ms | 1.764 ms |
+| 4K | forward, mesh shaders | sorted | 0.173-0.180 ms | 0.439-0.465 ms | 0.014-0.016 ms | 5.968 ms | 6.210 ms |
+| 4K | forward, mesh shaders | weighted | 0.184-0.186 ms | 0.456-0.478 ms | 0.015-0.016 ms | 5.898 ms | 6.315 ms |
+| 4K | forward, indexed | sorted | 0.159-0.171 ms | 0.427-0.462 ms | 0.013-0.015 ms | 5.266 ms | 5.538 ms |
+| 4K | forward, indexed | weighted | 0.172-0.184 ms | 0.440-0.475 ms | 0.015 ms | 5.227 ms | 5.641 ms |
+| 4K | visibility buffer | sorted | 0.171-0.180 ms | 0.440-0.459 ms | 0.033-0.036 ms | 5.234 ms | 5.560 ms |
+| 4K | visibility buffer | weighted | 0.183-0.191 ms | 0.451-0.473 ms | 0.034-0.035 ms | 5.257 ms | 5.571 ms |
+
+The rays cost 0.06-0.07 ms of the blended draw at 1080p and 0.25-0.29 ms at 4K with water over most of the image,
+alike for both ways and every path; with the copy, 0.28-0.32 ms at 4K. Off, nothing is added (no pass, the pipelines
+of before).
 
 
 ## Ray tracing

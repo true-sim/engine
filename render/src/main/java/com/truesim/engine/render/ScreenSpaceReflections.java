@@ -43,7 +43,8 @@ import java.util.Objects;
  * reflections are its own (no latency, no ghosting).
  *
  * <p>It modifies {@link Keys#SCENE_COLOR} at {@link Order#SCREEN_SPACE_LIGHTING}, after the background ({@link SkyBackground}),
- * before transparency: blended and transmissive surfaces get none, and are not seen in reflections. Per view (each eye,
+ * before transparency: blended and transmissive surfaces are not seen in reflections, and get none of their own but
+ * with {@link #TRANSPARENT}, which has the transparency pass trace theirs ({@link TransparentReflections}). Per view (each eye,
  * each window), within the view's render region (dynamic resolution); one per view under {@link #ID}, as transparency
  * is, where ray-traced reflections will be another kind (#379). Needs a shading technique providing the surface outputs
  * ({@link ClusteredForwardShading}, {@link VisibilityBufferShading}), which writes them only while this asks (the slot
@@ -125,7 +126,16 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
     public static final TechniqueKind<March, ScreenSpaceReflections, Technique> HIZ = TechniqueKind.of(SLOT, "hiz",
         MARCH, "a hierarchical march over the depth pyramid", (ssr, config) -> ssr.new Engine(Mode.HIZ));
 
-    /** Every setting of screen-space reflections: the choice and the engine's kinds' tunables. */
+    /**
+     * Whether blended and transmissive surfaces reflect the opaque scene too ({@code render.ssr.transparent}, off by
+     * default; the graph rebuilds when it changes): each of their fragments traces its mirror ray inline as the
+     * transparency pass draws it ({@link TransparentReflections}), with the chosen kind's tunables, while
+     * {@link #SLOT} is one of the engine's kinds. Off: their shading exactly as without it.
+     */
+    public static final Setting<Boolean> TRANSPARENT = Setting.bool("render.ssr.transparent", false,
+        "screen-space reflections on blended and transmissive surfaces (water, glass) too");
+
+    /** Every setting of screen-space reflections: the choice, the engine's kinds' tunables, transparent surfaces'. */
     public static final List<Setting<?>> ALL = all();
 
     /** The hit image's format: where (0 to 1 of the region), how far (of the maximum distance), how trusted. */
@@ -146,6 +156,7 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
         all.add(SLOT.setting());
         all.addAll(LINEAR.settings());
         all.addAll(HIZ.settings());
+        all.add(TRANSPARENT);
         return List.copyOf(all);
     }
 
@@ -329,9 +340,10 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
 
     /**
      * Registers its settings in {@code registry} for discovery ({@link SettingRegistry#all(String)}): the slot, its
-     * kinds' tunables with it, hidden. The plugin of the module holding it calls this.
+     * kinds' tunables with it, and {@link #TRANSPARENT}, hidden. The plugin of the module holding it calls this.
      */
     public static void register(SettingRegistry registry) {
         registry.addHiddenSlots(SLOT);
+        registry.addHidden(TRANSPARENT);
     }
 }

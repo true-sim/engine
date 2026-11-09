@@ -117,6 +117,16 @@ public interface Transparency extends Technique {
      */
     static com.truesim.engine.graph.Image behind(GraphBuilder g, Materials materials,
         com.truesim.engine.graph.Image color) {
-        return materials != null && materials.hasTransmissive() ? g.request(new SceneBehind(color, g.view())) : null;
+        return behind(g, materials, color, null);
+    }
+
+    /**
+     * Like {@link #behind(GraphBuilder, Materials, com.truesim.engine.graph.Image)}, also wherever blended surfaces
+     * trace {@code reflections} (non-null): they take the opaque scene's color from it.
+     */
+    static com.truesim.engine.graph.Image behind(GraphBuilder g, Materials materials,
+        com.truesim.engine.graph.Image color, TransparentReflections reflections) {
+        return materials != null && (materials.hasTransmissive() || reflections != null && materials.hasBlended())
+            ? g.request(new SceneBehind(color, g.view())) : null;
     }
 }

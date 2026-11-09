@@ -185,6 +185,13 @@ final class RasterPipelines implements AutoCloseable {
     @AllowAllocation("building the graph, when it changes")
     ShadingPipelines.Key forwardKey(MaterialType type, int features, int bin, boolean meshShading, int target,
         ShadingHooks.Set hooks) {
+        return forwardKey(type, features, bin, meshShading, target, hooks, false);
+    }
+
+    /** Like the above; with {@code reflecting}, its fragment stage traces reflections ({@link TransparentReflections}). */
+    @AllowAllocation("building the graph, when it changes")
+    ShadingPipelines.Key forwardKey(MaterialType type, int features, int bin, boolean meshShading, int target,
+        ShadingHooks.Set hooks, boolean reflecting) {
         boolean lean = meshShading && slimMeshes;
         boolean weighted = target == ShadingPipelines.WEIGHTED;
         boolean surfaces = target == ShadingPipelines.COLOR_SURFACES;
@@ -196,8 +203,8 @@ final class RasterPipelines implements AutoCloseable {
             displaces ? type.name() + (!meshShading ? "VertexMain" : lean ? "MeshLeanMain" : "MeshIdsMain")
             : !meshShading ? "vertexMain" : lean ? "meshLeanTypedMain" : "meshIdsTypedMain", meshShading,
             lean ? type.forwardLeanShader() : type.forwardShader(), type.name() + (lean ? "Lean" : "") + suffix,
-            features, type.geometry(), bin == BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED,
-            target, DRAW_PUSH, hooks);
+            features, type.geometry(), (bin == BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED)
+            | (reflecting ? ShadingPipelines.REFLECTING : 0), target, DRAW_PUSH, hooks);
     }
 
     /**
@@ -209,6 +216,7 @@ final class RasterPipelines implements AutoCloseable {
         private final boolean surfaces; // the opaque bins' pipelines write the surface outputs too
         private final boolean opaque;   // false: the blended bin's pipelines only (a transparency pass's)
         private final ShadingHooks.Set hooks; // the shading hooks the view runs (SHADING_HOOKS_<n>)
+        private final boolean reflecting; // the blended bin's weighted and over pipelines trace reflections
         private final MaterialType[] types;
         private final int[] features;
         private final int[] rasters;
@@ -219,8 +227,9 @@ final class RasterPipelines implements AutoCloseable {
 
         @AllowAllocation("building the graph, when it changes")
         private Typed(Materials materials, boolean meshShading, boolean surfaces, boolean opaque,
-            ShadingHooks.Set hooks) {
+            ShadingHooks.Set hooks, boolean reflecting) {
             this.surfaces = surfaces;
+            this.reflecting = reflecting;
             this.hooks = hooks;
             this.opaque = opaque;
             int bins = materials.binCount();
@@ -254,9 +263,9 @@ final class RasterPipelines implements AutoCloseable {
                                 : ShadingPipelines.COLOR, hooks));
                         if (bin == BIN_BLENDED) {
                             w[category] = store.get(forwardKey(types[category], features[category], bin, path == 1,
-                                ShadingPipelines.WEIGHTED, hooks));
+                                ShadingPipelines.WEIGHTED, hooks, reflecting));
                             o[category] = store.get(forwardKey(types[category], features[category], bin, path == 1,
-                                ShadingPipelines.OVER, hooks));
+                                ShadingPipelines.OVER, hooks, reflecting));
                         }
                     }
                 }
@@ -425,7 +434,7 @@ final class RasterPipelines implements AutoCloseable {
     /** The typed pipelines of {@code materials}' shading bins, as they are now (made where they are not yet). */
     @AllowAllocation("building the graph, when it changes")
     Typed typed(Materials materials, boolean meshShading) {
-        return new Typed(materials, meshShading, false, true, ShadingHooks.Set.NONE);
+        return new Typed(materials, meshShading, false, true, ShadingHooks.Set.NONE, false);
     }
 
     /**
@@ -436,7 +445,17 @@ final class RasterPipelines implements AutoCloseable {
     @AllowAllocation("building the graph, when it changes")
     Typed typed(Materials materials, boolean meshShading, boolean surfaces, boolean opaque,
         ShadingHooks.Set hooks) {
-        return new Typed(materials, meshShading, surfaces, opaque, hooks);
+        return typed(materials, meshShading, surfaces, opaque, hooks, false);
+    }
+
+    /**
+     * Like {@link #typed(Materials, boolean, boolean, boolean, ShadingHooks.Set)}; with {@code reflecting}, the blended
+     * bin's weighted and over pipelines trace screen-space reflections ({@link TransparentReflections}).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    Typed typed(Materials materials, boolean meshShading, boolean surfaces, boolean opaque,
+        ShadingHooks.Set hooks, boolean reflecting) {
+        return new Typed(materials, meshShading, surfaces, opaque, hooks, reflecting);
     }
 
     /**
@@ -467,10 +486,20 @@ final class RasterPipelines implements AutoCloseable {
      */
     void drawBlendedTyped(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading,
         BlendedTargets.Kind kind, long clusters, long behind, long indirect, Typed pipelines) {
+        drawBlendedTyped(commands, scene, v, meshShading, kind, clusters, behind, indirect, 0, pipelines);
+    }
+
+    /**
+     * Like the above, with the push words of transparent surfaces' reflections at {@code reflections} (0: none;
+     * {@link TransparentReflections#words}), for pipelines tracing them.
+     */
+    void drawBlendedTyped(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading,
+        BlendedTargets.Kind kind, long clusters, long behind, long indirect, long reflections, Typed pipelines) {
         int room = checkSplit(v, pipelines);
         boolean weighted = kind == BlendedTargets.Kind.WEIGHTED;
         try (MemoryStack stack = stackPush()) {
             long push = typedPush(stack, scene, v, false, clusters, behind, indirect, room);
+            TransparentReflections.copyWords(reflections, push);
             if (!meshShading) {
                 Commands.bindIndexBuffer(commands, v.frameIndices().handle(), 0, VK_INDEX_TYPE_UINT32);
             }

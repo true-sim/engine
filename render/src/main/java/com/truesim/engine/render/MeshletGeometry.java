@@ -202,7 +202,8 @@ public final class MeshletGeometry implements GeometryProvider {
         if (load) {
             throw new IllegalStateException("Meshlets are drawn first, before other geometry");
         }
-        RasterPipelines.Typed typed = typed(g, view, true, false, false, targets.hooks()); // the opaque draw split them
+        RasterPipelines.Typed typed = view.splitCategories() > 0 // the opaque draw split them
+            ? renderer.forwardPipelines(false, false, targets.hooks(), targets.reflections() != null) : null;
         if (typed == null) {
             throw new IllegalStateException("View " + view.index() + " draws blended surfaces but its lists are not "
                 + "split by shading bin: its opaque draw is built first, shaded or as IDs with blended materials");
@@ -248,8 +249,11 @@ public final class MeshletGeometry implements GeometryProvider {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            renderer.drawBlendedTypedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights),
-                SceneBehind.words(ctx, behind), targets.indirectAddress(ctx), typed);
+            try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                renderer.drawBlendedTypedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights),
+                    SceneBehind.words(ctx, behind), targets.indirectAddress(ctx), targets.reflectionWords(ctx, stack),
+                    typed);
+            }
         });
     }
 
