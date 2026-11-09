@@ -762,6 +762,99 @@ class ShadowsTest {
     }
 
     @Test
+    void castersFarTowardsTheSunShadowEveryCascade() {
+        // The showcase's sun, low: four cascades of 4096 texels reaching 600 units (splits about 38, 81, 163). A row of
+        // screens facing the camera, each farther than the last and as much larger, past every split, each with a caster
+        // between it and the sun whose shadow falls on its middle: first close to it, then 1000 units away towards
+        // the sun, as a mountain stands between a valley and a low sun. Both shadow every screen. Each cascade drew only
+        // the casters within shadows.cascades.casters (100) beyond its slice: the far ones were clipped by its near
+        // plane and culled, and no cascade shadowed (#468). Flattened onto its near plane (depth clamped), they cast.
+        double[] depths = {10, 30, 60, 120, 300, 500};
+        double sl = Math.sqrt(0.6 * 0.6 + 0.25 * 0.25 + 0.75 * 0.75); // behind the camera, to the right
+        double[] sun = {-0.6 / sl, -0.25 / sl, -0.75 / sl};
+        float s45 = (float) Math.sqrt(0.5);
+        // The casters face the sun: the quad's +y turned onto the direction to it
+        double ax = -sun[2];
+        double az = sun[0];
+        double al = Math.sqrt(ax * ax + az * az);
+        double half = Math.acos(-sun[1]) / 2;
+        float[] facing = {(float) (ax / al * Math.sin(half)), 0, (float) (az / al * Math.sin(half)),
+            (float) Math.cos(half)};
+        camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        scene.remove(0);
+        scene.remove(1);
+        try (Lights lights = new Lights(device, 1, 4)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            lights.shadow(0, ShadowSpec.cascades(4, 4096, 600));
+            for (double away : new double[] {0.15, 1000}) {
+                for (int i = 0; i < depths.length; i++) {
+                    double d = depths[i];
+                    double x = d * Math.tan(Math.toRadians(-25 + 10 * i));
+                    scene.set(2 * i, quad, 0, x, 0, -d, s45, 0, 0, s45, (float) (0.1 * d), 1, (float) (0.1 * d));
+                    double g = away < 1 ? away * d : away; // towards the sun from the screen's middle
+                    scene.set(2 * i + 1, quad, 0, x - sun[0] * g, -sun[1] * g, -d - sun[2] * g, facing[0],
+                        facing[1], facing[2], facing[3], (float) (0.02 * d), 1, (float) (0.02 * d));
+                }
+                for (Function<SceneView, Technique> shading : List.of(forward(geometry), visibility(geometry))) {
+                    SceneView main = newGraph();
+                    main.port().add(shading.apply(main)).add(new ClusteredLights(lights, main))
+                        .add(owner(geometry, lights).view(main));
+                    main.port().output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+                    frame(colorTarget, 4);
+                    frame(colorTarget, 4);
+                    byte[] color = frame(colorTarget, 4);
+                    for (int i = 0; i < depths.length; i++) {
+                        double d = depths[i];
+                        double x = d * Math.tan(Math.toRadians(-25 + 10 * i));
+                        int lit = red(color, pixel(x + 0.06 * d, -0.06 * d, -d));
+                        int middle = red(color, pixel(x, 0, -d));
+                        assertThat(middle).as("a caster %s away: the screen at %s shadowed in its middle, against %d lit",
+                            away < 1 ? away + " d" : away, d, lit).isLessThan(lit / 2);
+                    }
+                }
+            }
+            // The cascades tinted (shadows.cascades.debug), red, green, blue, yellow by depth; a fifth of the light in
+            // their shadows
+            graph.settings().set(ShadowSettings.CASCADE_DEBUG, true);
+            frame(colorTarget, 4);
+            byte[] color = frame(colorTarget, 4);
+            graph.settings().reset(ShadowSettings.CASCADE_DEBUG);
+            int[][] expected = {{0, 1}, {0, 2}, {1, 0}, {2, 0}, {3, 2}, {3, 2}}; // channel above, channel below
+            for (int i = 0; i < depths.length; i++) {
+                double d = depths[i];
+                double x = d * Math.tan(Math.toRadians(-25 + 10 * i));
+                for (int p : new int[] {pixel(x + 0.06 * d, -0.06 * d, -d), pixel(x, 0, -d)}) {
+                    int[] rgb = {color[4 * p] & 0xff, color[4 * p + 1] & 0xff, color[4 * p + 2] & 0xff};
+                    int[] e = expected[i];
+                    int above = e[0] == 3 ? Math.min(rgb[0], rgb[1]) : rgb[e[0]];
+                    assertThat(above).as("tinted at %s: %s", d, java.util.Arrays.toString(rgb))
+                        .isGreaterThan(rgb[e[1]]);
+                }
+            }
+        }
+        for (int i = 0; i < 2 * depths.length; i++) {
+            scene.remove(i);
+        }
+        camera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        scene.set(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
+    /** The red channel, averaged over 3 x 3 pixels about {@code pixel}: a shadow's coverage, not one texel's. */
+    private static int red(byte[] color, int pixel) {
+        int sum = 0;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                sum += color[4 * (pixel + dx + dy * SIZE)] & 0xff;
+            }
+        }
+        return sum / 9;
+    }
+
+    @Test
     void lightsOfOneFrameMixTechniques() {
         assumeThat(device.rayTracing()).as("ray tracing").isTrue();
         rayTracing = new RayTracing(device, pool, 16);

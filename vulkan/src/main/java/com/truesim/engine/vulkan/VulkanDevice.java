@@ -136,6 +136,7 @@ public final class VulkanDevice implements AutoCloseable {
     private final boolean rayTracing;
     private final boolean anisotropic;
     private final boolean cubeArrays;
+    private final boolean depthClamp;
     private final boolean bcTextures;
     private final boolean astcTextures;
     private final boolean primitiveIds;
@@ -196,6 +197,8 @@ public final class VulkanDevice implements AutoCloseable {
             vkGetPhysicalDeviceProperties(gpu.handle(), properties);
             this.anisotropic = core.samplerAnisotropy();
             this.cubeArrays = core.imageCubeArray();
+            // Depth clamped, not clipped (depthClamp): a sun's casters between it and a shadow map flattened onto it
+            this.depthClamp = core.depthClamp();
             // Compressed textures where the GPU takes them: BC on desktop GPUs, ASTC on mobile ones.
             this.bcTextures = core.textureCompressionBC();
             this.astcTextures = core.textureCompressionASTC_LDR();
@@ -343,6 +346,7 @@ public final class VulkanDevice implements AutoCloseable {
             features.features().shaderInt64(true).shaderInt16(true).multiDrawIndirect(true)
                 .drawIndirectFirstInstance(true).shaderStorageImageReadWithoutFormat(true)
                 .shaderStorageImageWriteWithoutFormat(true).samplerAnisotropy(anisotropic).imageCubeArray(cubeArrays)
+                .depthClamp(depthClamp)
                 .independentBlend(true)
                 .geometryShader(primitiveIds).textureCompressionBC(bcTextures).textureCompressionASTC_LDR(astcTextures)
                 .pipelineStatisticsQuery(pipelineStatistics);
@@ -763,6 +767,14 @@ public final class VulkanDevice implements AutoCloseable {
      */
     public boolean primitiveIds() {
         return primitiveIds;
+    }
+
+    /**
+     * Whether pipelines may clamp depth instead of clipping it (depthClamp): nearly every GPU can. Shadow maps of
+     * directional lights clamp, so casters between the light and a map's depth range cast onto it.
+     */
+    public boolean depthClamp() {
+        return depthClamp;
     }
 
     /** Whether images may hold several cube maps (imageCubeArray): nearly every GPU can. */

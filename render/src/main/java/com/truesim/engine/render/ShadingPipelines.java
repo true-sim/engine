@@ -52,6 +52,11 @@ final class ShadingPipelines implements AutoCloseable {
     static final int DOUBLE_SIDED = 1;
     /** Flag: clockwise front faces (classic LOD's mirrored instances). */
     static final int CLOCKWISE = 2;
+    /**
+     * Flag: depth clamped, not clipped (shadow casters, {@link Pipeline.Graphics#depthClamp}): what lies between a
+     * directional light and its map's depth range is flattened onto the map's near plane.
+     */
+    static final int CLAMPED = 4;
 
     /**
      * What a pipeline is made of: its geometry stage (a vertex or mesh entry point), its fragment stage (or none, for
@@ -165,6 +170,9 @@ final class ShadingPipelines implements AutoCloseable {
             }
             if ((key.raster() & CLOCKWISE) != 0) {
                 graphics.clockwise();
+            }
+            if ((key.raster() & CLAMPED) != 0) {
+                graphics.depthClamp();
             }
             Pipeline pipeline = switch (key.target()) {
                 case COLOR -> graphics.color(colorFormat).depth(depthFormat).build();

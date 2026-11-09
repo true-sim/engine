@@ -237,6 +237,7 @@ public final class Pipeline implements AutoCloseable {
         private int depthCompare = VK_COMPARE_OP_GREATER_OR_EQUAL; // reverse depth
         private boolean depthWrite = true;
         private boolean depthBias;
+        private boolean depthClamp;
         private float depthBiasConstant;
         private float depthBiasSlope;
         private boolean clockwise;
@@ -323,6 +324,16 @@ public final class Pipeline implements AutoCloseable {
         public Graphics depthTest(int compareOp, boolean write) {
             this.depthCompare = compareOp;
             this.depthWrite = write;
+            return this;
+        }
+
+        /**
+         * Clamps depth to the viewport's range instead of clipping what lies beyond it (where the device has
+         * {@link VulkanDevice#depthClamp}; else it clips, as without): a directional light's shadow map, onto whose near
+         * plane the casters between it and the light are flattened.
+         */
+        public Graphics depthClamp() {
+            this.depthClamp = device.depthClamp();
             return this;
         }
 
@@ -424,6 +435,7 @@ public final class Pipeline implements AutoCloseable {
                         .scissorCount(1))
                     .pRasterizationState(VkPipelineRasterizationStateCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO)
+                        .depthClampEnable(depthClamp)
                         .polygonMode(VK_POLYGON_MODE_FILL)
                         .cullMode(cullBack ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE)
                         .frontFace(clockwise ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE)

@@ -85,6 +85,7 @@ public final class RenderView implements AutoCloseable {
     private boolean indicesDeclared;
     private final double[] position = new double[3];
     private final float[] viewProjection = new float[16]; // as last set, to be the next frame's previous one
+    private final float[] planes = new float[24]; // as last set: a far plane or an open near side changes them alone
     private boolean wasSet;
     // The frame before's camera, taken at a frame's first write: writes again in the frame (a pass refreshing it after
     // another, a draw setting it twice) keep it, rather than taking the frame's own as the frame before's.
@@ -227,6 +228,12 @@ public final class RenderView implements AutoCloseable {
                 return true;
             }
         }
+        float[] fromPlanes = from.planes();
+        for (int i = 0; i < 24; i++) {
+            if (fromPlanes[i] != planes[i]) {
+                return true;
+            }
+        }
         return from.position(0) != position[0] || from.position(1) != position[1] || from.position(2) != position[2];
     }
 
@@ -282,9 +289,10 @@ public final class RenderView implements AutoCloseable {
         for (int i = 0; i < 16; i++) {
             putFloat(ViewLayout.VIEW_PROJECTION + 4L * i, matrix[i]);
         }
-        float[] planes = camera.planes();
+        float[] cameraPlanes = camera.planes();
+        System.arraycopy(cameraPlanes, 0, planes, 0, 24);
         for (int i = 0; i < 24; i++) {
-            putFloat(ViewLayout.PLANES + 4L * i, planes[i]);
+            putFloat(ViewLayout.PLANES + 4L * i, cameraPlanes[i]);
         }
         projectionScale = camera.projectionScale();
         putFloat(ViewLayout.PROJECTION_SCALE, projectionScale * detail);

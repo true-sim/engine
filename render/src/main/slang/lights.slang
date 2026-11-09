@@ -74,6 +74,11 @@ public static const uint SHADOW_MAP = 0;
 public static const uint SHADOW_MASK = 1;
 /** No shadow: an entry no technique of the view set reads as lit. */
 public static const uint SHADOW_NONE = 3;
+/**
+ * Above the kind's low 8 bits: the entry tints what it lights by its place among its light's entries (debugging: a
+ * directional light's cascades, shadows.cascades.debug).
+ */
+public static const uint SHADOW_TINTED = 0x100;
 
 /**
  * Shadow map filters, in the low 8 bits of an entry's filter word; above them the kernel's half-width in sixteenths of
@@ -459,7 +464,7 @@ public struct MaskShadow : IShadow
 /** Shadow entry `s` evaluated by its kind's IShadow. */
 public float shadowVisibility(Shadow s, ShadowQuery q)
 {
-    switch (s.kind)
+    switch (s.kind & 0xff)
     {
     case SHADOW_MAP:
         return (s.filter & 0xff) <= PCSS ? PcfShadow().visibility(s, q) : 1;
@@ -474,6 +479,14 @@ public float shadowVisibility(Shadow s, ShadowQuery q)
 float dither(uint2 pixel)
 {
     return frac(52.9829189 * frac(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)));
+}
+
+/** A tinted entry's colour by its place among its light's: red, green, blue, yellow, cyan, magenta, white, gray. */
+float3 entryTint(uint i)
+{
+    static const float3 tints[8] = { float3(1, 0.2, 0.2), float3(0.2, 1, 0.2), float3(0.25, 0.4, 1), float3(1, 1, 0.2),
+        float3(0.2, 1, 1), float3(1, 0.2, 1), float3(1, 1, 1), float3(0.5, 0.5, 0.5) };
+    return tints[min(i, 7u)];
 }
 
 /**
@@ -568,7 +581,10 @@ public float3 lightIrradiance(LightListHeader h, Light light, float3 world, floa
         Shadow entry = shadows[shadow];
         ShadowQuery q = { world + h.toEntry(entry), normal, toLight, distance, pixel, depth, length(world),
             light.radius };
-        irradiance *= shadowVisibility(entry, q);
+        float visibility = shadowVisibility(entry, q);
+        // Tinted (debugging): a fifth of the light through the shadow too, so the entry shows where it shadows
+        irradiance *= (entry.kind & SHADOW_TINTED) != 0
+            ? entryTint(uint(shadow - light.shadowFirst)) * lerp(0.2, 1.0, visibility) : visibility;
     }
     return irradiance;
 }

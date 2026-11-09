@@ -127,6 +127,7 @@ public final class Shadows implements AutoCloseable {
     private boolean anyLayered;
     private int movingDrawn;
     private final ShadowLayerPush layerPush = new ShadowLayerPush();
+    private boolean pancake = true; // ShadowSettings.CASCADE_PANCAKE, as last prepared
     private boolean layering; // CASTER_LAYERS as the graph was built
     // Moving casters: per instance the frame of its last move, and a flag while it counts as moving (two bits per id,
     // sixteen a word: the draw views' highlight flags), uploaded each frame; the moving ids
@@ -605,6 +606,11 @@ public final class Shadows implements AutoCloseable {
             forgetTiles();
             structure++;
             stats.structureChange = "a new atlas size";
+        }
+        boolean pancakeNow = settings.get(ShadowSettings.CASCADE_PANCAKE);
+        if (pancakeNow != pancake) {
+            pancake = pancakeNow;
+            allDirty = true; // every map drawn again, with or without the casters before its range
         }
         float detail = settings.get(ShadowSettings.CASTER_DETAIL);
         if (detail != casterDetail) {
@@ -2199,6 +2205,8 @@ public final class Shadows implements AutoCloseable {
             EngineSettings settings = port.settings();
             float casters = settings.get(ShadowSettings.CASCADE_CASTERS);
             float lambda = settings.get(ShadowSettings.CASCADE_LAMBDA);
+            // Casters between the sun and the cascade's range flattened onto its near plane (clamped depth), not left out
+            boolean flatten = pancake && renderer.device().depthClamp();
             float casterError = Math.max(0, casterDetail - 1);
             Camera camera = view.camera();
             for (Group group : cascades) {
@@ -2216,6 +2224,9 @@ public final class Shadows implements AutoCloseable {
                         continue;
                     }
                     double texel = fit.place(i, tile.size, casters, tile.camera);
+                    if (flatten) {
+                        tile.camera.openNear();
+                    }
                     double depth = 2 * fit.radius(i) + casters;
                     tile.bias = (float) ((biasTexels / 3 + casterError) * texel / depth);
                     tile.normalOffset = (float) (biasTexels * texel);
@@ -2297,6 +2308,7 @@ public final class Shadows implements AutoCloseable {
                 : ShadowTable.PCF;
             float radius = settings.get(ShadowSettings.MAP_FILTER_RADIUS);
             float widest = settings.get(ShadowSettings.MAP_PENUMBRA);
+            boolean debug = settings.get(ShadowSettings.CASCADE_DEBUG);
             for (int light = 0; light < count; light++) {
                 int used = 0;
                 Group group = (anchor != null ? anchor : this).cascades[light];
@@ -2304,6 +2316,9 @@ public final class Shadows implements AutoCloseable {
                     used = writeShared(table, light, entry, atlasSlot, filter, radius, widest);
                     if (used == 0 && group != null && group.usedNow && !group.droppedNow) {
                         used = writeCascades(table, group, entry, atlasSlot, filter, radius, widest);
+                        for (int i = 0; debug && i < used; i++) {
+                            table.tinted(entry + i);
+                        }
                     }
                 }
                 if (used == 0) {

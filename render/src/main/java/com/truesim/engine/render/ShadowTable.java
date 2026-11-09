@@ -23,6 +23,7 @@ public final class ShadowTable implements AutoCloseable {
     static final int SHADOW_BYTES = 128;
     private static final int SHADOW_MAP = LightsConstants.SHADOW_MAP;
     private static final int SHADOW_MASK = LightsConstants.SHADOW_MASK;
+    private static final int TINTED = LightsConstants.SHADOW_TINTED;
     private static final int SHADOW_NONE = LightsConstants.SHADOW_NONE;
     /** Shadow map filters (lights.slang): percentage-closer filtering over a tent of fixed width. */
     public static final int PCF = LightsConstants.PCF;
@@ -183,6 +184,18 @@ public final class ShadowTable implements AutoCloseable {
             throw new IllegalArgumentException("Not a shadow map filter: " + kind);
         }
         shadows.putInt((long) SHADOW_BYTES * entry + 68, filterWord(kind, radius, widest));
+        return this;
+    }
+
+    /**
+     * Entry {@code entry} (set before) tints what it lights by its place among its light's entries, for debugging: a
+     * directional light's cascades red, green, blue, yellow, then cyan, magenta, white, gray (lights.slang). Allocates
+     * nothing.
+     */
+    public ShadowTable tinted(int entry) {
+        Objects.checkIndex(entry, capacity);
+        long o = (long) SHADOW_BYTES * entry + 64;
+        shadows.putInt(o, shadows.getInt(o) | TINTED);
         return this;
     }
 

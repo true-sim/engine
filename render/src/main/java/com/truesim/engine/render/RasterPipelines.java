@@ -93,7 +93,8 @@ final class RasterPipelines implements AutoCloseable {
                             VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain")).depth(depthFormat).build());
                         mesh[SHADOW] = bins(bin -> (masking(bin) ? shadowOnly(raster(bin, meshShader,
                             VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain").doubleSided(), bin, drawShader)
-                            : raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain").doubleSided())
+                            : raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain").doubleSided()
+                                .depthClamp())
                             .depth(depthFormat).build());
                     } else {
                         mesh[DEPTH] = bins(bin -> depthOnly(raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
@@ -335,8 +336,9 @@ final class RasterPipelines implements AutoCloseable {
             fragmentEntry = masked ? "maskedIdsMain" : "idsMain";
         }
         return new ShadingPipelines.Key(geometryShader, geometryEntry, meshShading, fragmentShader, fragmentEntry, 0,
-            type == null ? 0 : type.geometry(), bin == BIN_OPAQUE && !shadow ? ShadingPipelines.CULL_BACK
-            : ShadingPipelines.DOUBLE_SIDED, depth ? ShadingPipelines.DEPTH : ShadingPipelines.IDS, DRAW_PUSH,
+            type == null ? 0 : type.geometry(), (bin == BIN_OPAQUE && !shadow ? ShadingPipelines.CULL_BACK
+            : ShadingPipelines.DOUBLE_SIDED) | (shadow ? ShadingPipelines.CLAMPED : 0),
+            depth ? ShadingPipelines.DEPTH : ShadingPipelines.IDS, DRAW_PUSH,
             ShadingHooks.Set.NONE);
     }
 
@@ -599,8 +601,12 @@ final class RasterPipelines implements AutoCloseable {
             : graphics;
     }
 
-    /** Casters' depth: as {@link #depthOnly}, the masked bins keeping back faces. */
+    /**
+     * Casters' depth: as {@link #depthOnly}, the masked bins keeping back faces, depth clamped (casters between a
+     * directional light and its map's depth range flattened onto its near plane).
+     */
     private static Pipeline.Graphics shadowOnly(Pipeline.Graphics graphics, int bin, ShaderModule drawShader) {
+        graphics.depthClamp();
         return masking(bin) ? graphics.stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "maskedShadowMain")
             : graphics;
     }
