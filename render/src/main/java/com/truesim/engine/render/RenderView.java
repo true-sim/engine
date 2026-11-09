@@ -440,8 +440,25 @@ public final class RenderView implements AutoCloseable {
     }
 
     private int flags() {
-        return (castersOnly ? 1 : 0) | highlightMode | (bothSides ? 4 : 0);
+        return (castersOnly ? 1 : 0) | highlightMode | (bothSides ? 4 : 0) | openNear;
     }
+
+    /**
+     * A directional light's shadow view whose pipelines clamp depth: nothing before its near plane is culled (drawn
+     * flattened onto it, pancaking), with {@code masked} also the masked and blended bins' meshlets (foliage), else
+     * those are culled there as by any view. Off by default. Allocates nothing.
+     */
+    public RenderView openNear(boolean on, boolean masked) {
+        checkOpen();
+        int bits = on ? 16 | (masked ? 32 : 0) : 0;
+        if (bits != openNear) {
+            openNear = bits;
+            putInt(ViewLayout.FLAGS, flags());
+        }
+        return this;
+    }
+
+    private int openNear; // VIEW_OPEN_NEAR, VIEW_OPEN_NEAR_MASKED
 
     /**
      * Keeps meshlets facing away from the eye (shadow casters drawn two-sided, as rays meet every face); off by default:

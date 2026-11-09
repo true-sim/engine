@@ -843,6 +843,191 @@ class ShadowsTest {
         scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
     }
 
+    @Test
+    void aForestInTheFarCascadeFitsItsLists() {
+        // 15 trees of a cluster hierarchy (bumpy patches 64 units across) a kilometre towards a low sun from a screen 400
+        // units away: flattened onto the far cascade (4 of 1024 to 600), they shadow the screen. With the views' lists
+        // held to 192 meshlets, the far cascade at the near one's detail (shadows.cascades.farDetail 1: a texel of
+        // error) wanted more and was at the limits, casters dropped; at its own (8 texels by default) they fit.
+        double sl = Math.sqrt(0.6 * 0.6 + 0.25 * 0.25 + 0.75 * 0.75);
+        double[] sun = {-0.6 / sl, -0.25 / sl, -0.75 / sl};
+        float s45 = (float) Math.sqrt(0.5);
+        int tree = pool.add(MeshletRendererTest.grid(64, 0.25f, true, VertexFormat.POSITIONS_ONLY));
+        camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double d = 400;
+        scene.set(0, quad, 0, 0, 0, -d, s45, 0, 0, s45, (float) (0.1 * d), 1, (float) (0.1 * d));
+        int trees = 0;
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 5; j++) {
+                double g = 1000 + 70 * j; // within the scene's 16 instances: it grows no table
+                scene.set(1 + trees++, tree, 0, (i - 1) * 50 - sun[0] * g, -sun[1] * g, -d - sun[2] * g, 0, 0, 0, 1,
+                    4, 4, 4);
+            }
+        }
+        try (Lights lights = new Lights(device, 1, 4)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            lights.shadow(0, ShadowSpec.cascades(4, 1024, 600));
+            for (float far : new float[] {ShadowSettings.CASCADE_FAR_DETAIL.defaultValue(), 1}) {
+                SceneView main = newGraph();
+                graph.settings().set(ShadowSettings.CASCADE_FAR_DETAIL, far).set(ShadowSettings.TILE_DRAWS, 64)
+                    .set(MeshletSettings.VIEW_DRAW_LIMIT, 192);
+                main.port().add(forward(geometry).apply(main)).add(new ClusteredLights(lights, main))
+                    .add(owner(geometry, lights).view(main));
+                main.port().output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+                int before = renderer.viewsAtLimit();
+                for (int f = 0; f < 12; f++) {
+                    frame(colorTarget, 4); // the lists grown as far as they may
+                }
+                byte[] color = frame(colorTarget, 4);
+                int atLimit = renderer.viewsAtLimit() - before;
+                if (far > 1) {
+                    assertThat(atLimit).as("views at the limits, the far cascade at its own detail").isZero();
+                    int lit = red(color, pixel(0.06 * d, -0.06 * d, -d));
+                    assertThat(red(color, pixel(0, 0, -d))).as("the screen in the forest's shadow, against %d lit", lit)
+                        .isLessThan(lit / 2);
+                } else {
+                    assertThat(atLimit).as("views at the limits, the far cascade at the near one's detail")
+                        .isPositive();
+                }
+            }
+        }
+        for (int i = 0; i <= trees; i++) {
+            scene.remove(i);
+        }
+        camera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        scene.set(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
+    @Test
+    void theFarFieldShadowsPastTheLastCascade() {
+        // Screens at 300 (the last cascade), 1200 and 3000 units (past cascades reaching 600), each shadowed by a caster
+        // towards a low sun. Past the last cascade the far field's rays shadow them; without it
+        // (shadows.cascades.farField NONE) they are lit, the last cascade's blend fading into the light.
+        assumeThat(device.rayTracing()).as("ray tracing").isTrue();
+        rayTracing = new RayTracing(device, pool, 16);
+        rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
+        double sl = Math.sqrt(0.6 * 0.6 + 0.25 * 0.25 + 0.75 * 0.75);
+        double[] sun = {-0.6 / sl, -0.25 / sl, -0.75 / sl};
+        float s45 = (float) Math.sqrt(0.5);
+        double ax = -sun[2];
+        double az = sun[0];
+        double al = Math.sqrt(ax * ax + az * az);
+        double half = Math.acos(-sun[1]) / 2;
+        float[] facing = {(float) (ax / al * Math.sin(half)), 0, (float) (az / al * Math.sin(half)),
+            (float) Math.cos(half)};
+        double[] depths = {300, 1200, 3000};
+        camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        for (int i = 0; i < depths.length; i++) {
+            double d = depths[i];
+            double x = d * Math.tan(Math.toRadians(-15 + 15 * i));
+            scene.set(2 * i, quad, 0, x, 0, -d, s45, 0, 0, s45, (float) (0.1 * d), 1, (float) (0.1 * d));
+            double g = 0.15 * d;
+            scene.set(2 * i + 1, quad, 0, x - sun[0] * g, -sun[1] * g, -d - sun[2] * g, facing[0], facing[1],
+                facing[2], facing[3], (float) (0.02 * d), 1, (float) (0.02 * d));
+        }
+        try (Lights lights = new Lights(device, 1, 8)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            lights.shadow(0, ShadowSpec.cascades(4, 1024, 600));
+            for (ShadowSettings.FarField field : ShadowSettings.FarField.values()) {
+                for (Function<SceneView, Technique> shading : List.of(forward(geometry), visibility(geometry))) {
+                    SceneView main = newGraph();
+                    graph.settings().set(ShadowSettings.CASCADE_FAR_FIELD, field);
+                    main.port().add(shading.apply(main)).add(new ClusteredLights(lights, main))
+                        .add(owner(geometry, lights).view(main));
+                    main.port().output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+                    frame(colorTarget, 4);
+                    frame(colorTarget, 4);
+                    frame(colorTarget, 4);
+                    byte[] color = frame(colorTarget, 4);
+                    for (int i = 0; i < depths.length; i++) {
+                        double d = depths[i];
+                        double x = d * Math.tan(Math.toRadians(-15 + 15 * i));
+                        int lit = red(color, pixel(x + 0.06 * d, -0.06 * d, -d));
+                        int middle = red(color, pixel(x, 0, -d));
+                        if (i == 0 || field == ShadowSettings.FarField.RAYS) {
+                            assertThat(middle).as("%s: the screen at %s shadowed, against %d lit", field, d, lit)
+                                .isLessThan(lit / 2);
+                        } else {
+                            assertThat(middle).as("%s: the screen at %s lit, as %d", field, d, lit)
+                                .isGreaterThan(lit * 9 / 10);
+                        }
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < 2 * depths.length; i++) {
+            scene.remove(i);
+        }
+        camera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        scene.set(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
+    @Test
+    void maskedCastersBeforeTheRangeCastOnlyWhenFlattenedToo() {
+        // A screen 60 units away, a caster 1000 units towards a low sun from it: opaque, it is flattened onto the
+        // cascade and shadows the screen; masked (foliage's bin), it is culled there by default
+        // (shadows.cascades.pancakeMasked off: forests towards the sun overflowed the far cascade) and flattened too
+        // with the setting on.
+        double sl = Math.sqrt(0.6 * 0.6 + 0.25 * 0.25 + 0.75 * 0.75);
+        double[] sun = {-0.6 / sl, -0.25 / sl, -0.75 / sl};
+        float s45 = (float) Math.sqrt(0.5);
+        double ax = -sun[2];
+        double az = sun[0];
+        double al = Math.sqrt(ax * ax + az * az);
+        double half = Math.acos(-sun[1]) / 2;
+        float[] facing = {(float) (ax / al * Math.sin(half)), 0, (float) (az / al * Math.sin(half)),
+            (float) Math.cos(half)};
+        double d = 60;
+        double g = 1000;
+        camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        try (Lights lights = new Lights(device, 1, 8); Materials materials = new Materials(device, 4)) {
+            int opaque = materials.add(Material.DEFAULT);
+            int masked = materials.add(Material.DEFAULT.alphaMask(0.5f));
+            scene.setMaterials(materials);
+            scene.set(0, quad, opaque, 0, 0, -d, s45, 0, 0, s45, (float) (0.1 * d), 1, (float) (0.1 * d));
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            lights.shadow(0, ShadowSpec.cascades(4, 1024, 600));
+            for (int run = 0; run < 3; run++) {
+                boolean maskedCaster = run > 0;
+                boolean flattened = run == 2;
+                scene.set(1, quad, maskedCaster ? masked : opaque, -sun[0] * g, -sun[1] * g, -d - sun[2] * g,
+                    facing[0], facing[1], facing[2], facing[3], (float) (0.02 * d), 1, (float) (0.02 * d));
+                SceneView main = newGraph();
+                graph.settings().set(ShadowSettings.CASCADE_PANCAKE_MASKED, flattened);
+                main.port().add(forward(geometry).apply(main)).add(new ClusteredLights(lights, main))
+                    .add(owner(geometry, lights).view(main));
+                main.port().output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+                frame(colorTarget, 4);
+                frame(colorTarget, 4);
+                byte[] color = frame(colorTarget, 4);
+                int lit = red(color, pixel(0.06 * d, -0.06 * d, -d));
+                int middle = red(color, pixel(0, 0, -d));
+                String what = !maskedCaster ? "opaque" : flattened ? "masked, flattened too" : "masked";
+                if (maskedCaster && !flattened) {
+                    assertThat(middle).as("%s: the screen lit, as %d", what, lit).isGreaterThan(lit * 9 / 10);
+                } else {
+                    assertThat(middle).as("%s: the screen shadowed, against %d lit", what, lit).isLessThan(lit / 2);
+                }
+            }
+            device.waitIdle();
+            scene.setMaterials(null);
+        }
+        camera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        scene.set(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
     /** The red channel, averaged over 3 x 3 pixels about {@code pixel}: a shadow's coverage, not one texel's. */
     private static int red(byte[] color, int pixel) {
         int sum = 0;

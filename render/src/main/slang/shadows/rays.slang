@@ -40,7 +40,7 @@ public struct TraceSlot
     public float softness;         // angular radius (directional) or radius
     public float distance;         // where rays end (directional; 0: unbounded)
     public uint outputB;           // soft: the denoiser's input B (zero)
-    public uint pad;
+    public float from;             // the view depth from which pixels are traced (a cascades' far field); nearer: lit
 };
 
 public static const uint TRACE_SOFT = 1;

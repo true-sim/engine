@@ -79,6 +79,8 @@ public static const uint SHADOW_NONE = 3;
  * directional light's cascades, shadows.cascades.debug).
  */
 public static const uint SHADOW_TINTED = 0x100;
+/** Bits 16-23 of a cascade's kind word: the share of its depths blended into the next entry, in 255ths (0: a tenth). */
+public static const uint SHADOW_BLEND_SHIFT = 16;
 
 /**
  * Shadow map filters, in the low 8 bits of an entry's filter word; above them the kernel's half-width in sixteenths of
@@ -490,9 +492,11 @@ float3 entryTint(uint i)
 }
 
 /**
- * The light's shadow map for a surface at `world`, `depth` from the viewer, at `pixel`, or -1. Across the last tenth of
- * a cascade's depths, pixels take the next cascade more and more (dithered by pixel): no seam where the texel size
- * changes, for one lookup.
+ * The light's shadow map for a surface at `world`, `depth` from the viewer, at `pixel`, or -1. Across the last part of
+ * a cascade's depths (its blend: the share in bits 16-23 of its kind word, SHADOW_BLEND_SHIFT), pixels take the next
+ * entry more and more (dithered by pixel): no seam where the texel size changes, for one lookup. The entry after the
+ * last cascade may be a far field (a traced mask covering every depth); without one, the last cascade's blend fades
+ * into the light, so its end is no edge either.
  */
 int shadowFor(Light light, Shadow* shadows, float3 world, float depth, uint2 pixel)
 {
@@ -505,17 +509,19 @@ int shadowFor(Light light, Shadow* shadows, float3 world, float depth, uint2 pix
         float start = 0;
         for (uint i = 0; i < light.shadowCount; i++)
         {
-            float split = shadows[light.shadowFirst + i].split;
-            if (depth <= split)
+            Shadow s = shadows[light.shadowFirst + i];
+            if (depth <= s.split)
             {
-                float band = (split - start) * 0.1;
-                if (i + 1 < light.shadowCount && depth > split - band && dither(pixel) < (depth - split + band) / band)
+                uint share = (s.kind >> SHADOW_BLEND_SHIFT) & 0xff;
+                float band = s.split >= 1.0e30 ? 0 : (s.split - start) * (share != 0 ? float(share) / 255.0 : 0.1);
+                if (band > 0 && depth > s.split - band && dither(pixel) < (depth - s.split + band) / band)
                 {
-                    return light.shadowFirst + int(i) + 1; // the next one covers these depths too
+                    // the next entry covers these depths too; past the last, the light
+                    return i + 1 < light.shadowCount ? light.shadowFirst + int(i) + 1 : -1;
                 }
                 return light.shadowFirst + int(i);
             }
-            start = split;
+            start = s.split;
         }
         return -1; // past the last cascade: lit
     }

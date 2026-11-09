@@ -52,6 +52,15 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         displacement = displacedInStages(stored, material) ? materialDisplacement(material) : 0;
         keep = meshletVisible(view, instance, m, push.meshlets, push.clusterLod, materialDoubleSided(material),
             displacement);
+        if (keep && bin >= BIN_MASKED && (view.flags & (VIEW_OPEN_NEAR | VIEW_OPEN_NEAR_MASKED)) == VIEW_OPEN_NEAR)
+        {
+            // Before the near plane of a view open there: masked meshlets (foliage) culled, not flattened
+            uint w = m * 8;
+            float3 center = toWorld(instance, asfloat(uint3(push.meshlets[w + 3], push.meshlets[w + 4],
+                push.meshlets[w + 5])));
+            float radius = (asfloat(push.meshlets[w + 6]) + displacement) * maxScale(instance);
+            keep = dot(view.planes[4].xyz, center) + view.planes[4].w >= -radius;
+        }
     }
     bool late = chunk.phase == PHASE_LATE;
     if (keep && late)

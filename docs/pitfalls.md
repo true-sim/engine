@@ -225,6 +225,17 @@ switched off.
 
 ## Shaders and the GPU
 
+**Coarser caster detail does not shrink masked foliage whose hierarchy keeps its leaf cards.** With pancaking the
+showcase's far cascade wanted more masked meshlets than a bin holds (4,194,304): 4.39 M at `shadows.casterDetail` 1,
+4.28 M at 16, while its opaque bin fell from 452 k to 201 k. The procedural trees' cluster hierarchies keep their leaf
+cards at every level, so no error allowance coarsens them; with effects-vegetation 0.2.0's impostors for far plants the
+same shot stayed within the limits.
+- Proof: the dawn segment with the tile views' counts logged per raster bin (`shadows.casterDetail` 1, 4, 16), the
+  `MeshletRenderer` warning "at the limits" with effects-vegetation 0.1.0 and none with 0.2.0
+  ([#471](https://github.com/true-sim/engine/issues/471)).
+- Rule: a far cascade's detail rule (`shadows.cascades.farDetail`) helps what simplifies; foliage needs coarse
+  representations of its own (impostors) before it fits a far map.
+
 **A cascade's depth range left the casters towards the sun out.** Each cascade's light camera reached 100 units
 (`shadows.cascades.casters`) beyond its slice towards the light; whatever stood farther was culled by the near plane and
 clipped. Under a low sun in a valley that is nearly everything shading the floor: the showcase's village lay sunlit at

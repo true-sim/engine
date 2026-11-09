@@ -45,6 +45,15 @@ final class CascadeFit {
      */
     void fit(Camera camera, int cascades, double maxDistance, double lambda, double margin, double dx, double dy,
         double dz) {
+        fit(camera, cascades, maxDistance, lambda, 0.1, margin, dx, dy, dz);
+    }
+
+    /**
+     * Like {@link #fit(Camera, int, double, double, double, double, double, double)}, each slice reaching back over
+     * {@code blend} of the one before (the depths lights.slang's shadowFor blends from that one into this).
+     */
+    void fit(Camera camera, int cascades, double maxDistance, double lambda, double blend, double margin, double dx,
+        double dy, double dz) {
         this.cascades = cascades;
         x = camera.position(0);
         y = camera.position(1);
@@ -86,9 +95,9 @@ final class CascadeFit {
         tz = bx * ry - by * rx;
         float[] inverse = camera.inverseViewProjection();
         for (int i = 0; i < cascades; i++) {
-            // The sphere around the frustum's slice: its corners averaged, the farthest corner's distance. From a tenth
-            // of the slice before on: lights.slang's shadowFor dithers the last tenth of a cascade into the next.
-            double from = i == 0 ? splits[0] : splits[i] - 0.1 * (splits[i] - splits[i - 1]);
+            // The sphere around the frustum's slice: its corners averaged, the farthest corner's distance. From the
+            // blend of the slice before on: lights.slang's shadowFor dithers that much of a cascade into the next.
+            double from = i == 0 ? splits[0] : splits[i] - blend * (splits[i] - splits[i - 1]);
             double cx = 0;
             double cy = 0;
             double cz = 0;

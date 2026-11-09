@@ -76,6 +76,7 @@ final class TracedMasks implements AutoCloseable {
     private final int[] active = new int[256];
     private int activeCount;
     private final ShadowSpec[] activeSpec = new ShadowSpec[256];
+    private final float[] activeFrom = new float[256]; // the view depth its pixels are traced from (0: all)
     private boolean[] softActive = new boolean[0];
     private FrameBuffer trace; // ShadowTrace, then the TraceSlots: a copy per frame in flight
     private RenderView depthView; // forward shading's own depth draw
@@ -106,10 +107,19 @@ final class TracedMasks implements AutoCloseable {
 
     /** Light {@code light} is traced in this view this frame, as {@code spec} says ({@link #assign} gives slots). */
     void add(int light, ShadowSpec spec) {
+        add(light, spec, 0);
+    }
+
+    /**
+     * Like {@link #add(int, ShadowSpec)}, its pixels traced only from view depth {@code from} on (a cascades' far
+     * field); nearer pixels lit in its mask, without a ray.
+     */
+    void add(int light, ShadowSpec spec, float from) {
         if (activeCount == active.length) {
             return; // more traced lights than a dispatch takes: lit
         }
         activeSpec[activeCount] = spec;
+        activeFrom[activeCount] = from;
         active[activeCount++] = light;
     }
 
@@ -403,6 +413,7 @@ final class TracedMasks implements AutoCloseable {
             trace.putInt(o + TraceSlotLayout.RAYS, soft ? softRays : 1);
             trace.putFloat(o + TraceSlotLayout.SOFTNESS, (float) spec.softness());
             trace.putFloat(o + TraceSlotLayout.DISTANCE, (float) spec.distance());
+            trace.putFloat(o + TraceSlotLayout.FROM, activeFrom[k]);
         }
         return trace.deviceAddress();
     }

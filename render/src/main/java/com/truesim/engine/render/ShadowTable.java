@@ -24,6 +24,7 @@ public final class ShadowTable implements AutoCloseable {
     private static final int SHADOW_MAP = LightsConstants.SHADOW_MAP;
     private static final int SHADOW_MASK = LightsConstants.SHADOW_MASK;
     private static final int TINTED = LightsConstants.SHADOW_TINTED;
+    private static final int BLEND_SHIFT = LightsConstants.SHADOW_BLEND_SHIFT;
     private static final int SHADOW_NONE = LightsConstants.SHADOW_NONE;
     /** Shadow map filters (lights.slang): percentage-closer filtering over a tent of fixed width. */
     public static final int PCF = LightsConstants.PCF;
@@ -196,6 +197,19 @@ public final class ShadowTable implements AutoCloseable {
         Objects.checkIndex(entry, capacity);
         long o = (long) SHADOW_BYTES * entry + 64;
         shadows.putInt(o, shadows.getInt(o) | TINTED);
+        return this;
+    }
+
+    /**
+     * Cascade entry {@code entry} (set before) blends the last {@code share} of its depths (0 to 1, in 255ths) into the
+     * light's next entry, dithered: the next cascade, a far field, or past the last the light (lights.slang). A tenth
+     * until set. Allocates nothing.
+     */
+    public ShadowTable blend(int entry, float share) {
+        Objects.checkIndex(entry, capacity);
+        long o = (long) SHADOW_BYTES * entry + 64;
+        int bits = Math.clamp(Math.round(share * 255), 1, 255);
+        shadows.putInt(o, (shadows.getInt(o) & ~(0xff << BLEND_SHIFT)) | bits << BLEND_SHIFT);
         return this;
     }
 

@@ -128,6 +128,9 @@ public final class Shadows implements AutoCloseable {
     private int movingDrawn;
     private final ShadowLayerPush layerPush = new ShadowLayerPush();
     private boolean pancake = true; // ShadowSettings.CASCADE_PANCAKE, as last prepared
+    private boolean pancakeMasked; // ShadowSettings.CASCADE_PANCAKE_MASKED
+    /** A sun's far field: hard rays past its last cascade. */
+    private static final ShadowSpec FAR_FIELD = ShadowSpec.rayTraced();
     private boolean layering; // CASTER_LAYERS as the graph was built
     // Moving casters: per instance the frame of its last move, and a flag while it counts as moving (two bits per id,
     // sixteen a word: the draw views' highlight flags), uploaded each frame; the moving ids
@@ -519,6 +522,8 @@ public final class Shadows implements AutoCloseable {
         long epoch = -1; // paramEpoch then
         final double[] params = new double[12];
         final float[] splits = new float[ShadowSpec.MAX_CASCADES];
+        float blend = 0.1f; // the share of each cascade's depths blended into the next (CASCADE_BLEND)
+        boolean farField; // traced past its last cascade this frame (CASCADE_FAR_FIELD)
 
         Group() {
             for (int i = 0; i < tiles.length; i++) {
@@ -538,6 +543,7 @@ public final class Shadows implements AutoCloseable {
         int node = -1;
         int x;
         int y;
+        float detailScale = 1; // its casters' detail against CASTER_DETAIL (far cascades coarser)
         boolean dirty = true; // every caster to draw again
         boolean moved; // moving casters to draw again (over its layer of still ones)
         boolean layered; // the layer atlas holds its still casters, as now
@@ -608,8 +614,10 @@ public final class Shadows implements AutoCloseable {
             stats.structureChange = "a new atlas size";
         }
         boolean pancakeNow = settings.get(ShadowSettings.CASCADE_PANCAKE);
-        if (pancakeNow != pancake) {
+        boolean maskedNow = settings.get(ShadowSettings.CASCADE_PANCAKE_MASKED);
+        if (pancakeNow != pancake || maskedNow != pancakeMasked) {
             pancake = pancakeNow;
+            pancakeMasked = maskedNow;
             allDirty = true; // every map drawn again, with or without the casters before its range
         }
         float detail = settings.get(ShadowSettings.CASTER_DETAIL);
@@ -1733,7 +1741,10 @@ public final class Shadows implements AutoCloseable {
                     layerAdding[layerSlots] = adding;
                     layersAdded += adding ? 1 : 0;
                     // the still casters, or of them only the newcomers' ids (culled alone)
-                    layerViews[layerSlots++].camera(tile.camera, detail).unhighlightedOnly(flags, flagged)
+                    layerViews[layerSlots].openNear(pancake && tile.camera.orthographic()
+                        && renderer.device().depthClamp(), pancakeMasked);
+                    layerViews[layerSlots++].camera(tile.camera, detail * tile.detailScale)
+                        .unhighlightedOnly(flags, flagged)
                         .instances(adding ? adds : 0, addCount);
                 } else {
                     full = true; // no layer slot free this frame: every caster
@@ -1742,7 +1753,10 @@ public final class Shadows implements AutoCloseable {
             tile.addsFrom = -1; // its layer drawn with them, or stale (drawn again whole when next needed)
             slotTiles[i] = tile;
             slotFull[i] = full;
-            slotViews[i].camera(tile.camera, detail); // before anything selects or culls it this frame
+            slotViews[i].camera(tile.camera, detail * tile.detailScale); // before anything culls it this frame
+            // A sun's tiles flatten the casters before them onto their near plane (clamped depth), not leave them out
+            boolean flatten = pancake && tile.camera.orthographic() && renderer.device().depthClamp();
+            slotViews[i].openNear(flatten, pancakeMasked);
             slotViews[i].highlightedOnly(full ? 0 : flags, flagged);
             // only the moving casters culled, not every instance: the moving ids follow the flags
             slotViews[i].instances(full ? 0 : flags + 4L * movingFlags.length, movingCount);
@@ -2168,8 +2182,10 @@ public final class Shadows implements AutoCloseable {
                 : (int) Math.max(1, Math.min(4, Math.round(Maths.log(Math.max(distance / 2, 1)) / Maths.log(4))));
             Camera camera = view.camera();
             lights.direction(light, direction);
-            fit.fit(camera, count, distance, settings.get(ShadowSettings.CASCADE_LAMBDA), margin, direction[0],
+            float blend = settings.get(ShadowSettings.CASCADE_BLEND);
+            fit.fit(camera, count, distance, settings.get(ShadowSettings.CASCADE_LAMBDA), blend, margin, direction[0],
                 direction[1], direction[2]);
+            group.blend = blend;
             if (group.count != count) {
                 for (int i = count; i < group.count; i++) {
                     release(group.tiles[i]);
@@ -2194,10 +2210,20 @@ public final class Shadows implements AutoCloseable {
                     : spec.resolution(), hysteresis);
                 tile.priority = group.priority * (count - i); // the near ones first
                 tile.near = 0;
+                // Far cascades' casters coarser, by the farthest's detail, geometric between
+                tile.detailScale = count == 1 ? 1 : (float) Maths.pow(settings.get(ShadowSettings.CASCADE_FAR_DETAIL),
+                    (double) i / (count - 1));
                 group.splits[i] = fit.split(i);
                 use(tile);
             }
             addGroup(group);
+            // Past the last cascade (from where its blend begins), a ray per pixel where rays are traced
+            group.farField = count > 1 && rayTracing != null
+                && settings.get(ShadowSettings.CASCADE_FAR_FIELD) == ShadowSettings.FarField.RAYS;
+            if (group.farField) {
+                double last = fit.split(count - 1);
+                traced.add(light, FAR_FIELD, (float) (last - blend * (last - fit.split(count - 2))));
+            }
         }
 
         /** Places this view's cascades at their sizes; a tile whose light camera moved is drawn again. */
@@ -2205,9 +2231,7 @@ public final class Shadows implements AutoCloseable {
             EngineSettings settings = port.settings();
             float casters = settings.get(ShadowSettings.CASCADE_CASTERS);
             float lambda = settings.get(ShadowSettings.CASCADE_LAMBDA);
-            // Casters between the sun and the cascade's range flattened onto its near plane (clamped depth), not left out
-            boolean flatten = pancake && renderer.device().depthClamp();
-            float casterError = Math.max(0, casterDetail - 1);
+            float blend = settings.get(ShadowSettings.CASCADE_BLEND);
             Camera camera = view.camera();
             for (Group group : cascades) {
                 if (group == null || !group.usedNow || group.droppedNow) {
@@ -2216,7 +2240,8 @@ public final class Shadows implements AutoCloseable {
                 ShadowSpec spec = group.spec;
                 double distance = spec.distance() > 0 ? spec.distance() : settings.get(ShadowSettings.MAP_DISTANCE);
                 lights.direction(group.light, direction);
-                fit.fit(camera, group.count, distance, lambda, margin, direction[0], direction[1], direction[2]);
+                fit.fit(camera, group.count, distance, lambda, blend, margin, direction[0], direction[1],
+                    direction[2]);
                 float biasTexels = Float.isNaN(spec.bias()) ? settings.get(ShadowSettings.CASCADE_BIAS) : spec.bias();
                 for (int i = 0; i < group.count; i++) {
                     Tile tile = group.tiles[i];
@@ -2224,10 +2249,10 @@ public final class Shadows implements AutoCloseable {
                         continue;
                     }
                     double texel = fit.place(i, tile.size, casters, tile.camera);
-                    if (flatten) {
-                        tile.camera.openNear();
-                    }
                     double depth = 2 * fit.radius(i) + casters;
+                    // coarser casters stand off what they simplify by their error, as much more bias; a far cascade's
+                    // own coarseness (farDetail) not: its texels are as coarse, and as much bias lost contact shadows
+                    float casterError = Math.max(0, casterDetail - 1);
                     tile.bias = (float) ((biasTexels / 3 + casterError) * texel / depth);
                     tile.normalOffset = (float) (biasTexels * texel);
                     tile.split = fit.split(i);
@@ -2316,6 +2341,13 @@ public final class Shadows implements AutoCloseable {
                     used = writeShared(table, light, entry, atlasSlot, filter, radius, widest);
                     if (used == 0 && group != null && group.usedNow && !group.droppedNow) {
                         used = writeCascades(table, group, entry, atlasSlot, filter, radius, widest);
+                        for (int i = 0; i < used; i++) {
+                            table.blend(entry + i, group.blend);
+                        }
+                        if (used > 0 && group.farField) {
+                            int far = traced.write(table, light, entry + used, ctx); // past the last cascade
+                            used += Math.max(far, 0);
+                        }
                         for (int i = 0; debug && i < used; i++) {
                             table.tinted(entry + i);
                         }
