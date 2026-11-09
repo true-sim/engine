@@ -1369,3 +1369,12 @@ meshes built and dropped, with nothing else). Its texels, in automatic arenas, w
   `StreamBenchMemoryTest` fails with the frees left out (382 MB grown over 1,000 cells) and passes with them.
 - Rule: whoever builds a `MeshData` closes it once uploaded; a memory test of streaming counts memory outside the
   heap of the whole process, not only the engine's own accounts.
+
+**State kept per id must go when the id is given out again.** `Materials` remembered which ids instances had taken (a
+bit per id, so a material set under an id keeps displacing or not), but never forgot it when the id was removed and
+retired. The next block taking the id started as the default (its material still loading) and was refused its own
+displacing material as if instances drew it: "Material N is drawn by instances and did not displace", thrown from
+`SceneResources.flush` while a scatter's plants came and went round the viewer (effects-vegetation#2).
+- Proof: `DisplacementTest.anIdTakenAgainIsNotHeldToWhatInstancesDrewUnderItBefore` threw that exception before the
+  bits were cleared as ids retire, and passes after.
+- Rule: whatever an allocator's ids index (bits, arrays) is reset where the id is released, not where it is taken.

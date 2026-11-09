@@ -346,6 +346,23 @@ class DisplacementTest {
             com.truesim.engine.render.materials.MetallicRoughnessMaterial.TYPE, Displacement.RASTER));
     }
 
+    @Test
+    void anIdTakenAgainIsNotHeldToWhatInstancesDrewUnderItBefore() {
+        // A block of plants' materials goes as the last plant leaves (removed, its ids retired); the next block takes
+        // the same ids, drawn as the default until its displacing material loads: no instance took them since, so
+        // setting it is no change under instances (effects-vegetation#2 threw here)
+        int old = materials.add(new Material(WaveParameters.DEFAULTS).displacement(1));
+        materials.reference(old, 1);
+        materials.remove(old);
+        int again = materials.add(Material.DEFAULT);
+        assertThat(again).as("the id taken again").isEqualTo(old);
+        materials.set(again, new Material(WaveParameters.DEFAULTS).displacement(1));
+        assertThat(materials.displaces(again)).isTrue();
+        // Taken by an instance again, it is held as before
+        materials.reference(again, 1);
+        assertThatIllegalArgumentException().isThrownBy(() -> materials.set(again, Material.DEFAULT));
+    }
+
     // ---------------------------------------------------------------- motion vectors
 
     /**

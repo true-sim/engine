@@ -1126,6 +1126,7 @@ public final class Materials implements AutoCloseable {
         for (int i = 0; i < retiringCount; i++) {
             int id = retiring[i];
             if (table.slots().isFinished(retireAt[i])) {
+                forget(id, blockLength[id]);
                 ids.release(id, blockLength[id]);
                 blockLength[id] = 0;
             } else {
@@ -1134,6 +1135,19 @@ public final class Materials implements AutoCloseable {
             }
         }
         retiringCount = kept;
+    }
+
+    /**
+     * Forgets that instances took ids {@code first} to {@code first + length - 1} ({@link #reference}): removed, no frame
+     * in flight reads them, and whoever takes them next starts afresh. Kept, a material added under a reused id would be
+     * held to displacing as the one before it did (effects-vegetation#2: plants coming and going round the viewer).
+     */
+    private void forget(int first, int length) {
+        synchronized (usage) {
+            for (int id = first; id < first + length && id >>> 6 < referenced.length; id++) {
+                referenced[id >>> 6] &= ~(1L << id);
+            }
+        }
     }
 
     private void freeBlocks(int id) {
