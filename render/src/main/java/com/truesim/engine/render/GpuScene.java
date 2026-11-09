@@ -387,12 +387,14 @@ public final class GpuScene implements AutoCloseable {
     /**
      * Instances take materials {@code first} to {@code first + count - 1}: their tables' shading bins draw from now on
      * ({@link Materials#reference}). Instances written here do so themselves; what writes instances on the GPU (mesh
-     * particles) names its materials here. Allocates nothing once ids are known.
+     * particles) names its materials here. Allocates nothing once ids are known. An id its table gave out again since
+     * ({@link Materials#taken} false) is told again.
      */
     public void reference(int first, int count) {
         long[] bits = referenced;
+        Materials table = materials;
         for (int id = first; id < first + count; id++) {
-            if (id >>> 6 >= bits.length || (bits[id >>> 6] & 1L << id) == 0) {
+            if (id >>> 6 >= bits.length || (bits[id >>> 6] & 1L << id) == 0 || !table.taken(id)) {
                 referenceSlow(first, count);
                 return;
             }
