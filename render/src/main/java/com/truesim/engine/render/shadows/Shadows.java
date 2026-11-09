@@ -2211,7 +2211,7 @@ public final class Shadows implements AutoCloseable {
                 tile.priority = group.priority * (count - i); // the near ones first
                 tile.near = 0;
                 // Far cascades' casters coarser, by the farthest's detail, geometric between
-                tile.detailScale = count == 1 ? 1 : (float) Math.pow(settings.get(ShadowSettings.CASCADE_FAR_DETAIL),
+                tile.detailScale = count == 1 ? 1 : (float) Maths.pow(settings.get(ShadowSettings.CASCADE_FAR_DETAIL),
                     (double) i / (count - 1));
                 group.splits[i] = fit.split(i);
                 use(tile);
