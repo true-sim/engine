@@ -67,7 +67,7 @@ class ShadowsTest {
     @BeforeEach
     void start(org.junit.jupiter.api.TestInfo test) {
         // Tests named so check shader memory and ray queries too (GPU-assisted validation), wherever they run
-        boolean gpuAssisted = test.getDisplayName().contains("UnderGpuAssistedValidation");
+        boolean gpuAssisted = test.getDisplayName().contains("UnderGpuAssistedValidation") && rayTracingGpu();
         try {
             instance = VulkanInstance.builder().applicationName("tests").validation(true)
                 .synchronizationValidation(!gpuAssisted).gpuAssistedValidation(gpuAssisted).surfaces(false).build();
@@ -92,6 +92,23 @@ class ShadowsTest {
         int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         colorTarget = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
         pixels = GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    }
+
+    /**
+     * Whether the best GPU is a hardware one tracing rays: GPU-assisted validation only there (lavapipe's test JVM died
+     * as it ended, on CI and locally, after a test had made a device with it).
+     */
+    private static boolean rayTracingGpu() {
+        try (VulkanInstance probe = VulkanInstance.builder().applicationName("probe").surfaces(false).build()) {
+            if (probe.gpus().isEmpty() || probe.bestGpu().type() == com.truesim.engine.vulkan.GpuType.CPU) {
+                return false;
+            }
+            try (VulkanDevice gpu = VulkanDevice.createHeadless(probe.bestGpu())) {
+                return gpu.rayTracing();
+            }
+        } catch (VulkanException | UnsatisfiedLinkError e) {
+            return false;
+        }
     }
 
     @AfterEach
