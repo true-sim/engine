@@ -65,10 +65,12 @@ class ShadowsTest {
     private int quad;
 
     @BeforeEach
-    void start() {
+    void start(org.junit.jupiter.api.TestInfo test) {
+        // Tests named so check shader memory and ray queries too (GPU-assisted validation), wherever they run
+        boolean gpuAssisted = test.getDisplayName().contains("UnderGpuAssistedValidation") && rayTracingGpu();
         try {
             instance = VulkanInstance.builder().applicationName("tests").validation(true)
-                .synchronizationValidation(true).surfaces(false).build();
+                .synchronizationValidation(!gpuAssisted).gpuAssistedValidation(gpuAssisted).surfaces(false).build();
         } catch (VulkanException | UnsatisfiedLinkError e) {
             assumeThat(e).as("no Vulkan available").isNull();
             throw e;
@@ -90,6 +92,23 @@ class ShadowsTest {
         int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         colorTarget = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
         pixels = GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    }
+
+    /**
+     * Whether the best GPU is a hardware one tracing rays: GPU-assisted validation only there (lavapipe's test JVM died
+     * as it ended, on CI and locally, after a test had made a device with it).
+     */
+    private static boolean rayTracingGpu() {
+        try (VulkanInstance probe = VulkanInstance.builder().applicationName("probe").surfaces(false).build()) {
+            if (probe.gpus().isEmpty() || probe.bestGpu().type() == com.truesim.engine.vulkan.GpuType.CPU) {
+                return false;
+            }
+            try (VulkanDevice gpu = VulkanDevice.createHeadless(probe.bestGpu())) {
+                return gpu.rayTracing();
+            }
+        } catch (VulkanException | UnsatisfiedLinkError e) {
+            return false;
+        }
     }
 
     @AfterEach
@@ -569,6 +588,45 @@ class ShadowsTest {
             device.waitIdle();
             scene.setMaterials(null);
         }
+    }
+
+    @Test
+    void rayTracedMasksTraceFromTheViewsEdgePixelsUnderGpuAssistedValidation() {
+        // The camera looks straight down at a floor filling the view, lit by a hard and a soft traced sun with nothing
+        // to cast: every pixel lit alike. Pixels on the view's edges rebuilt their normal from a neighbour clamped onto
+        // themselves: a zero cross product, a NaN normal and NaN ray origins (#459), which GPU-assisted validation
+        // reports (VUID-RuntimeSpirv-OpRayQueryInitializeKHR-06351) and the stop's validation count fails on.
+        assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
+        assumeThat(instance.validationEnabled()).as("no validation layer").isTrue();
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        scene.set(0, quad, 0, -5, 0, 0, 0, 0, 1, 100, 1, 100);
+        scene.set(1, quad, 0, 50, 0, 0, 0, 0, 1, 1, 1, 1); // behind the camera, above the light's way: no shadow
+        camera.set(0, -1, 0, 0, 0, -1, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        rayTracing = new RayTracing(device, pool, 16);
+        rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
+        try (Lights lights = new Lights(device, 4, 4)) {
+            lights.directional(0, 0.3f, -1, 0.2f, 2, 2, 2).directional(1, -0.2f, -1, 0.3f, 1, 1, 1).setCount(2);
+            lights.shadow(0, ShadowSpec.rayTraced()).shadow(1, ShadowSpec.softRayTraced(0.05));
+            SceneView main = newGraph();
+            main.port().add(forward(geometry).apply(main)).add(new ClusteredLights(lights, main))
+                .add(owner(geometry, lights).view(main));
+            main.port().output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+            frame(colorTarget, 4);
+            byte[] color = frame(colorTarget, 4);
+            int middle = color[4 * (SIZE / 2 + SIZE / 2 * SIZE)] & 0xff;
+            assertThat(middle).as("the floor lit").isGreaterThan(40);
+            for (int i = 0; i < SIZE; i++) {
+                for (int edge : new int[] {i, i + (SIZE - 1) * SIZE, i * SIZE, SIZE - 1 + i * SIZE}) {
+                    assertThat(color[4 * edge] & 0xff).as("edge pixel %d, %d", edge % SIZE, edge / SIZE)
+                        .isBetween((int) (middle * 0.8), (int) (middle * 1.25) + 2);
+                }
+            }
+            device.waitIdle();
+        }
+        scene.set(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+        camera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
     }
 
     @Test

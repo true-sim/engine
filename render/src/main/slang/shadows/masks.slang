@@ -21,15 +21,25 @@ float3 positionAt(ShadowTrace* t, int2 pixel, float depth)
     return clip.xyz / clip.w;
 }
 
-// The neighbour along step (one way or the other) nearest in depth: across an edge, the other side.
+// The neighbour along step (one way or the other) nearest in depth: across an edge, the other side. Only neighbours
+// inside the region and not sky count: at the region's edges the other side (a neighbour clamped onto the pixel itself
+// gave a zero step, a NaN normal and NaN ray origins, #459). None: a zero step.
 float3 neighbour(ShadowTrace* t, int2 pixel, int2 step, float depth, float3 position)
 {
     int2 last = int2(regionSize(t)) - 1;
-    int2 a = clamp(pixel + step, 0, last);
-    int2 b = clamp(pixel - step, 0, last);
-    float da = textures[t.depth].Load(int3(a, 0)).r;
-    float db = textures[t.depth].Load(int3(b, 0)).r;
-    bool first = abs(da - depth) <= abs(db - depth);
+    int2 a = pixel + step;
+    int2 b = pixel - step;
+    bool hasA = all(a >= 0) && all(a <= last);
+    bool hasB = all(b >= 0) && all(b <= last);
+    float da = hasA ? textures[t.depth].Load(int3(a, 0)).r : 0;
+    float db = hasB ? textures[t.depth].Load(int3(b, 0)).r : 0;
+    hasA = hasA && da > 0;
+    hasB = hasB && db > 0;
+    if (!hasA && !hasB)
+    {
+        return 0;
+    }
+    bool first = hasA && (!hasB || abs(da - depth) <= abs(db - depth));
     float3 other = first ? positionAt(t, a, da) : positionAt(t, b, db);
     return first ? other - position : position - other;
 }
@@ -52,8 +62,11 @@ Point pointAt(ShadowTrace* t, int2 pixel)
     if (!p.sky)
     {
         p.position = positionAt(t, pixel, depth);
-        float3 n = normalize(cross(neighbour(t, pixel, int2(1, 0), depth, p.position),
-            neighbour(t, pixel, int2(0, 1), depth, p.position)));
+        float3 c = cross(neighbour(t, pixel, int2(1, 0), depth, p.position),
+            neighbour(t, pixel, int2(0, 1), depth, p.position));
+        float length2 = dot(c, c);
+        // No neighbour on an axis, or both along one line (a pixel alone, a sliver): facing the camera
+        float3 n = length2 > 1e-30 ? c * rsqrt(length2) : -normalize(p.position);
         p.normal = dot(n, p.position) > 0 ? -n : n;
     }
     return p;

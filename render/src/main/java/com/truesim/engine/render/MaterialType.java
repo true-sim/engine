@@ -25,6 +25,10 @@ import java.util.function.Function;
  * int lake = materials.add(new Material(WaterParameters.DEFAULTS));
  * }</pre>
  *
+ * <p>A parameter naming a buffer ({@code T*}) holds its address, or for none the device's absent address
+ * ({@link com.truesim.engine.vulkan.VulkanDevice#absentAddress()}), never 0: the type's shaders test it with
+ * bindless.slang's {@code given(p)}, never {@code p != nullptr} (docs/pitfalls.md).
+ *
  * <p>Every pass shading color draws a type with its own entry points: the visibility buffer's shading, and forward
  * shading on every geometry path (indexed, mesh shaders, classic LOD), where each shading bin (a type and its
  * features) draws with pipelines of its type's forward entry points, its blended surfaces too. Depth, shadow and ID

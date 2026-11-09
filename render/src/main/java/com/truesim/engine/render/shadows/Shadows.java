@@ -802,23 +802,30 @@ public final class Shadows implements AutoCloseable {
     }
 
     /**
-     * Grows the lists of draw views whose last cull wanted more than they hold (read a frame or more late, as the GPU
-     * finished it): twice the room, the graph built again, every tile drawn again (what overflowed was left out).
-     * Frames are counted here (frames prepared): a scene on a single frame slot counts none.
+     * Grows the lists of draw and layer views whose last cull wanted more than they hold (read a frame or more late, as
+     * the GPU finished it; {@link RenderView#grow}, to the renderer's limits): the graph built again, every tile drawn
+     * again (what overflowed was left out). A view at the limits is counted by the renderer. Frames are counted here
+     * (frames prepared): a scene on a single frame slot counts none.
      */
     @AllowAllocation("growing, rarely")
     private void growOverflowed() {
-        if (checkFrom.length < slotViews.length) {
-            checkFrom = Arrays.copyOf(checkFrom, slotViews.length);
+        if (checkFrom.length < slotViews.length + layerViews.length) {
+            checkFrom = Arrays.copyOf(checkFrom, slotViews.length + layerViews.length);
         }
-        for (int i = 0; i < slotViews.length; i++) {
-            RenderView view = slotViews[i];
-            if (frameNow >= checkFrom[i] && view.overflowed()) {
-                ViewOptions options = view.options();
-                view.resize(Math.min(2 * options.draws(), 1 << 24), Math.min(2 * options.triangles(), 1 << 28));
+        for (int i = 0; i < slotViews.length + layerViews.length; i++) {
+            RenderView view = i < slotViews.length ? slotViews[i] : layerViews[i - slotViews.length];
+            if (frameNow < checkFrom[i]) {
+                continue;
+            }
+            int grown = view.grow(renderer.viewDrawLimit(), renderer.viewTriangleLimit());
+            if (grown != RenderView.FITTED) {
                 checkFrom[i] = frameNow + 4; // its counts are the old cull's until it culls again
+            }
+            if (grown == RenderView.GROWN) {
                 allDirty = true;
                 stats.grown++;
+            } else if (grown == RenderView.AT_LIMIT) {
+                renderer.viewLimited(view);
             }
         }
     }
@@ -1882,7 +1889,7 @@ public final class Shadows implements AutoCloseable {
             int had = slotViews.length;
             slotViews = Arrays.copyOf(slotViews, slotsWanted);
             for (int i = had; i < slotsWanted; i++) {
-                slotViews[i] = renderer.createView(options);
+                slotViews[i] = renderer.createView(options).grownByOwner(true); // tiles drawn again when grown
             }
         }
         boolean split = layering;
@@ -1890,7 +1897,7 @@ public final class Shadows implements AutoCloseable {
             int had = layerViews.length;
             layerViews = Arrays.copyOf(layerViews, slotsWanted);
             for (int i = had; i < slotsWanted; i++) {
-                layerViews[i] = renderer.createView(options);
+                layerViews[i] = renderer.createView(options).grownByOwner(true);
             }
         }
         RenderView[] layerSlots = split ? layerViews : new RenderView[0];

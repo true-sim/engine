@@ -28,7 +28,7 @@ public struct Tinted : IMaterial
         s.albedo = 0;
         s.metallic = 1; // no diffuse, no specular: only the glow
         s.roughness = 1;
-        s.emissive = (uint64_t)p.tint != 0 ? p.tint.color.rgb * p.strength : float3(0);
+        s.emissive = given(p.tint) ? p.tint.color.rgb * p.strength : float3(0); // none: the absent address
         return s;
     }
 };

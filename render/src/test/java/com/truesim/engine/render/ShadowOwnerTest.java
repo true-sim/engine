@@ -635,7 +635,8 @@ class ShadowOwnerTest {
             eye.set(camera, 1, MeshletRenderer.MODE_LIT);
             int[] grown = new int[1];
             byte[] small = shadowedGround(fine, eye, 64, grown);
-            assertThat(grown[0]).as("lists grown, more than once").isGreaterThan(1);
+            // Grown to half again what the cull wanted (RenderView.grow), once enough; doubling took several
+            assertThat(grown[0]).as("lists grown").isPositive();
             byte[] roomy = shadowedGround(fine, eye, 1 << 16, grown);
             assertThat(grown[0]).as("room from the start").isZero();
             assertThat(maxDifference(small, roomy)).as("lists grown as with room from the start")

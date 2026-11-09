@@ -183,6 +183,33 @@ passed.
 - Rule: views whose lists a technique sizes follow `overflowed()` and grow; a screenshot of a dense scene against a
   method with no lists (rays) is part of checking a shadow technique.
 
+**A large scene's first frames left instances out: the chunks grew only as a frame ended.** The renderer's chunks of
+64 meshlets start with room for 65,535 and grew as frames ended to what they had wanted; until then the instance pass
+dropped every chunk past the room, silently. common-procedural's ecology preview (about 364,000 plants) drew most of
+them only from the second or third frame, and worked around it with 4M chunks from the start (#464).
+- Proof: 70,000 quads at the default room, a chunk each: the first frame listed 65,535 on main fd26e15d
+  (`GraphTechniquesTest`, a test of the first frame's `visibleMeshlets()`), and lists 70,000 with culls in rounds
+  (`aViewOfFarMoreInstancesThanTheChunksHoldDrawsEveryOneFromTheFirstFrame`, true-sim/engine#464's PR).
+- Rule: a GPU list sized before the GPU says what it needs never drops silently: what does not fit is taken by a further
+  round in the same frame (instances.slang's retry bits), the room grows to a settings-driven limit, and what is lost
+  all the same is counted by the GPU, logged once and shown as a profiler counter.
+
+**Only the shadow atlas grew its views' lists; every other view dropped what overflowed.** `RenderView.overflowed()`
+was read by `Shadows` alone (its tile views, not its caster layer views); a camera, cascade or mirror view with lists
+too small for what it saw left meshlets out every frame, silently. `Shadows` grew its tile views to `1 << 24` meshlets,
+past the 4,194,304 `ViewOptions` accepts: the resize past that would have thrown.
+- Proof: a view with room for 256 meshlets over 1,024 quads still held 256 after seven frames on main fd26e15d; with
+  the renderer growing views as frames end it holds them all from the second frame
+  (`GraphTechniquesTest.viewListsThatOverflowGrowAsFramesEndUpToTheirLimit`, #464's PR).
+- Rule: the renderer grows every view's lists (`RenderView.grow`, to `render.meshlets.viewDrawLimit` and
+  `viewTriangleLimit`), but those an owner grows itself (`grownByOwner`: the atlas, which draws its tiles again); a view
+  at the limit is counted (`viewsAtLimit`) and logged once.
+- Also: growing from the counts `overflowed()` reads worked on the RX 9070 XT and never grew on the local lavapipe
+  (256 after seven frames): a frame end reads them after the next frame was submitted, and that frame's cull resets
+  them first. Views now grow from words the culls never reset (per bin the most meshlets and indices a phase ever
+  wanted, after the counts). Rule: what the CPU reads as frames end to size buffers is a running maximum the GPU keeps,
+  never a per-frame count the next frame resets.
+
 **A switched-off modifier that provides a new version of a key leaves its consumers an unwritten image.**
 `technique.when(setting)` skips the technique's passes. A modifier writing its key in place then leaves the image as
 the producer made it, but one that writes a new image and provides it under the key (`g.modify`, then `g.provide`)
@@ -240,6 +267,9 @@ first frame of `DisplayTransformTest` (whose only shader is encode) and of `Came
 - Rule: never hand a shader the address 0, even behind a branch that skips the read. A pointer that names no data
   gets `VulkanDevice.absentAddress()` (64 KiB of zeros, its lowest bit set; `ctx.absent()`, `ctx.addressOrAbsent(b)`)
   and shaders test it with bindless.slang's `given(p)`, never `!= nullptr`; encode reads a stand-in buffer of its own.
+- Also: material records' buffer parameters left unset held 0 (`Materials.addressOf`, and the generated records'
+  writers) until #461; `Materials` now writes the absent address for them, which `materialsNameBuffersTheHostOrTheGraphWrites`
+  reads back (0 on main fd26e15d). Material types test their buffer parameters with `given(p)`.
 
 **An instance's `mesh` word holds flag bits.** Indexing the mesh table with it unmasked read out of bounds and lost the
 device.
@@ -524,6 +554,18 @@ cyan where the Khronos reference shows none).
   PBR fixes from the Khronos samples).
 - Rule: an approximation of an integral is fitted to the integral over its whole domain and says how far it is off;
   a path without the lookup table uses the same lobe the table was made from.
+
+**A neighbour clamped to the view's edge was the pixel itself: a NaN normal.** The traced masks (shadows/masks.slang)
+rebuild a pixel's normal from the cross product of steps to a neighbour on each axis, the one nearer in depth; at the
+view's last column and row the neighbour clamped onto the view was the pixel itself, nearest of all, so the step was 0,
+the normal NaN and the rays' origins NaN (#459, found by effects-terrain under GPU-assisted validation). On the RX 9070
+XT those pixels came out darker than the rest of a lit floor (a corner 110 against 235).
+- Proof: `ShadowsTest.rayTracedMasksTraceFromTheViewsEdgePixelsUnderGpuAssistedValidation` (a floor filling the view,
+  a hard and a soft traced sun, nothing casting) fails at the edge pixels without the fix and passes with neighbours
+  taken only inside the region and off the sky, the camera-facing normal where none is left. Observed, not traced
+  further: on the RX 9070 XT the validation layer's GPU-assisted mode reported nothing for the NaN origins in this test.
+- Rule: a neighbour clamped onto the view is not a neighbour; take the other side, and fall back to a normal that cannot
+  be NaN. Test screen-space reconstructions on the view's edges.
 
 **Neighbors compared by depth rejected their own surface on a slanted floor.** Screen-space reflections traced at
 half resolution took the 2 x 2 hit texels around a pixel where the pixels they were traced from lay within 5 % of its

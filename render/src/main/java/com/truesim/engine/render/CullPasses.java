@@ -8,7 +8,6 @@ import static org.lwjgl.vulkan.EXTMeshShader.VK_PIPELINE_STAGE_MESH_SHADER_BIT_E
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_INDEX_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
@@ -53,13 +52,28 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  * A {@link MeshletRenderer}'s culling: the instance pass splitting each instance visible to a view into chunks of 64
  * meshlets, the cull pass listing each chunk's visible meshlets in its view's lists and, on the indexed path, each
  * view's expansion of its lists into indices. The chunks are shared by the views culled together and grow between
- * frames to what frames wanted. Culling allocates nothing.
+ * frames to what frames wanted.
+ *
+ * <p>A cull that wants more chunks than there is room for loses nothing: it runs in rounds (instances.slang), each
+ * round's instance pass filling the chunks and its cull pass emptying them into the views' lists, up to
+ * {@link MeshletSettings#CULL_ROUNDS} rounds; a round nothing needed costs an indirect dispatch over no workgroups and
+ * two barriers. Once frames fit with room to spare (half again what they wanted) and neither the instances nor the
+ * views culled grew, culls run one round. What is dropped all the same (the last round full, or the room at its
+ * limit, {@link MeshletSettings#CHUNK_LIMIT}) is counted by the GPU and reported once in the log; the counts are read
+ * by {@link #droppedInstances()} and the renderer's profiler counters. Culling allocates nothing.
  */
 @AllowAllocation("created rarely")
 final class CullPasses implements AutoCloseable {
 
-    /** The most chunks the buffer grows to: 16 bytes each. */
-    static final int CHUNK_LIMIT = 1 << 24;
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(CullPasses.class);
+    /** The most chunks the buffer can grow to: 16 bytes each. */
+    static final int CHUNK_LIMIT = 1 << 26;
+    /** The most rounds a cull runs. */
+    static final int MAX_ROUNDS = 64;
+    /** Words of the statistics before the rounds' commands (instances.slang). */
+    private static final int STATS_WORDS = 8;
+    /** Words of a round's command (instances.slang). */
+    private static final int ROUND_WORDS = 8;
     /** VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT: the same bit as the 32-bit stage. */
     private static final long MESH_SHADER_STAGE = VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
     private static final int BINS = MeshletRenderer.BINS;
@@ -107,10 +121,33 @@ final class CullPasses implements AutoCloseable {
     private final Pipeline radixScatter;
     private int maxChunks;
     private GpuBuffer chunks; // grown as frames want more (grow)
+    // The statistics, then a command per round (instances.slang): host-visible, read as frames end.
     private final GpuBuffer chunkCommand;
+    private GpuBuffer retry; // a bit per instance pass workgroup of a cull: to run again in the next round
+    private long retryBits;
+    private volatile boolean retryShort; // a cull had more workgroups than bits: grown as a frame ends
     // The culling's buffers as imported buffers of the frame graph, which the culling passes declare.
     private final ExternalBuffer chunksImport;
     private final ExternalBuffer chunkCommandImport;
+    private final ExternalBuffer retryImport;
+    // The settings (MeshletSettings), as the last graph built with them.
+    private volatile int chunkLimit = MeshletSettings.CHUNK_LIMIT.defaultValue();
+    private volatile int rounds = MeshletSettings.CULL_ROUNDS.defaultValue();
+    // Whether culls take one round: frames fitted with room to spare for slots + 1 frame ends, and no cull since had
+    // more instances or views than they did. Culls note the most they had (read before written: several threads).
+    private volatile boolean settled;
+    private volatile int seenInstances;
+    private volatile int seenRows;
+    private int settledInstances = -1;
+    private int settledRows = -1;
+    private int quietEnds;
+    private volatile int roundsSeen; // the most rounds a cull ran since culls last settled, as read at frame ends
+    // What the GPU counted, as last read: instances and chunks dropped, and the reports made.
+    private long droppedInstances;
+    private long droppedChunks;
+    private int lastDropped;
+    private boolean droppedLogged;
+    private boolean limitLogged;
     private boolean closed;
 
     /** Culling of {@code scene} into {@code views}, with room for {@code chunks} chunks to start with. */
@@ -151,19 +188,73 @@ final class CullPasses implements AutoCloseable {
         splitStages = new Pipeline[] {splitCount, splitLayout, splitScatter};
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         this.chunks = GpuBuffer.deviceLocal(device, 16L * chunks, storage);
-        // The cull dispatch (x, y, z), the chunks wanted this frame, the end of those written, and the most a frame
-        // ever wanted: never reset, read by the CPU as frames end to grow the chunks.
-        chunkCommand = GpuBuffer.hostVisible(device, 24,
+        // The statistics (the most chunks a cull wanted, what was dropped: never reset by the GPU, read by the CPU as
+        // frames end), then each round's command: its cull dispatch, chunks wanted and written, the next round's.
+        chunkCommand = GpuBuffer.hostVisible(device, 4L * (STATS_WORDS + ROUND_WORDS * MAX_ROUNDS),
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        chunkCommand.memory().fill((byte) 0);
+        chunkCommand.memory().fill((byte) 0); // read before the first cull: nothing wanted yet (pitfalls.md)
+        retryBits = retryBitsFor(4, scene.capacity());
+        retry = GpuBuffer.deviceLocal(device, retryBits / 8, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         chunksImport = new ExternalBuffer("meshlet chunks", this.chunks);
         chunkCommandImport = new ExternalBuffer("chunk command", chunkCommand);
+        retryImport = new ExternalBuffer("cull retry bits", retry);
         slots.onEnd(grow);
+    }
+
+    /** Bits for the instance pass workgroups of a cull of {@code rows} views over {@code instances}: whole words. */
+    private static long retryBits(long rows, long instances) {
+        return (rows * ((instances + 63) / 64) + 31) / 32 * 32;
+    }
+
+    private static long retryBitsFor(long rows, long instances) {
+        return Math.max(32, retryBits(rows, instances));
+    }
+
+    /** Statistic {@code word} (instances.slang). */
+    private int stat(int word) {
+        return chunkCommand.memory().get(java.lang.foreign.ValueLayout.JAVA_INT, 4L * word);
+    }
+
+    /** Where round {@code round}'s command starts in the chunk command buffer, in bytes. */
+    private static long roundOffset(int round) {
+        return 4L * (STATS_WORDS + ROUND_WORDS * round);
     }
 
     /** The most chunks of 64 meshlets a frame wanted so far: what the views culled together needed. */
     int wantedChunks() {
-        return chunkCommand.memory().get(java.lang.foreign.ValueLayout.JAVA_INT, 20);
+        return stat(0);
+    }
+
+    /**
+     * Instances (an instance in a view each) culls left out for want of room, since the renderer was made: the last
+     * round full, or the room at its limit. Counted by the GPU, read as frames end.
+     */
+    long droppedInstances() {
+        return droppedInstances;
+    }
+
+    /** Chunks of 64 meshlets left out, as {@link #droppedInstances()}. */
+    long droppedChunks() {
+        return droppedChunks;
+    }
+
+    /** The most rounds a cull ran since the culls settled last. */
+    int roundsUsed() {
+        return Math.max(Math.max(1, roundsSeen), stat(2));
+    }
+
+    /** Whether culls run in one round now. */
+    boolean settled() {
+        return settled;
+    }
+
+    /**
+     * Takes the settings of a graph's build: the most chunks the room grows to ({@link MeshletSettings#CHUNK_LIMIT},
+     * at least the room now) and the most rounds a cull runs ({@link MeshletSettings#CULL_ROUNDS}).
+     */
+    void configure(int limit, int rounds) {
+        this.chunkLimit = Math.max(Math.min(limit, CHUNK_LIMIT), 1);
+        this.rounds = Math.max(1, Math.min(rounds, MAX_ROUNDS));
     }
 
     /** How many chunks there is room for now. */
@@ -177,26 +268,123 @@ final class CullPasses implements AutoCloseable {
      */
     @AllowAllocation("growing, rarely")
     private void grow() {
-        int wanted = wantedChunks();
-        if (wanted <= maxChunks || maxChunks == CHUNK_LIMIT || closed) {
+        if (closed) {
             return;
         }
-        int grown = (int) Math.min(CHUNK_LIMIT, Math.max(2L * maxChunks, wanted + wanted / 2L));
-        retiring.add(chunks);
-        chunks = GpuBuffer.deviceLocal(device, 16L * grown,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-        chunksImport.set(chunks);
-        maxChunks = grown;
+        int wanted = observe();
+        if (retryShort) { // a cull had more workgroups than bits (views or instances grew outside a build)
+            retryShort = false;
+            sizeRetry(views.rows().size() / 8, scene.capacity());
+        }
+        if (wanted > maxChunks && maxChunks < chunkLimit) {
+            int grown = (int) Math.min(chunkLimit, Math.max(2L * maxChunks, wanted + wanted / 2L));
+            retiring.add(chunks);
+            chunks = GpuBuffer.deviceLocal(device, 16L * grown,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            chunksImport.set(chunks); // a new size: a graph rebuilds
+            maxChunks = grown;
+        }
+        if (wanted > chunkLimit) {
+            if (!limitLogged) {
+                limitLogged = true;
+                LOG.warn("Meshlet culling wants {} chunks of 64 meshlets, more than {} (render.meshlets.chunkLimit): "
+                    + "culls run in rounds, up to render.meshlets.cullRounds", wanted, chunkLimit);
+            }
+        }
     }
 
     /**
-     * Declares that {@code pass} culls: it writes the chunks and rows (transfers, then compute) and reads the chunk
-     * command it writes for its indirect dispatch.
+     * Reads what the GPU counted: drops reported, culls settled or not; returns the most chunks a cull wanted. As frames
+     * end, and on a single frame slot (which nothing may end) as each cull records.
      */
+    private synchronized int observe() {
+        int wanted = wantedChunks(); // unsigned in the GPU's word: past 2^31 read as the most
+        if (wanted < 0) {
+            wanted = Integer.MAX_VALUE;
+        }
+        settle(wanted, report());
+        return wanted;
+    }
+
+    /**
+     * Takes in what the GPU dropped since the last frame end, and reports the first drop in the log; returns whether
+     * anything was dropped.
+     */
+    private boolean report() {
+        int dropped = stat(1);
+        if (dropped == lastDropped) {
+            return false;
+        }
+        droppedInstances += Integer.toUnsignedLong(dropped - lastDropped);
+        lastDropped = dropped;
+        droppedChunks = Integer.toUnsignedLong(stat(3));
+        if (!droppedLogged) {
+            droppedLogged = true;
+            LOG.warn("Meshlet culling left {} instances out for want of room ({} chunks of 64 meshlets wanted, room "
+                    + "for {} in {} rounds; render.meshlets.chunkLimit {}, render.meshlets.cullRounds {}): the room "
+                    + "grows, and later drops are counted only (MeshletRenderer.droppedInstances)", droppedInstances,
+                wantedChunks(), maxChunks, rounds, chunkLimit, rounds);
+        }
+        return true;
+    }
+
+    /**
+     * Whether culls fitted since the last frame end (one round, nothing dropped, room for half again what they wanted,
+     * no more instances or views); culls settle into one round after the frame slots' count of such frame ends and
+     * run in rounds again at once otherwise.
+     */
+    private void settle(int wanted, boolean dropped) {
+        int instances = seenInstances;
+        int rows = seenRows;
+        int used = stat(2); // since the last frame end, as the GPU finished them
+        if (used != 0) {
+            chunkCommand.memory().set(java.lang.foreign.ValueLayout.JAVA_INT, 8, 0);
+            roundsSeen = Math.max(roundsSeen, used);
+        }
+        boolean calm = instances <= settledInstances && rows <= settledRows && used <= 1
+            && wanted <= maxChunks - maxChunks / 3 && !dropped;
+        if (calm) {
+            if (!settled && ++quietEnds > slots.count()) {
+                settled = true;
+                roundsSeen = 0;
+            }
+        } else {
+            settled = false;
+            quietEnds = 0;
+            settledInstances = instances;
+            settledRows = rows;
+        }
+    }
+
+    /** Room for the retry bits of a cull of {@code rows} views over {@code instances}, kept once no frame reads it. */
+    @AllowAllocation("growing, rarely")
+    private void sizeRetry(long rows, long instances) {
+        long bits = retryBitsFor(rows, instances);
+        if (bits <= retryBits) {
+            return;
+        }
+        retiring.add(retry);
+        retryBits = Math.max(bits, 2 * retryBits);
+        retry = GpuBuffer.deviceLocal(device, retryBits / 8,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        retryImport.set(retry); // a new size: a graph rebuilds
+    }
+
+    /**
+     * Declares that {@code pass} culls: it writes the chunks, rows and retry bits (transfers, then compute) and reads
+     * the chunk command it writes for its indirect dispatches. Sizes the retry bits for the views and instances there
+     * may be.
+     */
+    @AllowAllocation("building the graph")
     void declare(GraphBuilder g, GraphBuilder.PassBuilder pass) {
+        sizeRetry(views.rows().size() / 8, scene.capacity());
         Buffer command = g.importBuffer(chunkCommandImport);
         Buffer culledRows = g.importBuffer(views.rowsImport());
-        pass.write(g.importBuffer(chunksImport), BufferAccess.STORAGE_WRITE)
+        Buffer retried = g.importBuffer(retryImport);
+        pass.write(retried, BufferAccess.TRANSFER_DST)
+            .write(retried, BufferAccess.STORAGE_WRITE)
+            .write(g.importBuffer(chunksImport), BufferAccess.STORAGE_WRITE)
             .write(command, BufferAccess.TRANSFER_DST)
             .write(command, BufferAccess.STORAGE_WRITE)
             .read(command, BufferAccess.INDIRECT)
@@ -232,14 +420,43 @@ final class CullPasses implements AutoCloseable {
             Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         }
+        // Rounds: one once culls settled (frames fitted with room to spare), else as many as the settings allow, for
+        // what does not fit in a round to be culled in the next; noted, as the most instances and views a cull had.
+        if (instanceCount > seenInstances) {
+            seenInstances = instanceCount;
+        }
+        if (count > seenRows) {
+            seenRows = count;
+        }
+        if (slots.isSingle()) {
+            observe(); // no frame ends to settle at: culls on a single frame slot settle as they record
+        }
+        int groupsPerRow = (instanceCount + 63) / 64;
+        long groups = (long) count * groupsPerRow;
+        int roundCount = settled && instanceCount <= settledInstances && count <= settledRows ? 1 : rounds;
+        if (roundCount > 1 && retryBits(count, instanceCount) > retryBits) {
+            retryShort = true; // grown as the frame ends; until then what does not fit is dropped (and counted)
+            roundCount = 1;
+        }
         try (MemoryStack stack = stackPush()) {
-            long reset = stack.nmalloc(4, 20); // the chunk command: no chunks yet, a dispatch of x by 1 by 1
-            memPutInt(reset, 0);
-            memPutInt(reset + 4, 1);
-            memPutInt(reset + 8, 1);
-            memPutInt(reset + 12, 0);
-            memPutInt(reset + 16, 0);
-            Commands.updateBuffer(commands, chunkCommand.handle(), 0, 20, reset); // the most ever wanted stays
+            // Each round's command: no chunks yet, cull and next round dispatches of x by 1 by 1; the statistics stay.
+            long reset = stack.nmalloc(4, 4 * ROUND_WORDS * roundCount);
+            for (int round = 0; round < roundCount; round++) {
+                long at = reset + 4L * ROUND_WORDS * round;
+                memPutInt(at, 0);
+                memPutInt(at + 4, 1);
+                memPutInt(at + 8, 1);
+                memPutInt(at + 12, 0);
+                memPutInt(at + 16, 0);
+                memPutInt(at + 20, 0);
+                memPutInt(at + 24, 1);
+                memPutInt(at + 28, 1);
+            }
+            Commands.updateBuffer(commands, chunkCommand.handle(), roundOffset(0), 4L * ROUND_WORDS * roundCount,
+                reset);
+            if (roundCount > 1 && groups > 0) { // no workgroup marked
+                Commands.fillBuffer(commands, retry.handle(), 0, (groups + 31) / 32 * 4, 0);
+            }
             long dispatches = stack.nmalloc(4, 16 * BINS); // per raster bin: no meshlets, a dispatch of x by 1 by 1
             long draws = stack.ncalloc(4, 6 * BINS, 4); // per bin: no indices, one instance, from the bin's first
             for (int bin = 0; bin < BINS; bin++) {
@@ -261,7 +478,8 @@ final class CullPasses implements AutoCloseable {
                     memPutInt(draws + 24L * bin + 8, (int) (indices + (bin - 1) * binIndices)); // the bin's first index
                 }
                 if (early != null) {
-                    Commands.fillBuffer(commands, v.drawCount().handle(), 0, VK_WHOLE_SIZE, 0); // counts, indices wanted
+                    // counts, indices wanted; the most ever wanted after them stays
+                    Commands.fillBuffer(commands, v.drawCount().handle(), 0, 12L * BINS, 0);
                 }
                 v.clearGrownVisibility(commands);
                 if (v.splitCategories() > 0) { // the split lists' counts and cursors: laid out anew from them
@@ -284,39 +502,58 @@ final class CullPasses implements AutoCloseable {
             memPutLong(push + InstancePush.MESHES, pool.meshTable().deviceAddress());
             memPutLong(push + InstancePush.INSTANCES, scene.instanceAddress());
             memPutLong(push + InstancePush.CHUNKS, chunks.deviceAddress());
-            memPutLong(push + InstancePush.CHUNK_COMMAND, chunkCommand.deviceAddress());
             memPutLong(push + InstancePush.LEVELS, pool.levels().deviceAddress());
             memPutInt(push + InstancePush.MAX_CHUNKS, maxChunks);
             occlusion(push + InstancePush.OCCLUSION, pyramid, width, height, mips);
             memPutLong(push + InstancePush.ROWS, this.views.rows().deviceAddress());
             memPutFloat(push + InstancePush.DISPLACEMENT, scene.materials().largestDisplacement());
-            instancesPass.bind(commands);
-            // A row of workgroups per view, at most 65,535 rows a dispatch (the guaranteed size).
-            for (int first = 0; first < count; first += MAX_ROWS) {
-                memPutInt(push + InstancePush.FIRST_ROW, first);
-                instancesPass.push(commands, push, InstancePush.BYTES);
-                Commands.dispatch(commands, (instanceCount + 63) / 64, Math.min(MAX_ROWS, count - first), 1);
+            memPutLong(push + InstancePush.STATS, chunkCommand.deviceAddress());
+            memPutLong(push + InstancePush.RETRY, retry.deviceAddress());
+            memPutInt(push + InstancePush.GROUPS_PER_ROW, groupsPerRow);
+            memPutInt(push + InstancePush.ROW_COUNT, count);
+            long cullPush = stack.nmalloc(8, CullPush.BYTES);
+            memPutLong(cullPush + CullPush.VIEWS, this.views.constants().deviceAddress());
+            memPutLong(cullPush + CullPush.MESHES, pool.meshTable().deviceAddress());
+            memPutLong(cullPush + CullPush.INSTANCES, scene.instanceAddress());
+            memPutLong(cullPush + CullPush.CHUNKS, chunks.deviceAddress());
+            memPutLong(cullPush + CullPush.MESHLETS, pool.meshlets().deviceAddress());
+            memPutLong(cullPush + CullPush.CLUSTER_LOD, pool.clusterLod().deviceAddress());
+            occlusion(cullPush + CullPush.OCCLUSION, pyramid, width, height, mips);
+            memPutLong(cullPush + CullPush.MATERIALS, scene.materialsAddress()); // each meshlet's raster bin
+            for (int round = 0; round < roundCount; round++) {
+                long command = chunkCommand.deviceAddress() + roundOffset(round);
+                memPutLong(push + InstancePush.CHUNK_COMMAND, command);
+                memPutInt(push + InstancePush.ROUND, round);
+                memPutInt(push + InstancePush.LAST_ROUND, round == roundCount - 1 ? 1 : 0);
+                instancesPass.bind(commands);
+                if (round == 0) {
+                    // A row of workgroups per view, at most 65,535 rows a dispatch (the guaranteed size).
+                    for (int first = 0; first < count; first += MAX_ROWS) {
+                        memPutInt(push + InstancePush.FIRST_ROW, first);
+                        instancesPass.push(commands, push, InstancePush.BYTES);
+                        Commands.dispatch(commands, groupsPerRow, Math.min(MAX_ROWS, count - first), 1);
+                    }
+                } else {
+                    // The workgroups the round before marked (none: a dispatch of none), after its cull pass read
+                    // the chunks this one writes.
+                    Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT
+                            | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT
+                            | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+                    memPutInt(push + InstancePush.FIRST_ROW, 0);
+                    instancesPass.push(commands, push, InstancePush.BYTES);
+                    Commands.dispatchIndirect(commands, chunkCommand.handle(), roundOffset(round - 1) + 20);
+                }
+                // The chunks feed the cull pass's indirect dispatch and the pass itself.
+                Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                        | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+                memPutLong(cullPush + CullPush.CHUNK_COMMAND, command); // how many chunks were written
+                cull.bind(commands);
+                cull.push(commands, cullPush, CullPush.BYTES);
+                Commands.dispatchIndirect(commands, chunkCommand.handle(), roundOffset(round));
             }
-        }
-        // The chunks feed the cull pass's indirect dispatch and the pass itself.
-        Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT
-                | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(8, CullPush.BYTES);
-            memPutLong(push + CullPush.VIEWS, this.views.constants().deviceAddress());
-            memPutLong(push + CullPush.MESHES, pool.meshTable().deviceAddress());
-            memPutLong(push + CullPush.INSTANCES, scene.instanceAddress());
-            memPutLong(push + CullPush.CHUNKS, chunks.deviceAddress());
-            memPutLong(push + CullPush.MESHLETS, pool.meshlets().deviceAddress());
-            memPutLong(push + CullPush.CLUSTER_LOD, pool.clusterLod().deviceAddress());
-            occlusion(push + CullPush.OCCLUSION, pyramid, width, height, mips);
-            memPutLong(push + CullPush.MATERIALS, scene.materialsAddress()); // each meshlet's raster bin
-            memPutLong(push + CullPush.CHUNK_COMMAND, chunkCommand.deviceAddress()); // how many chunks were written
-            cull.bind(commands);
-            cull.push(commands, push, CullPush.BYTES);
-            Commands.dispatchIndirect(commands, chunkCommand.handle(), 0);
         }
         split(commands, views, early, count, meshShading);
         sort(commands, views, early, count, meshShading);
@@ -595,6 +832,7 @@ final class CullPasses implements AutoCloseable {
             }
             chunks.close();
             chunkCommand.close();
+            retry.close();
         }
     }
 }

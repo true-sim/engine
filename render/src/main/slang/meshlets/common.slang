@@ -471,7 +471,9 @@ public struct ViewLists
     public uint* drawCommand;    // per bin, 6 words: VkDrawIndexedIndirectCommand, its index count growing; word 5
                                  // counts the indices reserved
     public uint* visibleCount;   // per bin the early (or only) phase, then the late one (words 2 * bin + phase); then
-                                 // per bin the most indices a phase wanted (words 2 * BINS + bin)
+                                 // per bin the most indices a phase wanted (words 2 * BINS + bin); reset by each cull.
+                                 // Then, never reset: per bin the most meshlets (3 * BINS + bin) and indices
+                                 // (4 * BINS + bin) a phase ever wanted, for the CPU to grow the lists by
 };
 
 /**

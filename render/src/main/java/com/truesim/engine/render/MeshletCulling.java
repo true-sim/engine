@@ -33,6 +33,7 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Views build(GraphBuilder g) {
+        MeshletSettings.apply(renderer, g); // the room culling grows to
         for (RenderView view : renderer.views()) {
             view.noSplit(); // split again only for the draws of this build that shade by type
         }

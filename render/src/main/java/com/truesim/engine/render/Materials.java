@@ -768,8 +768,21 @@ public final class Materials implements AutoCloseable {
         return graphBuffersVersion;
     }
 
-    private static long addressOf(com.truesim.engine.vulkan.DeviceBuffer buffer) {
-        return buffer == null ? 0 : buffer.deviceAddress();
+    /**
+     * The address a buffer field holds for {@code buffer}: none names the device's absent address, never 0, which
+     * lavapipe loads from in branches no invocation takes (docs/pitfalls.md, #461); shaders test it with
+     * {@code given(p)}.
+     */
+    private long addressOf(com.truesim.engine.vulkan.DeviceBuffer buffer) {
+        return buffer == null ? device.absentAddress() : buffer.deviceAddress();
+    }
+
+    /** The address material {@code id}'s buffer field {@code field} holds now, as shaders read it. */
+    public long bufferAddress(int id, MaterialField field) {
+        if (field.kind() != MaterialField.Kind.BUFFER) {
+            throw new IllegalArgumentException(field + " holds no buffer");
+        }
+        return table.getLong(fieldOffset(id, field));
     }
 
     /** Material {@code id}'s buffer fields are those of {@code material} now, its block's addresses written. */
@@ -794,6 +807,10 @@ public final class Materials implements AutoCloseable {
         for (int i = 0; i < count; i++) {
             countGraphBuffer(buffersOf[id][i], 1);
             bufferWritten[id][i] = table.getLong(block + bufferAt[id][i]); // as the record wrote it
+            if (buffersOf[id][i] == null) { // the record wrote 0 for none: the absent address instead
+                bufferWritten[id][i] = device.absentAddress();
+                table.putLong(block + bufferAt[id][i], bufferWritten[id][i]);
+            }
         }
         withBuffers.set(id);
     }
