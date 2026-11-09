@@ -95,7 +95,10 @@ public static const uint INSTANCE_MESH = 0xffffffu;
 public static const uint VIEW_CASTERS_ONLY = 1;             // shadow views: instances casting shadows only
 public static const uint VIEW_HIGHLIGHTED_ONLY = 2;         // instances with a highlight flag (View.highlights) only
 public static const uint VIEW_BOTH_SIDES = 4;                // shadow casters drawn two-sided: back faces kept
-public static const uint VIEW_UNHIGHLIGHTED_ONLY = 8;        // instances without a highlight flag only
+public static const uint VIEW_UNHIGHLIGHTED_ONLY = 8;
+public static const uint VIEW_OPEN_NEAR = 16;                // a sun's shadow views: nothing culled before the near
+                                                             // plane (clamped onto it), but masked meshlets...
+public static const uint VIEW_OPEN_NEAR_MASKED = 32;         // ...unless these too        // instances without a highlight flag only
 
 /**
  * Whether stored instance `instance` of id `id` (as stored, before relative()) is drawn in `view`: live, on its layers,
@@ -351,7 +354,8 @@ public bool inFrustum(View view, float3 center, float radius)
 {
     for (int i = 0; i < 6; i++)
     {
-        if (dot(view.planes[i].xyz, center) + view.planes[i].w < -radius)
+        if ((i != 4 || (view.flags & VIEW_OPEN_NEAR) == 0)
+            && dot(view.planes[i].xyz, center) + view.planes[i].w < -radius)
         {
             return false;
         }

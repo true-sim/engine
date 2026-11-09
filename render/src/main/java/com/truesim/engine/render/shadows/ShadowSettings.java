@@ -34,6 +34,41 @@ public final class ShadowSettings {
     public static final Setting<Boolean> CASCADE_PANCAKE = Setting.bool("shadows.cascades.pancake", true,
         "casters between the sun and a cascade's depth range drawn flattened onto its near plane, so they still cast "
             + "(where the GPU clamps depth); off: left out");
+    /**
+     * Whether the masked casters (foliage) before a cascade's depth range are flattened onto it too
+     * ({@link #CASCADE_PANCAKE}); off, they are culled there: a valley's forests towards a low sun filled the far
+     * cascade's lists past their limits and doubled the frame (#471), while terrain and buildings cast the shapes that
+     * matter from afar.
+     */
+    public static final Setting<Boolean> CASCADE_PANCAKE_MASKED = Setting.bool("shadows.cascades.pancakeMasked", false,
+        "masked casters (foliage) before a cascade's depth range flattened onto it too; off: culled there");
+    /**
+     * The share of each cascade's depths over which pixels take the next cascade more and more (dithered), and past the
+     * last its far field or the light: no seam where the texel size changes, no edge where the cascades end.
+     */
+    public static final Setting<Float> CASCADE_BLEND = Setting.decimal("shadows.cascades.blend", 0.2f, 0.01f, 0.5f,
+        "the share of each cascade's depths blended (dithered) into the next, or past the last into its far field");
+    /**
+     * The caster detail of the farthest cascade against the nearest's ({@link #CASTER_DETAIL}), in their own texels;
+     * the cascades between take it geometrically: far cascades, whose texels are many times the near ones', draw
+     * coarser levels of the casters' cluster hierarchies (1: every cascade alike).
+     */
+    public static final Setting<Float> CASCADE_FAR_DETAIL = Setting.decimal("shadows.cascades.farDetail", 8, 1, 64,
+        "the farthest cascade's caster detail (texels of error) against the nearest's; those between geometric");
+    /** What shadows a directional light's pixels past its last cascade ({@link #CASCADE_FAR_FIELD}). */
+    public enum FarField {
+        /** Nothing: the last cascade's blend fades into the light. */
+        NONE,
+        /**
+         * A ray per pixel towards the light from where the cascades end on, against the scene's top level (where
+         * rays are traced: the owner's {@code rayTracing}): terrain and buildings at any distance.
+         */
+        RAYS
+    }
+
+    /** What shadows a directional light's pixels past its last cascade: {@link FarField}. */
+    public static final Setting<FarField> CASCADE_FAR_FIELD = Setting.choice("shadows.cascades.farField", FarField.RAYS,
+        "what shadows the pixels past a sun's last cascade: RAYS (one per pixel, where rays are traced) or NONE");
     /** How far rays start off the surface, per unit of distance from the camera. */
     public static final Setting<Float> RAY_OFFSET = Setting.decimal("shadows.rays.offset", 2.0e-3f, 0, 0.1f,
         "how far shadow rays start off the surface, per unit of distance from the camera");
@@ -278,7 +313,8 @@ public final class ShadowSettings {
     public static final Setting<Integer> SOFT_LIGHTS = Setting.integer("shadows.soft.lights", 4, 0, 256,
         "soft spot and point lights traced soft in a frame at most, the most important; the rest traced hard");
     /** Every shadow setting. */
-    public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, CASCADE_DEBUG, CASCADE_PANCAKE,
+    public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, CASCADE_DEBUG, CASCADE_PANCAKE, CASCADE_PANCAKE_MASKED, CASCADE_BLEND,
+        CASCADE_FAR_DETAIL, CASCADE_FAR_FIELD,
         RAY_OFFSET,
         CASTER_DETAIL, ATLAS_SIZE, ATLAS_UPDATES, ATLAS_DRAWS, ATLAS_URGENT, ATLAS_LAG, TILE_DRAWS, TILE_TRIANGLES,
         AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF, MAP_FILTER, MAP_FILTER_RADIUS, MAP_PENUMBRA, MAP_NEAR, MAP_DISTANCE,

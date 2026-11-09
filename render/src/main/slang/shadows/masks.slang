@@ -217,9 +217,11 @@ void traceMain(uint3 id : SV_DispatchThreadID)
         float3x3 axes = viewAxes(t.viewProjection);
         uintImages[t.normal][id.xy] = uint2(p.sky ? 0 : packNormal(toView(axes, p.normal)), 0);
     }
-    if (p.sky)
+    TraceSlot s = ((TraceSlot*)t.traceSlots)[id.z];
+    // A cascades' far field traces only the pixels past where they end (their last blend): the rest no ray
+    if (p.sky || (s.from > 0 && mul(t.viewProjection, float4(p.position, 1)).w < s.from))
     {
-        writeMask(t, ((TraceSlot*)t.traceSlots)[id.z], id.xy, 1);
+        writeMask(t, s, id.xy, 1);
         return;
     }
     trace(t, id.z, id.xy, p, 0, 0, 0);

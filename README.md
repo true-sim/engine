@@ -1821,10 +1821,23 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   `shadows.auto.cutoff` units from every view (0: no cutoff) an AUTO light casts none.
 - **Cascades reach the sun.** Each cascade's light camera keeps true depth `shadows.cascades.casters` units (100)
   beyond its slice towards the light; casters farther (a valley's wall under a low sun) are drawn flattened onto its
-  near plane (pancaking: caster pipelines clamp depth, `VulkanDevice.depthClamp`, and the near side is open for
-  culling, `Camera.openNear`), so they cast into every cascade (`shadows.cascades.pancake`, on; off, or without the
-  device feature, they are left out, as before #468). `shadows.cascades.debug` tints what each cascade lights red,
+  near plane (pancaking: caster pipelines clamp depth, `VulkanDevice.depthClamp`, and the tile views cull nothing
+  before their near plane, `RenderView.openNear`), so they cast into every cascade (`shadows.cascades.pancake`, on;
+  off, or without the device feature, they are left out, as before #468). Masked casters (foliage) before the range
+  are culled unless `shadows.cascades.pancakeMasked`: a valley's forests towards a low sun doubled the showcase's
+  frame and overflowed the far cascade's lists, while terrain and buildings cast what matters from afar. `shadows.cascades.debug` tints what each cascade lights red,
   green, blue, yellow (a fifth of the light through its shadows): which cascade shades where.
+- **No seams, no end.** Over the last `shadows.cascades.blend` (0.2) of each cascade's depths pixels take the next
+  more and more (dithered by pixel; each slice is fitted from that far back): no seam where texels change size. Past
+  the last cascade, a **far field** (`shadows.cascades.farField`): `RAYS` (where the owner traces rays) traces one hard
+  ray per pixel towards the sun from where the last cascade's blend begins (nearer pixels take none), against the
+  scene's top level: terrain and buildings shadow kilometres away, and the last cascade blends into it. `NONE`, or
+  without rays: the last blend fades into the light. In the tint (`shadows.cascades.debug`) the far field is cyan.
+- **Far cascades draw coarser casters** (`shadows.cascades.farDetail`, 8): the farthest cascade's casters at that many
+  of its texels of error, those between geometrically from `shadows.casterDetail` at the nearest: cluster hierarchies
+  at their coarse levels where texels are coarse, so the far cascade's lists fit (`aForestInTheFarCascadeFitsItsLists`).
+  Masked foliage whose hierarchy keeps its leaf cards does not get fewer: the showcase's far cascade wanted 4.39 M
+  masked meshlets at 1 texel and 4.28 M at 16.
 - **Budget:** over the atlas, the least important light's tiles halve first (not below its `minSize`), then the least
   important lights cast none (`Shadows.stats()`: shrunk, dropped).
 - **Rays** (where a `RayTracing` is given; else those lights take maps): every traced light of a view is traced in one
