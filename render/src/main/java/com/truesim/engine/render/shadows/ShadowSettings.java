@@ -16,9 +16,24 @@ public final class ShadowSettings {
     /** The cascades' bias, in texels: along the normal, and a third of it deep. */
     public static final Setting<Float> CASCADE_BIAS = Setting.decimal("shadows.cascades.bias", 1.5f, 0, 16,
         "cascade bias, in texels: the lookup moves that far along the normal, and a third of it deep");
-    /** How far behind each cascade's slice, towards the light, casters still cast into it. */
+    /**
+     * How far behind each cascade's slice, towards the light, its depth range reaches: casters there keep their depth
+     * (their penumbrae's width); those beyond are flattened onto its near plane ({@link #CASCADE_PANCAKE}), or left out.
+     */
     public static final Setting<Float> CASCADE_CASTERS = Setting.decimal("shadows.cascades.casters", 100, 0, 100_000,
-        "how far behind each cascade's slice, towards the light, casters still cast into it, in units");
+        "how far behind each cascade's slice, towards the light, its depth range reaches, in units: casters beyond are "
+            + "flattened onto its near plane (shadows.cascades.pancake) or left out");
+    /** Debugging: what each cascade lights tinted by the cascade, red, green, blue, yellow (then cyan, magenta). */
+    public static final Setting<Boolean> CASCADE_DEBUG = Setting.bool("shadows.cascades.debug", false,
+        "debugging: what each cascade of a directional light lights is tinted by it: red, green, blue, yellow, ...");
+    /**
+     * Whether casters between the sun and a cascade's depth range (farther than {@link #CASCADE_CASTERS} beyond its
+     * slice, towards the light) are drawn flattened onto its near plane, where the device clamps depth: a mountain
+     * shadows the valley in every cascade. Off, they are left out, and a cascade shadows only what lies within its range.
+     */
+    public static final Setting<Boolean> CASCADE_PANCAKE = Setting.bool("shadows.cascades.pancake", true,
+        "casters between the sun and a cascade's depth range drawn flattened onto its near plane, so they still cast "
+            + "(where the GPU clamps depth); off: left out");
     /** How far rays start off the surface, per unit of distance from the camera. */
     public static final Setting<Float> RAY_OFFSET = Setting.decimal("shadows.rays.offset", 2.0e-3f, 0, 0.1f,
         "how far shadow rays start off the surface, per unit of distance from the camera");
@@ -263,7 +278,8 @@ public final class ShadowSettings {
     public static final Setting<Integer> SOFT_LIGHTS = Setting.integer("shadows.soft.lights", 4, 0, 256,
         "soft spot and point lights traced soft in a frame at most, the most important; the rest traced hard");
     /** Every shadow setting. */
-    public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
+    public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, CASCADE_DEBUG, CASCADE_PANCAKE,
+        RAY_OFFSET,
         CASTER_DETAIL, ATLAS_SIZE, ATLAS_UPDATES, ATLAS_DRAWS, ATLAS_URGENT, ATLAS_LAG, TILE_DRAWS, TILE_TRIANGLES,
         AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF, MAP_FILTER, MAP_FILTER_RADIUS, MAP_PENUMBRA, MAP_NEAR, MAP_DISTANCE,
         CHANGE_TESTS, CASTER_FACES, CASTER_LAYERS,

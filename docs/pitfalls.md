@@ -225,6 +225,20 @@ switched off.
 
 ## Shaders and the GPU
 
+**A cascade's depth range left the casters towards the sun out.** Each cascade's light camera reached 100 units
+(`shadows.cascades.casters`) beyond its slice towards the light; whatever stood farther was culled by the near plane and
+clipped. Under a low sun in a valley that is nearly everything shading the floor: the showcase's village lay sunlit at
+dawn while the ray-traced sun put it in the shadow of the valley's wall. The report said shadows "stop after the first
+cascade"; tile validity, list growth, cull rounds, splits, PCSS, mask filtering and caster LOD were each measured and
+ruled out first, and only the traced sun as a reference showed what was missing: the near cascade's casters were the
+only ones close enough to cast.
+- Proof: the showcase's dawn street at one frame, default cascades sunlit, `shadows.cascades.casters` 5000 and
+  `showcase.sunShadows=rayTraced` dark alike ([#468](https://github.com/true-sim/engine/issues/468));
+  `ShadowsTest.castersFarTowardsTheSunShadowEveryCascade` fails on main (a caster 1000 units towards the sun shadows no
+  cascade) and passes with casters flattened onto the near plane (depth clamped, near side open for culling).
+- Rule: a directional light's maps flatten the casters before their depth range onto it (`shadows.cascades.pancake`),
+  never drop them; a shadow that looks missing is compared with the traced sun before a cause is guessed.
+
 **A buffer's device address was only 4-byte aligned.** VMA places a buffer at the alignment the driver asks for, and
 the RX 9070 XT (Windows, Vulkan 1.4.359 driver) asks small buffers for 4 bytes: a 16-byte buffer started at `0x200e80004`.
 Slang marks a pointer's or a 64-bit value's load `Aligned 8` (a vector's up to 16), so every such load from these

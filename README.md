@@ -1748,6 +1748,12 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   cascade's from the screen's pixel size at its start; rounded to powers of two, changed only past
   `shadows.auto.hysteresis` octaves from the halfway point, so tiles stay as the camera moves. Beyond
   `shadows.auto.cutoff` units from every view (0: no cutoff) an AUTO light casts none.
+- **Cascades reach the sun.** Each cascade's light camera keeps true depth `shadows.cascades.casters` units (100)
+  beyond its slice towards the light; casters farther (a valley's wall under a low sun) are drawn flattened onto its
+  near plane (pancaking: caster pipelines clamp depth, `VulkanDevice.depthClamp`, and the near side is open for
+  culling, `Camera.openNear`), so they cast into every cascade (`shadows.cascades.pancake`, on; off, or without the
+  device feature, they are left out, as before #468). `shadows.cascades.debug` tints what each cascade lights red,
+  green, blue, yellow (a fifth of the light through its shadows): which cascade shades where.
 - **Budget:** over the atlas, the least important light's tiles halve first (not below its `minSize`), then the least
   important lights cast none (`Shadows.stats()`: shrunk, dropped).
 - **Rays** (where a `RayTracing` is given; else those lights take maps): every traced light of a view is traced in one

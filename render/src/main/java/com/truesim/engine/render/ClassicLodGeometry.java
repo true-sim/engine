@@ -159,7 +159,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                     Pipeline.Graphics depth = raster(device, list, vertexShader).depth(depthFormat);
                     drawDepth[list] = (masked ? depth.stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, "maskedDepthMain")
                         : depth).build();
-                    Pipeline.Graphics casters = raster(device, list, vertexShader).doubleSided().depth(depthFormat);
+                    Pipeline.Graphics casters = raster(device, list, vertexShader).doubleSided().depthClamp()
+                        .depth(depthFormat);
                     drawCasters[list] = (masked ? casters.stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading,
                         "maskedShadowMain") : casters).build();
                     if (idsShader != null) {
@@ -503,7 +504,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             type.name() + (masked ? "Masked" : "") + (casters ? "ShadowMain" : target == ShadingPipelines.DEPTH
                 ? "DepthMain" : "ClassicIdsMain"),
             0, type.geometry(), (bin == MeshletRenderer.BIN_OPAQUE && !casters ? ShadingPipelines.CULL_BACK
-            : ShadingPipelines.DOUBLE_SIDED) | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0), target,
+            : ShadingPipelines.DOUBLE_SIDED) | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0)
+            | (casters ? ShadingPipelines.CLAMPED : 0), target,
             DRAW_PUSH, ShadingHooks.Set.NONE);
     }
 

@@ -324,6 +324,22 @@ public final class Camera {
         return this;
     }
 
+    /**
+     * Opens an orthographic view's near side for culling: nothing in front of it is left out (a directional light's
+     * shadow map, whose casters between it and the light are drawn flattened onto its near plane by pipelines that
+     * clamp depth). Until the next {@link #setOrthographic}. Allocates nothing.
+     */
+    public Camera openNear() {
+        if (!orthographic) {
+            throw new IllegalStateException("A perspective view's near side is its eye");
+        }
+        planes[16] = 0;
+        planes[17] = 0;
+        planes[18] = 0;
+        planes[19] = 1;
+        return this;
+    }
+
     /** The view-projection matrix, column-major. */
     public float[] viewProjection() {
         return viewProjection;

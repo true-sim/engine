@@ -125,8 +125,9 @@ final class CascadeFit {
 
     /**
      * Places cascade {@code i} at {@code size} texels per side into {@code out}: centered on its slice, snapped to
-     * whole texels of the world, seeing casters {@code casters} units behind it towards the light. Returns its texel's
-     * size in the world; its depth (in world units) is {@code 2 radius + casters}.
+     * whole texels of the world, its depth range reaching {@code casters} units behind it towards the light (casters
+     * farther are flattened onto its near plane, {@link Camera#openNear}, or left out). Returns its texel's size in the
+     * world; its depth (in world units) is {@code 2 radius + casters}.
      */
     double place(int i, int size, double casters, Camera out) {
         double r = radius[i];
