@@ -7,6 +7,7 @@
 module forward;
 
 __exported import meshlets.common;
+import reflections.transparent;
 
 /**
  * The push block of shaded raster pipelines; mesh.slang's MeshPush and draw.slang's DrawPush keep the same bytes for
@@ -27,6 +28,16 @@ public struct ForwardPush
     public uint* typed;              // at 64: the view's lists split by shading bin (split.slang); typed draws only
     public uint category;            // the shading bin drawn, in typed draws
     public uint categories;          // shading bins the split lists have room for
+    // At 80, with REFLECTIONS: what blended and transmissive fragments trace their reflections through
+    // (TransparentReflections, reflections/transparent.slang); the scene behind (background) is the opaque color
+    public uint reflectDepth;        // sampled slot: a copy of the opaque depth
+    public uint reflectPyramid;      // sampled slot: its nearest-depth pyramid
+    public uint reflectPyramidMips;
+    public uint reflectSteps;        // the march's steps at most
+    public float reflectThickness;   // in meters along the normal
+    public float reflectDistance;    // how far rays go, in meters
+    public float reflectCutoff;      // perceptual roughness from which there are none
+    public float reflectEdgeFade;    // of the region's size, along each edge
 };
 
 [[vk::push_constant]]
@@ -42,6 +53,13 @@ public const uint FEATURES = 0;
  */
 [vk::constant_id(1)]
 public const uint GEOMETRY = 0;
+
+/**
+ * 1: the fragment traces its screen-space reflection through the opaque scene (blended and transmissive surfaces with
+ * render.ssr.transparent, TransparentReflections); 0: none, the shading as without it. Set when the pipeline is made.
+ */
+[vk::constant_id(3)]
+public const uint REFLECTIONS = 0;
 
 // ---------------------------------------------------------------- the split lists (split.slang writes them)
 
@@ -169,13 +187,70 @@ public HookSite rasterSite(uint instance, uint2 pixel)
     return HookSite.ofInstance(push.view[0].hooks, pixel, SHADING_RASTER, instance);
 }
 
-/** Surface `s` at `pixel` shaded with material type M and the variant's FEATURES; its holes (GEOMETRY_KEEP) left out. */
+/**
+ * Surface `s` at `pixel` shaded with material type M and the variant's FEATURES; its holes (GEOMETRY_KEEP) left out.
+ * With REFLECTIONS, the environment's reflection along the mirror direction partly replaced by what the fragment's
+ * ray meets in the opaque scene (reflectedOver).
+ */
 public float4 shadeTyped<M : IMaterial>(VertexOut s, uint2 pixel)
 {
     float4 uvs = float4(s.uv, s.uv1);
     discardHoles<M>(s, ddx(uvs), ddy(uvs));
+    if (REFLECTIONS != 0)
+    {
+        SurfaceOut surface;
+        HookSite site = rasterSite(s.instance, pixel);
+        float4 color = shadeMaterialSurface<M>(push.view[0], s, push.scene[0].materials, ddx(uvs), ddy(uvs),
+            push.lights, pixel, FEATURES, behind(s.instance), push.indirect, site, surface);
+        return reflectedOver(color, surface, s.world, site);
+    }
     return shadeMaterial<M>(push.view[0], s, push.scene[0].materials, ddx(uvs), ddy(uvs),
         push.lights, pixel, FEATURES, behind(s.instance), push.indirect, rasterSite(s.instance, pixel));
+}
+
+/**
+ * `color`, shaded with `surface` at camera-relative `world`, its environment's reflection along the mirror direction
+ * replaced by the opaque scene where the fragment's mirror ray meets it, by how much the hit is trusted:
+ * color + reflectance * trust * (hit - environment), as the opaque reflections' composite (reflect.slang), so energy
+ * stays as shading had it. The environment as shading took it (the indirect-light table's, with the view's indirect
+ * hooks at `site`, or the constant sky). Alpha as it was.
+ */
+public float4 reflectedOver(float4 color, SurfaceOut surface, float3 world, HookSite site)
+{
+    if (all(surface.reflectance <= 0) || surface.roughness >= push.reflectCutoff)
+    {
+        return color;
+    }
+    View view = push.view[0];
+    ScreenTrace t;
+    t.viewProjection = view.viewProjection;
+    t.inverseViewProjection = view.inverseViewProjection;
+    t.depth = push.reflectDepth;
+    t.pyramid = push.reflectPyramid;
+    t.pyramidMips = push.reflectPyramidMips;
+    t.chain = push.background - 1;
+    t.size = float2(push.backgroundRegion & 0xffff, push.backgroundRegion >> 16);
+    t.maxSteps = push.reflectSteps;
+    t.thickness = push.reflectThickness;
+    t.maxDistance = push.reflectDistance;
+    t.cutoff = push.reflectCutoff;
+    t.edgeFade = push.reflectEdgeFade;
+    float3 toViewer = normalize(view.eye - world);
+    float3 n = surface.normal;
+    float3 r = reflect(-toViewer, n);
+    ScreenHit hit = traceScreen(t, world, r, surface.roughness);
+    if (hit.trust <= 0)
+    {
+        return color;
+    }
+    float3 environment = SKY_REFLECTED;
+    if (given(push.indirect))
+    {
+        AroundLight hooked = aroundLight(site, world, n, n, toViewer,
+            around(r, surface.roughness, AROUND_SPECULAR | AROUND_VISIBILITY));
+        environment = aroundSpecular(push.indirect, hooked, r, surface.roughness);
+    }
+    return float4(color.rgb + surface.reflectance * hit.trust * (hit.color - environment), color.a);
 }
 
 /** A fragment's color and its surface outputs (surfaces.slang), for passes a technique asked them of. */

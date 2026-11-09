@@ -1,7 +1,8 @@
-// One level of a depth pyramid: each texel is the farthest depth (reverse depth: the smallest value), or with `nearest`
-// the nearest (the largest), of the texels it covers in the level below: 2 x 2 of them, and 3 along an odd edge, as levels halve rounding down (Vulkan's mip
-// sizes), so every texel below is covered. Level 0 reads the depth image, sampled; the others read the level below as
-// a storage image.
+// One level of a depth pyramid (or, with `copy`, a copy of the depth texel for texel: DepthCopy): each texel is the
+// farthest depth (reverse depth: the smallest value), or with `nearest` the nearest (the largest), of the texels it
+// covers in the level below: 2 x 2 of them, and 3 along an odd edge, as levels halve rounding down (Vulkan's mip
+// sizes), so every texel below is covered. Level 0 reads the depth image, sampled; the others read the level below as a
+// storage image.
 import bindless;
 
 struct PyramidPush
@@ -12,6 +13,7 @@ struct PyramidPush
     uint2 targetSize;
     uint fromDepth;     // 1: the source is the depth image
     uint nearest;       // 1: the nearest depth (tracing rays), 0: the farthest (occlusion culling)
+    uint copy;          // 1: a copy of the source at its size (DepthCopy), texel for texel
 };
 
 [[vk::push_constant]]
@@ -29,6 +31,11 @@ void pyramidMain(uint3 id : SV_DispatchThreadID)
 {
     if (any(id.xy >= push.targetSize))
     {
+        return;
+    }
+    if (push.copy != 0)
+    {
+        images[push.target][id.xy] = float4(source(int2(id.xy)), 0, 0, 0);
         return;
     }
     int2 base = int2(id.xy) * 2;

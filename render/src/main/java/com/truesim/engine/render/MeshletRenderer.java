@@ -853,6 +853,15 @@ public final class MeshletRenderer implements AutoCloseable {
      * outside a graph run them (their view's block's bits deciding).
      */
     RasterPipelines.Typed forwardPipelines(boolean surfaces, boolean opaque, ShadingHooks.Set hooks) {
+        return forwardPipelines(surfaces, opaque, hooks, false);
+    }
+
+    /**
+     * Like {@link #forwardPipelines(boolean, boolean, ShadingHooks.Set)}; with {@code reflecting}, the blended bin's
+     * pipelines trace transparent surfaces' screen-space reflections ({@link TransparentReflections}).
+     */
+    RasterPipelines.Typed forwardPipelines(boolean surfaces, boolean opaque, ShadingHooks.Set hooks,
+        boolean reflecting) {
         if (surfaces) {
             surfacesWanted = true;
         }
@@ -863,7 +872,7 @@ public final class MeshletRenderer implements AutoCloseable {
             more[sets.length] = hooks;
             preparedHooks = more;
         }
-        return raster.typed(scene.materials(), path() == Path.MESH_SHADERS, surfaces, opaque, hooks);
+        return raster.typed(scene.materials(), path() == Path.MESH_SHADERS, surfaces, opaque, hooks, reflecting);
     }
 
     /** A graph draws with the surface outputs: from now on their pipelines are made ahead too. */
@@ -908,11 +917,14 @@ public final class MeshletRenderer implements AutoCloseable {
         raster.drawTyped(commands, scene, own(view), path() == Path.MESH_SHADERS, late, clusters, indirect, pipelines);
     }
 
-    /** Like {@link #drawBlendedAttached}, shaded by type ({@link #drawTypedAttached}). Allocates nothing. */
+    /**
+     * Like {@link #drawBlendedAttached}, shaded by type ({@link #drawTypedAttached}), with transparent surfaces'
+     * reflections' push words at {@code reflections} (0: none). Allocates nothing.
+     */
     void drawBlendedTypedAttached(VkCommandBuffer commands, RenderView view, BlendedTargets.Kind kind, long clusters,
-        long behind, long indirect, RasterPipelines.Typed pipelines) {
+        long behind, long indirect, long reflections, RasterPipelines.Typed pipelines) {
         raster.drawBlendedTyped(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters, behind,
-            indirect, pipelines);
+            indirect, reflections, pipelines);
     }
 
     /** The device it draws on. */

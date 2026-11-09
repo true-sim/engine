@@ -57,12 +57,18 @@ final class ShadingPipelines implements AutoCloseable {
      * directional light and its map's depth range is flattened onto the map's near plane.
      */
     static final int CLAMPED = 4;
+    /**
+     * Flag: the fragment stage traces screen-space reflections (its {@code REFLECTIONS} constant, 3, set: blended
+     * surfaces with {@link TransparentReflections}).
+     */
+    static final int REFLECTING = 8;
 
     /**
      * What a pipeline is made of: its geometry stage (a vertex or mesh entry point), its fragment stage (or none, for
      * depth from positions alone), the specialization constants of its fragment entry point (a shading bin's
      * features, a type's geometry hooks, the shading hooks its view runs: their switches from 1024), its
-     * rasterization ({@link #CULL_BACK}, {@link #DOUBLE_SIDED}, with {@link #CLOCKWISE}), its targets
+     * rasterization ({@link #CULL_BACK}, {@link #DOUBLE_SIDED}, with {@link #CLOCKWISE}; {@link #REFLECTING} for its
+     * fragment stage), its targets
      * ({@link #COLOR} ...) and its push block's bytes.
      */
     record Key(String geometryShader, String geometryEntry, boolean mesh, String fragmentShader, String fragmentEntry,
@@ -160,7 +166,9 @@ final class ShadingPipelines implements AutoCloseable {
                 graphics.stage(VK_SHADER_STAGE_FRAGMENT_BIT, fragment != null ? fragment : geometry,
                     key.fragmentEntry());
                 int salt = coldSalt;
-                graphics.constants(salt != 0 ? hooks.specialization(key.hooks(), key.features(), key.geometry(), salt)
+                graphics.constants((key.raster() & REFLECTING) != 0
+                    ? hooks.specialization(key.hooks(), key.features(), key.geometry(), salt, 1)
+                    : salt != 0 ? hooks.specialization(key.hooks(), key.features(), key.geometry(), salt)
                     : hooks.specialization(key.hooks(), key.features(), key.geometry()));
             } else {
                 graphics.constants(hooks.specialization(ShadingHooks.Set.NONE)); // the hooks' switches, all off

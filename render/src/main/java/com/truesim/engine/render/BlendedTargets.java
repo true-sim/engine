@@ -24,10 +24,13 @@ import java.util.Objects;
  *               by what they let through
  * @param indirect the view's indirect light ({@link IndirectInputs}), or null: the constant sky
  * @param shadingHooks the view's shading hooks ({@link ShadingHookInputs})
+ * @param reflections what blended and transmissive fragments trace their screen-space reflections through
+ *                    ({@link TransparentReflections}; {@link #behind} is then the opaque scene's color), or null: none
+ *                    ({@link Kind#OPAQUE} takes none)
  */
 public record BlendedTargets(Kind kind, Image color, Image accumulated, Image revealage, Image depth, Buffer lights,
     ShadowInputs.Set shadows, ViewPort region, Image behind, IndirectInputs.Set indirect,
-    ShadingHookInputs.Set shadingHooks) {
+    ShadingHookInputs.Set shadingHooks, TransparentReflections reflections) {
 
     /** How blended surfaces are drawn. */
     public enum Kind {
@@ -49,10 +52,27 @@ public record BlendedTargets(Kind kind, Image color, Image accumulated, Image re
         if (kind == Kind.WEIGHTED ? accumulated == null || revealage == null : color == null) {
             throw new IllegalArgumentException(kind + " takes its targets");
         }
+        if (reflections != null && (kind == Kind.OPAQUE || behind == null)) {
+            throw new IllegalArgumentException("Reflections take the scene behind, blended " + kind);
+        }
     }
 
-    /** Declares that {@code pass} samples the scene behind and reads the indirect light, where there are some. */
+    /** Without reflections of blended and transmissive surfaces. */
+    public BlendedTargets(Kind kind, Image color, Image accumulated, Image revealage, Image depth, Buffer lights,
+        ShadowInputs.Set shadows, ViewPort region, Image behind, IndirectInputs.Set indirect,
+        ShadingHookInputs.Set shadingHooks) {
+        this(kind, color, accumulated, revealage, depth, lights, shadows, region, behind, indirect, shadingHooks,
+            null);
+    }
+
+    /**
+     * Declares that {@code pass} samples the scene behind and reads the indirect light, where there are some, and what
+     * the reflections trace through.
+     */
     public GraphBuilder.PassBuilder readBehind(GraphBuilder.PassBuilder pass) {
+        if (reflections != null) {
+            reflections.readBy(pass);
+        }
         if (indirect != null) {
             indirect.readBy(pass, com.truesim.engine.graph.Access.SAMPLED_FRAGMENT,
                 com.truesim.engine.graph.BufferAccess.DRAW_READ);
@@ -70,6 +90,14 @@ public record BlendedTargets(Kind kind, Image color, Image accumulated, Image re
     /** The indirect light's table address in a pass with context {@code ctx}; 0 without. Allocates nothing. */
     public long indirectAddress(com.truesim.engine.graph.PassContext ctx) {
         return indirect == null ? ctx.absent() : ctx.address(indirect.table());
+    }
+
+    /**
+     * The reflections' push words for a pass with context {@code ctx}, on {@code stack}; 0 without reflections.
+     * Allocates nothing.
+     */
+    public long reflectionWords(com.truesim.engine.graph.PassContext ctx, org.lwjgl.system.MemoryStack stack) {
+        return reflections == null ? 0 : reflections.words(ctx, stack);
     }
 
     /** {@code pass}, drawing within the render region of {@link #region} where there is one. */

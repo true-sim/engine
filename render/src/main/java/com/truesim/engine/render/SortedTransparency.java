@@ -80,11 +80,12 @@ public final class SortedTransparency implements Transparency {
             return; // nothing blended: the color as it is
         }
         Image depth = taken != null ? taken : g.read(Keys.SCENE_DEPTH);
-        Image behind = Transparency.behind(g, materials, color); // the opaque scene, before anything blends over it
+        TransparentReflections reflections = TransparentReflections.of(g, depth); // render.ssr.transparent
+        Image behind = Transparency.behind(g, materials, color, reflections); // the opaque scene, before blending
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         BlendedTargets targets = new BlendedTargets(BlendedTargets.Kind.SORTED, color, null, null, depth, lights,
-            shadows, g.view(), behind, IndirectInputs.of(g), ShadingHookInputs.of(g, view.view()));
+            shadows, g.view(), behind, IndirectInputs.of(g), ShadingHookInputs.of(g, view.view()), reflections);
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawBlended(g, view.view(), targets, load);

@@ -75,7 +75,8 @@ public final class WeightedBlendedTransparency implements Transparency {
             return; // nothing blended: the color as it is
         }
         Image depth = taken != null ? taken : g.read(Keys.SCENE_DEPTH);
-        Image behind = Transparency.behind(g, materials, color);
+        TransparentReflections reflections = TransparentReflections.of(g, depth); // render.ssr.transparent
+        Image behind = Transparency.behind(g, materials, color, reflections);
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         ViewPort region = g.view();
@@ -85,7 +86,7 @@ public final class WeightedBlendedTransparency implements Transparency {
         Image revealage = g.create(name + " blended revealage", ImageDesc.of(Format.of(REVEALAGE_FORMAT),
             color.width(), color.height()));
         BlendedTargets targets = new BlendedTargets(BlendedTargets.Kind.WEIGHTED, null, accumulated, revealage, depth,
-            lights, shadows, region, behind, IndirectInputs.of(g), ShadingHookInputs.of(g, view.view()));
+            lights, shadows, region, behind, IndirectInputs.of(g), ShadingHookInputs.of(g, view.view()), reflections);
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawBlended(g, view.view(), targets, load);

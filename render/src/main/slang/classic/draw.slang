@@ -16,6 +16,17 @@ struct ClassicPush
     uint unusedLate;
     uint background;          // at 56: the scene behind, for transmission (common.slang's Background); 0: none
     uint backgroundRegion;
+    uint64_t unusedTyped;     // forward.slang's split lists, not drawn from here
+    uint unusedCategory;
+    uint unusedCategories;
+    uint reflectDepth;        // at 80: transparent surfaces' screen-space reflections, as forward.slang's ForwardPush
+    uint reflectPyramid;
+    uint reflectPyramidMips;
+    uint reflectSteps;
+    float reflectThickness;
+    float reflectDistance;
+    float reflectCutoff;
+    float reflectEdgeFade;
 };
 
 [[vk::push_constant]]

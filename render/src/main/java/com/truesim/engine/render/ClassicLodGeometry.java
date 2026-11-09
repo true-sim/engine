@@ -517,6 +517,13 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
      */
     @AllowAllocation("building the graph, when it changes")
     private Pipeline[] typed(Materials materials, int target, int categories, ShadingHooks.Set hooks) {
+        return typed(materials, target, categories, hooks, false);
+    }
+
+    /** Like the above; with {@code reflecting}, the blended lists' pipelines trace reflections. */
+    @AllowAllocation("building the graph, when it changes")
+    private Pipeline[] typed(Materials materials, int target, int categories, ShadingHooks.Set hooks,
+        boolean reflecting) {
         boolean weighted = target == ShadingPipelines.WEIGHTED;
         Pipeline[] parts = new Pipeline[LISTS * categories];
         for (int category = 0; category < Math.min(categories, materials.binCount()); category++) {
@@ -530,7 +537,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                     || target == ShadingPipelines.COLOR_SURFACES && bin == MeshletRenderer.BIN_BLENDED) {
                     continue;
                 }
-                parts[list * categories + category] = shading.get(forwardKey(type, features, list, target, hooks));
+                parts[list * categories + category] = shading.get(forwardKey(type, features, list, target, hooks,
+                    reflecting && bin == MeshletRenderer.BIN_BLENDED));
             }
         }
         return parts;
@@ -544,6 +552,13 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     @AllowAllocation("building the graph, when it changes")
     static ShadingPipelines.Key forwardKey(MaterialType type, int features, int list, int target,
         ShadingHooks.Set hooks) {
+        return forwardKey(type, features, list, target, hooks, false);
+    }
+
+    /** Like the above; with {@code reflecting}, its fragment stage traces reflections ({@link TransparentReflections}). */
+    @AllowAllocation("building the graph, when it changes")
+    static ShadingPipelines.Key forwardKey(MaterialType type, int features, int list, int target,
+        ShadingHooks.Set hooks, boolean reflecting) {
         boolean weighted = target == ShadingPipelines.WEIGHTED;
         int bin = list % MeshletRenderer.BINS;
         boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
@@ -552,7 +567,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 ? (masked ? "MaskedSurfaceMain" : "SurfaceMain") : masked ? "MaskedMain" : "FragmentMain"), features,
             type.geometry(),
             (bin == MeshletRenderer.BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED)
-                | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0),
+                | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0)
+                | (reflecting ? ShadingPipelines.REFLECTING : 0),
             target, DRAW_PUSH, hooks);
     }
 
@@ -716,7 +732,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         com.truesim.engine.graph.Image behind = targets.behind();
         int categories = selection.categories();
         Pipeline[] pipeline = typed(materials, weighted ? ShadingPipelines.WEIGHTED : sorted ? ShadingPipelines.OVER
-            : ShadingPipelines.COLOR, categories, targets.hooks());
+            : ShadingPipelines.COLOR, categories, targets.hooks(), targets.reflections() != null);
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
@@ -724,15 +740,20 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             long words = SceneBehind.words(ctx, behind);
             long address = ctx.addressOrAbsent(lights);
             long indirect = targets.indirectAddress(ctx);
-            for (int category = 0; category < categories; category++) {
-                for (int drawList = MeshletRenderer.BIN_BLENDED; drawList < LISTS; drawList += MeshletRenderer.BINS) {
-                    int part = drawList * categories + category;
-                    if (order == null) {
-                        recordPart(ctx, pipeline[part], part, view, address, list, words, indirect, categories);
-                    } else { // the part's draws farthest first, from the sorted commands
-                        int sortedPart = (drawList == MeshletRenderer.BIN_BLENDED ? 0 : categories) + category;
-                        recordPart(ctx, pipeline[part], part, view, address, list, words, indirect, categories,
-                            order, (long) COMMAND_BYTES * maxDraws * sortedPart);
+            try (MemoryStack stack = stackPush()) {
+                long reflections = targets.reflectionWords(ctx, stack);
+                for (int category = 0; category < categories; category++) {
+                    for (int drawList = MeshletRenderer.BIN_BLENDED; drawList < LISTS;
+                         drawList += MeshletRenderer.BINS) {
+                        int part = drawList * categories + category;
+                        if (order == null) {
+                            recordPart(ctx, pipeline[part], part, view, address, list, words, indirect, categories,
+                                null, 0, reflections);
+                        } else { // the part's draws farthest first, from the sorted commands
+                            int sortedPart = (drawList == MeshletRenderer.BIN_BLENDED ? 0 : categories) + category;
+                            recordPart(ctx, pipeline[part], part, view, address, list, words, indirect, categories,
+                                order, (long) COMMAND_BYTES * maxDraws * sortedPart, reflections);
+                        }
                     }
                 }
             }
@@ -859,12 +880,13 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
      */
     private void recordPart(PassContext ctx, Pipeline pipeline, int part, RenderView view, long lights,
         Buffer list, long behind, long indirect, int categories) {
-        recordPart(ctx, pipeline, part, view, lights, list, behind, indirect, categories, null, 0);
+        recordPart(ctx, pipeline, part, view, lights, list, behind, indirect, categories, null, 0, 0);
     }
 
     /** Like the above, the part's commands from {@code sortedCommands} at {@code offset} where given (else the list's). */
     private void recordPart(PassContext ctx, Pipeline pipeline, int part, RenderView view, long lights,
-        Buffer list, long behind, long indirect, int categories, Buffer sortedCommands, long offset) {
+        Buffer list, long behind, long indirect, int categories, Buffer sortedCommands, long offset,
+        long reflections) {
         if (pipeline == null) {
             return;
         }
@@ -878,6 +900,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             memPutLong(push + ClassicPush.LIGHTS, lights);
             memPutLong(push + ClassicPush.BACKGROUND, behind);
             memPutLong(push + ClassicPush.INDIRECT, indirect);
+            TransparentReflections.copyWords(reflections, push);
             Commands.bindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
             pipeline.bind(commands);
             pipeline.push(commands, push, DRAW_PUSH);
