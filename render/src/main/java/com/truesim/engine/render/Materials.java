@@ -101,7 +101,7 @@ public final class Materials implements AutoCloseable {
     // Which materials instances take (reference), and per shading bin the raster bins those draw in: pipelines are
     // needed for those alone. Sticky, guarded by `usage`; drawnVersion changes as a bin first draws in a raster bin.
     private final Object usage = new Object();
-    private long[] referenced = new long[1];
+    private volatile long[] referenced = new long[1]; // written under usage; forgetting swaps in a copy
     private int[] slotBin = new int[16];   // per id written, its shading bin, and its raster bin's bit
     private int[] slotRaster = new int[16];
     private int[] binDrawn = new int[16];
@@ -585,8 +585,17 @@ public final class Materials implements AutoCloseable {
     /** Whether an instance took material {@code id} ({@link #reference}). */
     private boolean takenByInstances(int id) {
         synchronized (usage) {
-            return id >>> 6 < referenced.length && (referenced[id >>> 6] & 1L << id) != 0;
+            return taken(id);
         }
+    }
+
+    /**
+     * Whether instances took material {@code id} since it was added ({@link #reference}): what a scene may skip telling
+     * the table again. An id removed and retired is forgotten. Thread-safe; allocates nothing.
+     */
+    public boolean taken(int id) {
+        long[] bits = referenced;
+        return id >= 0 && id >>> 6 < bits.length && (bits[id >>> 6] & 1L << id) != 0;
     }
 
     /** Notes whether material {@code id}'s type displaces, and by how much at most. */
@@ -1126,6 +1135,7 @@ public final class Materials implements AutoCloseable {
         for (int i = 0; i < retiringCount; i++) {
             int id = retiring[i];
             if (table.slots().isFinished(retireAt[i])) {
+                forget(id, blockLength[id]);
                 ids.release(id, blockLength[id]);
                 blockLength[id] = 0;
             } else {
@@ -1134,6 +1144,21 @@ public final class Materials implements AutoCloseable {
             }
         }
         retiringCount = kept;
+    }
+
+    /**
+     * Forgets that instances took ids {@code first} to {@code first + length - 1} ({@link #reference}): removed, no frame
+     * in flight reads them, and whoever takes them next starts afresh. Kept, a material added under a reused id would be
+     * held to displacing as the one before it did (effects-vegetation#2: plants coming and going round the viewer).
+     */
+    private void forget(int first, int length) {
+        synchronized (usage) {
+            long[] bits = referenced.clone(); // scenes check taken() without the lock: they see the bits whole
+            for (int id = first; id < first + length && id >>> 6 < bits.length; id++) {
+                bits[id >>> 6] &= ~(1L << id);
+            }
+            referenced = bits;
+        }
     }
 
     private void freeBlocks(int id) {
