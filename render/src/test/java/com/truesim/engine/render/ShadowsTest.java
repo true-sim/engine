@@ -971,6 +971,126 @@ class ShadowsTest {
     }
 
     @Test
+    void cascadesMatchRayTracedShadowsInEveryDepthBandWhereverTheCameraIs() {
+        // The showcase's low sun and cascades (four of 4096 texels reaching 600 units, blended, the far field's rays
+        // past them) against ray-traced shadows of the sun's disc (softRayTraced(0.0047)): screens at depths from 10
+        // to 1200 units facing the camera, each shadowed by a caster towards the sun, each screen a band of depth.
+        // In every band the cascades' light differs from the reference by little on average and at most; with the
+        // cascades as before (no blend, nothing past the last) the band past them is lit where the reference is
+        // shadowed. The camera moved a few units sideways and ahead: the shadows stay where they are in the world (a
+        // point's light is the same) and still match the reference: no edge moves with the camera.
+        assumeThat(device.rayTracing()).as("ray tracing").isTrue();
+        rayTracing = new RayTracing(device, pool, 32);
+        rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
+        double sl = Math.sqrt(0.6 * 0.6 + 0.25 * 0.25 + 0.75 * 0.75);
+        double[] sun = {-0.6 / sl, -0.25 / sl, -0.75 / sl};
+        float s45 = (float) Math.sqrt(0.5);
+        double ax = -sun[2];
+        double az = sun[0];
+        double al = Math.sqrt(ax * ax + az * az);
+        double half = Math.acos(-sun[1]) / 2;
+        float[] facing = {(float) (ax / al * Math.sin(half)), 0, (float) (az / al * Math.sin(half)),
+            (float) Math.cos(half)};
+        double[] depths = {10, 30, 60, 120, 300, 500, 1200};
+        double[][] at = new double[depths.length][];
+        for (int i = 0; i < depths.length; i++) {
+            double d = depths[i];
+            double x = d * Math.tan(Math.toRadians(-24 + 8 * i));
+            at[i] = new double[] {x, -d};
+            scene.set(2 * i, quad, 0, x, 0, -d, s45, 0, 0, s45, (float) (0.06 * d), 1, (float) (0.06 * d));
+            double g = 0.15 * d;
+            scene.set(2 * i + 1, quad, 0, x - sun[0] * g, -sun[1] * g, -d - sun[2] * g, facing[0], facing[1],
+                facing[2], facing[3], (float) (0.025 * d), 1, (float) (0.025 * d));
+        }
+        double[][] cameras = {{0, 0}, {-1.5, -2}};
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        try (Lights lights = new Lights(device, 1, 8)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            // Per camera, run (the reference, the cascades, as before) and screen: its points' light (3 x 3 texels)
+            int[][][][] seen = new int[cameras.length][3][depths.length][];
+            for (int c = 0; c < cameras.length; c++) {
+                camera.position(cameras[c][0], 0, cameras[c][1]);
+                camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+                view.set(camera, 1, MeshletRenderer.MODE_LIT);
+                for (int run = 0; run < 3; run++) {
+                    lights.shadow(0, run == 0 ? ShadowSpec.softRayTraced(0.0047) : ShadowSpec.cascades(4, 4096, 600));
+                    SceneView main = newGraph();
+                    if (run == 2) {
+                        graph.settings().set(ShadowSettings.CASCADE_BLEND, 0.01f)
+                            .set(ShadowSettings.CASCADE_FAR_FIELD, ShadowSettings.FarField.NONE);
+                    }
+                    main.port().add(forward(geometry).apply(main)).add(new ClusteredLights(lights, main))
+                        .add(owner(geometry, lights).view(main));
+                    main.port().output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+                    frame(colorTarget, 4);
+                    frame(colorTarget, 4);
+                    frame(colorTarget, 4);
+                    byte[] color = frame(colorTarget, 4);
+                    for (int i = 0; i < depths.length; i++) {
+                        double d = depths[i];
+                        int[] points = new int[49];
+                        for (int k = 0; k < 49; k++) {
+                            double u = (k % 7 - 3) / 3.0 * 0.05 * d;
+                            double v = (k / 7 - 3) / 3.0 * 0.05 * d;
+                            points[k] = red(color, pixel(at[i][0] + u - cameras[c][0], v, at[i][1] - cameras[c][1]));
+                        }
+                        seen[c][run][i] = points;
+                    }
+                }
+            }
+            for (int i = 0; i < depths.length; i++) {
+                int[] reference = seen[0][0][i];
+                int lit = 0;
+                int dark = 255;
+                for (int value : reference) {
+                    lit = Math.max(lit, value);
+                    dark = Math.min(dark, value);
+                }
+                assertThat(dark).as("the reference: the screen at %s shadowed, against %d lit", depths[i], lit)
+                    .isLessThan(lit / 2);
+                for (int c = 0; c < cameras.length; c++) {
+                    for (int run = 1; run < 3; run++) {
+                        double mean = 0;
+                        int max = 0;
+                        for (int k = 0; k < reference.length; k++) {
+                            int difference = Math.abs(seen[c][run][i][k] - seen[c][0][i][k]);
+                            mean += difference / (double) reference.length;
+                            max = Math.max(max, difference);
+                        }
+                        if (run == 1) {
+                            assertThat(mean).as("camera %d, the band at %s: the mean difference to the reference, of "
+                                + "%d lit", c, depths[i], lit).isLessThan(lit / 25.0);
+                            assertThat(max).as("camera %d, the band at %s: the most (an outline's texel)", c, depths[i])
+                                .isLessThan(lit / 4);
+                        } else if (depths[i] > 600) {
+                            assertThat(mean).as("before, past the cascades at %s: lit where the reference shadows",
+                                depths[i]).isGreaterThan(lit / 12.0);
+                        }
+                    }
+                }
+                // A point of the world takes the same light wherever the camera is: in the cascades as in the
+                // reference (whose texels at a shadow's outline differ by where the camera is: the pixels' grid)
+                double[] moved = new double[2];
+                for (int run = 0; run < 2; run++) {
+                    for (int k = 0; k < reference.length; k++) {
+                        moved[run] += Math.abs(seen[1][run][i][k] - seen[0][run][i][k]) / (double) reference.length;
+                    }
+                }
+                assertThat(moved[1]).as("the band at %s: the mean difference the camera moved makes, of %d lit, the "
+                    + "reference's %s", depths[i], lit, moved[0]).isLessThan(moved[0] + lit / 25.0);
+            }
+        }
+        for (int i = 0; i < 2 * depths.length; i++) {
+            scene.remove(i);
+        }
+        camera.position(0, 0, 0);
+        camera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        scene.set(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
+    @Test
     void maskedCastersBeforeTheRangeCastOnlyWhenFlattenedToo() {
         // A screen 60 units away, a caster 1000 units towards a low sun from it: opaque, it is flattened onto the
         // cascade and shadows the screen; masked (foliage's bin), it is culled there by default

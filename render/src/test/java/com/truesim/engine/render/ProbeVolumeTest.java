@@ -610,6 +610,79 @@ class ProbeVolumeTest {
         return off / light;
     }
 
+    /**
+     * Under a roof as wide as the floor (a slab the white sky barely reaches into) the probes find the floor dark, the
+     * environment would light it fully: where the last cascade gives way to the environment the floor's light steps up.
+     * That edge is the camera's, not the world's: past the probes' grid (FADE 0) it steps where the grid ends, and the
+     * grid snaps by its spacing as the camera moves, so a point of the floor there flips between dark and lit when the
+     * camera moves a few centimeters across a snap. Fading past the box the probes enclose wherever the camera is
+     * (FADE), the floor's light is continuous in the camera's position: the camera moved across a snap changes every
+     * point of the floor by little, and no row of the image steps.
+     */
+    @Test
+    void theLastCascadeFadesIntoTheEnvironmentContinuouslyInTheCamerasPosition() {
+        int grey = materials.add(new Material(MR.withBaseColor(new Color(0.5f, 0.5f, 0.5f, 1))).feature(LAMBERT));
+        wall(0, grey, 0, 0, 0, ReferencePathTracerTest.UP, 60);
+        wall(1, grey, 0, 4, 0, ReferencePathTracerTest.DOWN, 60);
+        lights.setCount(0);
+        graph.settings().set(ProbeVolume.SPACING, 1f);
+        lit("main", Environment.uniform("white", 1, 1, 1));
+        double[] floor = new double[24]; // world z of the floor points, the camera's x and y
+        for (int i = 0; i < floor.length; i++) {
+            floor[i] = -1.5 - 0.5 * i;
+        }
+        double[][] seen = new double[2][];
+        for (float fade : new float[] {0, 1}) {
+            graph.settings().set(ProbeVolume.FADE, fade);
+            for (int at = 0; at < 2; at++) {
+                double z = at == 0 ? 0.1 : -0.1; // across the grid's snap at 0
+                camera.position(0, 2, z);
+                camera.set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.01);
+                view.set(camera, 1, MeshletRenderer.MODE_LIT);
+                float[] image = frames(60);
+                seen[at] = new double[floor.length];
+                double[] rowZ = new double[SIZE];
+                double[] rowLight = new double[SIZE];
+                for (int row = 0; row < SIZE; row++) {
+                    // Where the row's middle meets the floor: looking down 45 degrees, a quarter turn of view
+                    double y = 1 - (row + 0.5) * 2 / SIZE;
+                    rowZ[row] = z - 2 * (1 + y) / (1 - y);
+                    rowLight[row] = (image[4 * (row * SIZE + SIZE / 2)] + image[4 * (row * SIZE + SIZE / 2 - 1)]) / 2;
+                }
+                for (int i = 0; i < floor.length; i++) {
+                    // Between the rows around the floor point (z falls as rows rise)
+                    for (int row = SIZE - 1; row > 0; row--) {
+                        if (rowZ[row] >= floor[i] && rowZ[row - 1] <= floor[i]) {
+                            double t = (rowZ[row] - floor[i]) / (rowZ[row] - rowZ[row - 1]);
+                            seen[at][i] = rowLight[row] + t * (rowLight[row - 1] - rowLight[row]);
+                        }
+                    }
+                }
+            }
+            double bright = 0;
+            double worst = 0;
+            double step = 0;
+            for (int i = 0; i < floor.length; i++) {
+                bright = Math.max(bright, Math.max(seen[0][i], seen[1][i]));
+                worst = Math.max(worst, Math.abs(seen[0][i] - seen[1][i]));
+                if (i > 0) {
+                    step = Math.max(step, Math.abs(seen[0][i] - seen[0][i - 1]));
+                }
+            }
+            double dark = Math.min(seen[0][0], seen[1][0]);
+            assertThat(dark).as("fade %s: the floor near the camera, under the roof", fade).isLessThan(bright / 2);
+            if (fade == 0) {
+                assertThat(worst).as("no fade: a point of the floor across the camera's snap, of the lit floor's %s",
+                    bright).isGreaterThan(bright / 2);
+            } else {
+                assertThat(worst).as("a point of the floor across the camera's snap, of the lit floor's %s", bright)
+                    .isLessThan(bright / 8);
+                assertThat(step).as("between floor points half a meter apart, of the lit floor's %s", bright)
+                    .isLessThan(bright / 4);
+            }
+        }
+    }
+
     @Test
     void twoViewsShareOneVolume() {
         int white = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1))).feature(LAMBERT));

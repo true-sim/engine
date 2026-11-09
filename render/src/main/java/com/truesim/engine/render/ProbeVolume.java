@@ -112,6 +112,13 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
     public static final Setting<Float> VIEW_BIAS = ProbeVolumeLighting.PROBES.setting("viewBias");
     /** Of a cascade's probes from its edge: where it blends into the next one. */
     public static final Setting<Float> BLEND = ProbeVolumeLighting.PROBES.setting("blend");
+    /**
+     * How far past the box its probes enclose wherever the camera is the last cascade's light carries, fading into the
+     * environment, of that box's half extent along each axis (0: none, the environment from the grid's edge: a step in
+     * light where the grid ends, which moves with the camera, by its spacing). The fade follows the camera
+     * continuously, and the light past the grid is its edge probes'.
+     */
+    public static final Setting<Float> FADE = ProbeVolumeLighting.PROBES.setting("fade");
     /** The longest distance a probe's moments hold, of its spacing. */
     public static final Setting<Float> DEPTH_RANGE = ProbeVolumeLighting.PROBES.setting("depthRange");
     /** Probes move off surfaces near them. */
@@ -207,7 +214,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
     /** Its settings: the probes kind's tunables ({@link ProbeVolumeLighting.Probes}). */
     public static final List<Setting<?>> ALL = List.of(ASYNC, ITERATIONS, CASCADES, PROBES, PROBES_UP, SPACING, RAYS,
         FIXED_RAYS, BUDGET,
-        LAYERS, NORMAL_BIAS, VIEW_BIAS, BLEND, DEPTH_RANGE, RELOCATE, CLASSIFY, MAX_FRAMES, ADAPTIVE, SENSITIVITY,
+        LAYERS, NORMAL_BIAS, VIEW_BIAS, BLEND, FADE, DEPTH_RANGE, RELOCATE, CLASSIFY, MAX_FRAMES, ADAPTIVE, SENSITIVITY,
         DRIFT, INVALIDATE, LIGHT_MARGIN, INSTANCE_MARGIN, FRESH, SKY_FOOTPRINT, EMITTER_SAMPLES, EMITTERS,
         EMITTER_SELECTION);
 
@@ -671,9 +678,15 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 memPutFloat(header + ProbeVolumeDataLayout.NORMAL_BIAS, settings.get(NORMAL_BIAS));
                 memPutFloat(header + ProbeVolumeDataLayout.VIEW_BIAS, settings.get(VIEW_BIAS));
                 memPutFloat(header + ProbeVolumeDataLayout.BLEND, settings.get(BLEND));
+                memPutFloat(header + ProbeVolumeDataLayout.FADE, settings.get(FADE));
                 memPutFloat(header + ProbeVolumeDataLayout.MAX_DISTANCE, settings.get(DEPTH_RANGE));
                 memPutLong(header + ProbeVolumeDataLayout.STATES, ctx.address(states));
                 int[] probes = {across, up, across};
+                for (int axis = 0; axis < 3; axis++) {
+                    // The camera, which the last cascade fades into the environment around (FADE)
+                    memPutFloat(header + ProbeVolumeDataLayout.ANCHOR + 4L * axis,
+                        (float) (camera.position(axis) - Volume.origin(camera.position(axis), coarsest)));
+                }
                 for (int c = 0; c < cascades; c++) {
                     double s = spacing * (double) (1 << c);
                     for (int axis = 0; axis < 3; axis++) {
