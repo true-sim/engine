@@ -1833,6 +1833,11 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   ray per pixel towards the sun from where the last cascade's blend begins (nearer pixels take none), against the
   scene's top level: terrain and buildings shadow kilometres away, and the last cascade blends into it. `NONE`, or
   without rays: the last blend fades into the light. In the tint (`shadows.cascades.debug`) the far field is cyan.
+  Against ray-traced shadows of the sun's disc (`softRayTraced(0.0047)`), screens from 10 to 1200 units, each a band
+  of depth, differ by under 4 % of the light on average and a quarter at one outline's texel, and the camera moved 1.5
+  units aside and 2 ahead changes them as much as it changes the reference: nothing moves with the camera; before the
+  blend and the far field the band past the cascades was lit where the reference shadows
+  (`cascadesMatchRayTracedShadowsInEveryDepthBandWhereverTheCameraIs`).
 - **Far cascades draw coarser casters** (`shadows.cascades.farDetail`, 8): the farthest cascade's casters at that many
   of its texels of error, those between geometrically from `shadows.casterDetail` at the nearest: cluster hierarchies
   at their coarse levels where texels are coarse, so the far cascade's lists fit (`aForestInTheFarCascadeFitsItsLists`).
@@ -2326,7 +2331,7 @@ both stay.
 
 **The probe volume** (`ProbeVolume`, a frame-level request; `ProbeVolumeLighting`, per view, `render.gi` = `off` or
 `probes`, its tunables `ProbeVolumeLighting.Probes` under `render.gi.probes.*`; DDGI: Majercik et al. 2019 and 2021).
-`cascades` (3) grids of `probes` x `probesUp` x
+`cascades` (5; 3 before the fade below) grids of `probes` x `probesUp` x
 `probes` (16 x 8 x 16) probes, the first `spacing` (1 m) apart, each next twice as far, around the anchor view's
 camera; they scroll with it (a slot is a probe's world grid coordinate modulo the grid: only probes coming into the
 grid start anew), half a spacing off the grid's planes. Per probe, in octahedral atlases: irradiance (6 x 6 texels and
@@ -2360,6 +2365,19 @@ mean square (14 x 14 and a border), so a shaded point ignores probes that cannot
   visibility dims the environment's reflections (specular occlusion at the probes' scale), which is what keeps a
   closed room dark. One look-up gives both. Views given equal volumes share one update (a headset's eyes, D7:
   `twoViewsShareOneVolume`).
+- **No edge where the volume ends:** past the box the last cascade's probes enclose wherever the camera is (its grid
+  less a spacing each way), its light fades into the environment's over `fade` (1) of that box's half extents, its
+  edge probes' light carried past the grid. Before (`fade` 0) the environment lit every point from the grid's edge: in
+  a sunless street or a valley in a mountain's shadow the probes' light is darker than the open sky's, so a straight
+  line of light crossed the ground where the grid ended, and moved with the camera (by the last cascade's spacing, 4 m)
+  through the world: the showcase's dawn street, 32 m ahead, the same in its ray-traced shadows' reference and gone
+  without global illumination. Five cascades by default (three before) put the fade's start 104 m out horizontally
+  and 40 m vertically (26 m and 10 m with three: a camera 20 m over a valley floor saw the floor lit by the sky alone),
+  past what a street shows; the dawn street's far houses then take the probes' shade as with six. The two cascades
+  added cost their probes' updates (two thirds more probes, at the same `budget`). The fade follows the camera
+  continuously (`theLastCascadeFadesIntoTheEnvironmentContinuouslyInTheCamerasPosition`: under a roof a point of the
+  floor past the grid flipped between dark and lit as the camera moved 20 cm across a snap; faded, it changes by under
+  an eighth).
 - **Lag (design D3), no latency:** a probe's history holds `maxFrames` (30) updates at most.
   Probes within `instanceMargin` (3) times a changed instance's bounding sphere (moved, changed or skinned: D91's
   records compared on the GPU with the frame before's) or `lightMargin` (2) times a changed light's reach restart at

@@ -81,6 +81,9 @@ public final class ProbeVolumeLighting implements Technique {
             min = 0, max = 2, formerly = "render.gi.volume.viewBias") float viewBias,
         @Tunable(value = "of a probe cascade from its edge, the part over which it blends into the next",
             min = 0.01, max = 0.5, formerly = "render.gi.volume.blend") float blend,
+        @Tunable(value = "how far past its grid the last probe cascade's light carries, fading into the environment, of "
+            + "the grid's half extent (0: a step to the environment where the grid ends)", min = 0, max = 4)
+        float fade,
         @Tunable(value = "the longest distance a probe's distance moments hold, of its spacing", min = 0.5, max = 100,
             formerly = "render.gi.volume.depthRange") float depthRange,
         @Tunable(value = "probes move off surfaces near them",
@@ -119,8 +122,8 @@ public final class ProbeVolumeLighting implements Technique {
 
     /** The ray-traced probe volume (devices with ray tracing; elsewhere none). */
     public static final TechniqueKind<Probes, ProbeVolumeLighting, Technique> PROBES = TechniqueKind.of(SLOT, "probes",
-        new Probes(3, 16, 8, 1f, 128, 32, 0.5f, 4, 0.25f, 0.25f, 0.2f, 1.5f, true, true, 30, true, 4f, 0.01f, true, 2f,
-            2, 3f, 8, false, 2f, 8, 1024, ProbeVolume.EmitterSelection.NEARBY),
+        new Probes(5, 16, 8, 1f, 128, 32, 0.5f, 4, 0.25f, 0.25f, 0.2f, 1f, 1.5f, true, true, 30, true, 4f, 0.01f, true,
+            2f, 2, 3f, 8, false, 2f, 8, 1024, ProbeVolume.EmitterSelection.NEARBY),
         "the ray-traced probe volume", (lighting, config) -> lighting.new Engine(false));
 
     /**

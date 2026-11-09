@@ -886,6 +886,15 @@ over frames.
 
 ## Tests and measurements
 
+**A light that moves with the camera is not always a shadow.** The showcase's dawn street showed a straight line of
+light across the ground, about 32 m ahead, moving with the camera; it was the probe volume's last grid ending (the
+environment unoccluded past it), not the cascades: the same in a render with ray-traced shadows, gone with global
+illumination off.
+- Proof: renders of the dawn segment with `showcase.sunShadows=rayTraced` and `showcase.skip=gi`;
+  `ProbeVolumeTest.theLastCascadeFadesIntoTheEnvironmentContinuouslyInTheCamerasPosition`.
+- Rule: before changing shadows for an edge in the light, render the ray-traced reference and the frame without global
+  illumination; an edge in both but the latter is the light's other half.
+
 **Two runs render the Cornell box's corners differently.** `GiDeterminismTest` first required bit-exact images where
 two plain runs agreed and only then allowed a spread. On the RX 9070 XT two plain runs differ in the Cornell box (one or
 two raster pixels' alpha by one unit in the last place, 1.0 against 0.99999994; probe and cascade images in 231 to 664

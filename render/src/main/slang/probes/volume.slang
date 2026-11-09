@@ -21,7 +21,8 @@ public static const uint PROBE_VALID = 2;
  * In a volume's flags: each cascade lights the points within a box around the anchor camera (`anchor`, `inner`) that
  * its probes enclose wherever the camera is, and blends into the next over a band at that box's edges, the last into
  * the environment: a point's light follows the camera continuously, never the steps its grids snap by (radiance
- * cascades). Otherwise a cascade blends from its grid's edges and the last lights every point within its grid.
+ * cascades). Otherwise a cascade blends from its grid's edges and the last lights every point within its grid
+ * and past the box it encloses wherever the camera is fades into the environment over `fade` of that box.
  */
 public static const uint PROBE_VOLUME_ANCHORED = 1;
 
@@ -57,7 +58,9 @@ public struct ProbeVolumeData
     public float viewBias;         // and towards the viewer
     public float blend;            // of a cascade's probes from its edge: where it blends into the next one
     public float maxDistance;      // the longest distance moments hold
-    public uint pad;
+    public float fade;             // not anchored: past the box its probes enclose wherever the camera is (`anchor`),
+                                   // how far the last cascade's light carries, fading into the environment, of that
+                                   // box's half extents (0: none, the environment from its grid's edges)
     public ProbeState* states;     // per probe: its relocation, its state
     public float4 cascade[7];      // the cascade's lowest probe relative to the origin (xyz), its spacing (w)
     public int4 base[7];           // that probe's world grid coordinate (xyz): slots are coordinates modulo its probes
@@ -66,7 +69,7 @@ public struct ProbeVolumeData
                                    // state is its tile's, tiles.x a row
     public uint2 tiles;            // the atlases' size in tiles
     public uint2 pad1;
-    public float4 anchor;          // PROBE_VOLUME_ANCHORED: the anchor camera relative to the origin (xyz)
+    public float4 anchor;          // the anchor camera relative to the origin (xyz)
     public float4 inner[7];        // PROBE_VOLUME_ANCHORED: the cascade's half extents around the anchor that its
                                    // probes enclose wherever it is (xyz); the band at their edges where it blends (w)
 };
@@ -112,8 +115,8 @@ public int3 wrapProbe(int3 a, int3 n)
  * whether it can see the point (the bound of Chebyshev on its distance moments), blended between cascades near their
  * edges; and in `sky` the fraction of the environment visible around `skyDirection` (the probes' rays that met
  * nothing), for specular occlusion. `coverage`: the share of the point's light the volume gives, the environment the
- * rest (0 outside every cascade; with PROBE_VOLUME_ANCHORED below 1 where the last cascade blends into the
- * environment).
+ * rest (0 outside every cascade and past the last one's fade; below 1 where the last cascade blends into the
+ * environment: with PROBE_VOLUME_ANCHORED at its box's edges, otherwise past that box by `fade`).
  */
 public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toViewer, float3 skyDirection,
     out float sky, out float coverage)
@@ -135,6 +138,7 @@ public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toV
     float3 sum = 0;
     float skySum = 0;
     float remaining = 1; // of the point's light not yet taken from a finer cascade
+    bool beyond = false; // where the last cascade fades into the environment (not anchored)
     for (uint c = 0; c < cascades && remaining > 1.0e-4; c++)
     {
         float4 cascade = volume[0].cascade[c];
@@ -158,12 +162,32 @@ public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toV
             share = saturate(edge / max(inner.w, 1.0e-6));
             local = clamp(local, float3(0), last); // within by construction: rounding at its faces alone
         }
-        else
+        else if (c + 1 == cascades && volume[0].fade > 0)
         {
-            if (any(local < 0) || any(local > last))
+            // The last cascade fades into the environment past the box its probes enclose wherever the camera is,
+            // over `fade` of that box's half extents: continuous in the camera's position (its grid snaps by its
+            // spacing), its edge's light carried past the grid, no step where the grid ends
+            float3 extent = max(last * 0.5 - 1, 0.5) * spacing;
+            float3 past = max(abs(biased - anchor) - extent, 0) / extent;
+            share = 1 - max(past.x, max(past.y, past.z)) / volume[0].fade;
+            if (share <= 0)
             {
                 continue;
             }
+            share = share * share * (3 - 2 * share);
+            if (any(local < 0) || any(local > last))
+            {
+                local = clamp(local, float3(0), last);
+                biased = cascade.xyz + local * spacing; // the probes see the grid's edge, not the point past it
+            }
+            beyond = share < 1;
+        }
+        else if (any(local < 0) || any(local > last))
+        {
+            continue;
+        }
+        else
+        {
             // Near its edge a cascade hands over to the next coarser one
             float3 edge = min(local, last - local);
             share = c + 1 < cascades
@@ -232,7 +256,7 @@ public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toV
     {
         return 0;
     }
-    coverage = anchored ? taken : 1;
+    coverage = anchored || beyond ? taken : 1;
     sky = skySum / taken;
     return sum / taken;
 }
