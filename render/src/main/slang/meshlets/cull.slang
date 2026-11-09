@@ -84,6 +84,7 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         if (WaveIsFirstLane())
         {
             InterlockedAdd(lists.visibleCount[visibleCountWord(b, late ? 1 : 0)], count, base);
+            InterlockedMax(lists.visibleCount[3 * BINS + b], base + count); // the most ever wanted, kept
         }
         uint index = WaveReadLaneFirst(base) + WavePrefixCountBits(mine);
         // Over the bin's capacity: dropped, and counted. Indices are reserved only for those placed: a range reserved
@@ -96,6 +97,7 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         {
             InterlockedAdd(lists.drawCommand[6 * b + 5], total, firstBase); // indices reserved so far in the bin
             InterlockedMax(lists.visibleCount[2 * BINS + b], firstBase + total); // the most any phase wanted, for the CPU
+            InterlockedMax(lists.visibleCount[4 * BINS + b], firstBase + total); // and ever, kept
         }
         uint first = WaveReadLaneFirst(firstBase) + WavePrefixSum(wanted);
         // Meshlets past the index capacity come last (first grows with the lane and the wave): no gaps.

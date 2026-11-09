@@ -8,7 +8,6 @@ import static org.lwjgl.vulkan.EXTMeshShader.VK_PIPELINE_STAGE_MESH_SHADER_BIT_E
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_INDEX_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
@@ -479,7 +478,8 @@ final class CullPasses implements AutoCloseable {
                     memPutInt(draws + 24L * bin + 8, (int) (indices + (bin - 1) * binIndices)); // the bin's first index
                 }
                 if (early != null) {
-                    Commands.fillBuffer(commands, v.drawCount().handle(), 0, VK_WHOLE_SIZE, 0); // counts, indices wanted
+                    // counts, indices wanted; the most ever wanted after them stays
+                    Commands.fillBuffer(commands, v.drawCount().handle(), 0, 12L * BINS, 0);
                 }
                 v.clearGrownVisibility(commands);
                 if (v.splitCategories() > 0) { // the split lists' counts and cursors: laid out anew from them

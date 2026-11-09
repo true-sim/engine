@@ -204,6 +204,11 @@ past the 4,194,304 `ViewOptions` accepts: the resize past that would have thrown
 - Rule: the renderer grows every view's lists (`RenderView.grow`, to `render.meshlets.viewDrawLimit` and
   `viewTriangleLimit`), but those an owner grows itself (`grownByOwner`: the atlas, which draws its tiles again); a view
   at the limit is counted (`viewsAtLimit`) and logged once.
+- Also: growing from the counts `overflowed()` reads worked on the RX 9070 XT and never grew on the local lavapipe
+  (256 after seven frames): a frame end reads them after the next frame was submitted, and that frame's cull resets
+  them first. Views now grow from words the culls never reset (per bin the most meshlets and indices a phase ever
+  wanted, after the counts). Rule: what the CPU reads as frames end to size buffers is a running maximum the GPU keeps,
+  never a per-frame count the next frame resets.
 
 **A switched-off modifier that provides a new version of a key leaves its consumers an unwritten image.**
 `technique.when(setting)` skips the technique's passes. A modifier writing its key in place then leaves the image as

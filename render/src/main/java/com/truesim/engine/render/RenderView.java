@@ -122,7 +122,9 @@ public final class RenderView implements AutoCloseable {
         expandCommand = GpuBuffer.deviceLocal(device, 16L * MeshletRenderer.BINS, commandUsage);
         drawCommand = GpuBuffer.deviceLocal(device, 24L * MeshletRenderer.BINS, commandUsage);
         // Per bin the early and late counts, then per bin the most indices a phase wanted.
-        drawCount = GpuBuffer.hostVisible(device, 12L * MeshletRenderer.BINS, commandUsage); // common.slang's
+        // Then per bin the most meshlets and indices a phase ever wanted, never reset by culls (grow reads them: the
+        // counts above are reset as the next frame culls, which may run while a frame end reads them).
+        drawCount = GpuBuffer.hostVisible(device, 20L * MeshletRenderer.BINS, commandUsage); // common.slang's
         // Read before the first cull (overflowed(), wanted...()): new memory holds anything, a freed buffer's on
         // lavapipe; nothing wanted yet.
         drawCount.memory().fill((byte) 0);
@@ -518,7 +520,7 @@ public final class RenderView implements AutoCloseable {
      */
     @AllowAllocation("growing, rarely")
     public int grow(int drawLimit, int triangleLimit) {
-        if (!overflowed()) {
+        if (!wantedMore()) {
             return FITTED;
         }
         int draws = options.draws();
@@ -531,10 +533,10 @@ public final class RenderView implements AutoCloseable {
         int newTriangles = triangles;
         int newBinTriangles = binTriangles;
         if (frameIndices != null) {
-            newTriangles = grown(triangles, wantedTriangles(0), triangleLimit);
+            newTriangles = grown(triangles, mostTriangles(0), triangleLimit);
             long most = 0;
             for (int bin = 1; bin < MeshletRenderer.BINS; bin++) {
-                most = Math.max(most, wantedTriangles(bin));
+                most = Math.max(most, mostTriangles(bin));
             }
             newBinTriangles = grown(binTriangles, most, triangleLimit);
             // The index buffer's three words per triangle within an int: the other bins give way first.
@@ -551,14 +553,31 @@ public final class RenderView implements AutoCloseable {
         return GROWN;
     }
 
-    /** The most meshlets a phase of bins {@code from} to {@code to - 1} wanted in the last finished frame. */
+    /** The most meshlets a phase of bins {@code from} to {@code to - 1} ever wanted. */
     private long mostListed(int from, int to) {
         long most = 0;
         for (int bin = from; bin < to; bin++) {
-            most = Math.max(most, Integer.toUnsignedLong(drawCount.memory().get(U32, 8L * bin)));
-            most = Math.max(most, Integer.toUnsignedLong(drawCount.memory().get(U32, 8L * bin + 4)));
+            most = Math.max(most, Integer.toUnsignedLong(drawCount.memory().get(U32, 4L * (3 * MeshletRenderer.BINS
+                + bin))));
         }
         return most;
+    }
+
+    /** The most triangles a phase of raster bin {@code bin} ever wanted (the indexed path). */
+    private long mostTriangles(int bin) {
+        return Integer.toUnsignedLong(drawCount.memory().get(U32, 4L * (4 * MeshletRenderer.BINS + bin))) / 3;
+    }
+
+    /** Whether a phase ever wanted more than the lists hold now ({@link #grow}). */
+    private boolean wantedMore() {
+        for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
+            long draws = bin == 0 ? options.draws() : options.binDraws();
+            long triangles = bin == 0 ? options.triangles() : options.binTriangles();
+            if (mostListed(bin, bin + 1) > draws || frameIndices != null && mostTriangles(bin) > triangles) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Room {@code room} grown for {@code wanted} as {@link #grow} does, at most {@code limit}; unchanged if enough. */
